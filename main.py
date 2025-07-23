@@ -105,8 +105,13 @@ def calculate_indicators(df):
     period52_high = df["high"].rolling(window=52).max()
     period52_low = df["low"].rolling(window=52).min()
     df["senkou_b"] = ((period52_high + period52_low) / 2).shift(26)
-    df["ichimoku_bull"] = df["close"] > df["senkou_a"] and df["close"] > df["senkou_b"]
+
+    # ✅ Fix: Use & instead of and
+    df["ichimoku_bull"] = (df["close"] > df["senkou_a"]) & (df["close"] > df["senkou_b"])
+
+    # Twist detection
     df["twist"] = (df["senkou_a"].shift(1) < df["senkou_b"].shift(1)) & (df["senkou_a"] > df["senkou_b"])
+
     return df
 
 def detect_trade(df):
@@ -199,7 +204,9 @@ async def send_eth_status_report(channel):
 @tasks.loop(minutes=1)
 async def scan_coins():
     channel = bot.get_channel(CHANNEL_ID)
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    ...
+
 
     for symbol in KRAKEN_PAIRS:
         df = fetch_ohlc(symbol)
@@ -256,8 +263,10 @@ async def eth_status_report():
 
 @tasks.loop(minutes=1)
 async def reset_leaderboard_daily():
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc)
     if now.hour == 0 and now.minute == 0:
+        ...
+
         channel = bot.get_channel(CHANNEL_ID)
 
         # Find top performer
