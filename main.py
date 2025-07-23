@@ -27,9 +27,10 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='?', intents=intents)
 
 CHANNEL_ID = 1395604673737789460
+STATUS_CHANNEL_ID = 1397320600359272469  # 30-min ETH report channel
 
 KRAKEN_PAIRS = {
-    "BTC": "XXBTZUSD", "XRP": "XXRPZUSD", "SOL": "SOLUSD",
+    "BTC": "XXBTZUSD", "ETH": "XETHZUSD", "XRP": "XXRPZUSD", "SOL": "SOLUSD",
     "DOGE": "DOGEUSD", "ADA": "ADAUSD", "SUI": "SUIUSD",
     "HBAR": "HBARUSD", "AVAX": "AVAXUSD"
 }
@@ -141,6 +142,23 @@ async def scan_coins():
                 last_alerts[key] = trade['entry']
                 await channel.send(embed=format_embed(symbol, trade))
 
+@tasks.loop(minutes=30)
+async def eth_status_report():
+    channel = bot.get_channel(STATUS_CHANNEL_ID)
+    df = fetch_ohlc("ETH")
+    if df is None:
+        await channel.send("❌ ETH data fetch failed.")
+        return
+
+    trade = detect_trade(df)
+    if trade:
+        embed = format_embed("ETH", trade)
+        embed.title = "📊 30-Min ETH Status Report"
+        await channel.send(embed=embed)
+    else:
+        await channel.send("ℹ️ ETH has no valid setup right now.")
+
+
 # === Commands ===
 @bot.command()
 async def scan(ctx):
@@ -175,6 +193,7 @@ async def confidence(ctx, symbol: str):
 async def on_ready():
     print(f"✅ {bot.user} is online.")
     scan_coins.start()
+    eth_status_report.start()
 
 if TOKEN:
     bot.run(TOKEN)
