@@ -11,6 +11,7 @@ from ta.trend import ema_indicator
 from ta.momentum import rsi, stochrsi, tsi
 from ta.volatility import average_true_range
 from ta.volume import on_balance_volume
+import datetime
 import pytz
 CENTRAL_TZ = pytz.timezone("US/Central")
 
@@ -118,14 +119,28 @@ def detect_trade(df):
 
 def format_embed(symbol, trade):
     color = discord.Color.green() if "Long" in trade["type"] else discord.Color.red()
-    embed = discord.Embed(title=f"{symbol} {trade['type']} Alert", color=color)
+    
+    # Get Central Time for title
+    central_time = datetime.datetime.now(CENTRAL_TZ).strftime("%Y-%m-%d %I:%M %p %Z")
+    
+    embed = discord.Embed(
+        title=f"{symbol} {trade['type']} Alert – {central_time}",
+        color=color
+    )
+
     embed.add_field(name="💥 Entry", value=f"${trade['entry']:.2f}", inline=True)
     embed.add_field(name="🛑 Stop", value=f"${trade['stop']:.2f}", inline=True)
     embed.add_field(name="🎯 TP1", value=f"${trade['tp1']:.2f}", inline=True)
     embed.add_field(name="🎯 TP2", value=f"${trade['tp2']:.2f}", inline=True)
+
     rr = abs((trade['tp1'] - trade['entry']) / (trade['entry'] - trade['stop']))
     embed.add_field(name="⚖️ Risk/Reward", value=f"{rr:.2f}x", inline=False)
     embed.add_field(name="📊 Confidence", value=f"{trade['confidence']}/6", inline=False)
+
+    # UTC timestamp in footer
+    utc_time = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    embed.set_footer(text=f"Alert generated at {utc_time}")
+
     return embed
 
 # === Auto Scan Loop ===
