@@ -11,6 +11,8 @@ from ta.trend import ema_indicator
 from ta.momentum import rsi, stochrsi, tsi
 from ta.volatility import average_true_range
 from ta.volume import on_balance_volume
+import pytz
+CENTRAL_TZ = pytz.timezone("US/Central")
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
@@ -24,7 +26,7 @@ threading.Thread(target=lambda: app.run(host="0.0.0.0", port=8000)).start()
 
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix='?', intents=intents)
+bot = commands.Bot(command_prefix='!', intents=intents)
 
 CHANNEL_ID = 1395604673737789460
 STATUS_CHANNEL_ID = 1397320600359272469  # 30-min ETH report channel
@@ -144,19 +146,45 @@ async def scan_coins():
 
 @tasks.loop(minutes=30)
 async def eth_status_report():
-    channel = bot.get_channel(STATUS_CHANNEL_ID)
+    channel = bot.get_channel(1397320600359272469)
     df = fetch_ohlc("ETH")
     if df is None:
         await channel.send("❌ ETH data fetch failed.")
         return
 
-    trade = detect_trade(df)
-    if trade:
-        embed = format_embed("ETH", trade)
-        embed.title = "📊 30-Min ETH Status Report"
-        await channel.send(embed=embed)
-    else:
-        await channel.send("ℹ️ ETH has no valid setup right now.")
+    latest = df.iloc[-1]
+    previous = df.iloc[-2]
+
+    # Price change
+    price_now = latest['close']
+    price_prev = previous['close']
+    pct_change = ((price_now - price_prev) / price_prev) * 100
+    direction = "⬆️" if pct_change >= 0 else "⬇️"
+    twist = "⚠️ Twist detected" if df['ichimoku_bullish'].iloc[-1] != df['ichimoku_bullish'].iloc[-2] else "No twist"
+
+    embed = discord.Embed(
+        title=f"📊 ETH Strategy Status {direction} ({pct_change:+.2f}%) at {pd.Timestamp.now(CENTRAL_TZ).strftime('%Y-%m-%d %I:%M %p %Z')
+}",
+        color=discord.Color.blue()
+    )
+
+    embed.add_field(name="💰 Price", value=f"${price_now:,.2f}", inline=True)
+    embed.add_field(name="📈 RSI", value=f"{latest['rsi']:.2f}", inline=True)
+    embed.add_field(name="📉 MACD", value=f"{latest['macd']:.4f} | Signal: {latest['signal']:.4f}", inline=True)
+    embed.add_field(name="📊 Stoch RSI", value=f"{latest['stochrsi']:.2f}", inline=True)
+    embed.add_field(name="📊 EMA50", value=f"${latest['ema50']:.2f}", inline=True)
+
+    # OBV trend
+    obv_trend = "📈 Bullish" if latest['obv'] > df['obv'].rolling(5).mean().iloc[-1] else "📉 Bearish"
+    embed.add_field(name="📶 OBV", value=obv_trend, inline=True)
+
+    # Signal states
+    embed.add_field(name="🧠 Supertrend", value="🟢 Bullish" if latest['supertrend_bull'] else "🔴 Bearish", inline=True)
+    embed.add_field(name="🐊 Alligator", value="🟢 Bullish" if latest['alligator_bullish'] else "🔴 Bearish", inline=True)
+    embed.add_field(name="☁️ Ichimoku", value="🟢 Bullish" if latest['ichimoku_bullish'] else "🔴 Bearish", inline=True)
+    embed.add_field(name="🌪️ Twist Alert", value=twist, inline=True)
+
+    await channel.send(embed=embed)
 
 
 # === Commands ===
