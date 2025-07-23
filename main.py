@@ -242,8 +242,8 @@ def format_eth_status_embed(latest):
     title = f"📊 ETH 30-Minute Status Report – {header_ts}"
     embed = discord.Embed(title=title, color=color)
     embed.add_field(name="💵 Price", value=f"${latest['close']:.2f}", inline=True)
-    embed.add_field(name="📉 RSI", value=f\"{latest['rsi']:.2f} ({rsi_state})\", inline=True)
-    embed.add_field(name="📏 ATR", value=f\"{latest['atr']:.2f}\", inline=True)
+    embed.add_field(name="📉 RSI", value=f"{latest['rsi']:.2f} ({rsi_state})", inline=True)
+    embed.add_field(name="📏 ATR", value=f"{latest['atr']:.2f}", inline=True)
     embed.add_field(name="📈 Trend", value=trend, inline=True)
     embed.add_field(name="🧠 Supertrend", value="🟢 Bullish" if latest["supertrend"] else "🔴 Bearish", inline=True)
     embed.add_field(name="🐊 Alligator", value="🟢 Bullish" if latest["alligator"] else "🔴 Bearish", inline=True)
