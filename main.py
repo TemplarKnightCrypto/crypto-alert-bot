@@ -40,15 +40,40 @@ KRAKEN_PAIRS = {
 
 def fetch_ohlc(symbol, interval=5):
     try:
-        url = f"https://api.kraken.com/0/public/OHLC?pair={KRAKEN_PAIRS[symbol]}&interval={interval}"
-        r = requests.get(url)
-        raw = r.json()['result']
-        pair_key = next(k for k in raw if k != 'last')
-        data = pd.DataFrame(raw[pair_key], columns=["time","open","high","low","close","vwap","volume","count"])
-        data[['open','high','low','close','volume']] = data[['open','high','low','close','volume']].astype(float)
-        return apply_indicators(data)
+        pair = KRAKEN_PAIRS.get(symbol)
+        if not pair:
+            print(f"[ERROR] No Kraken pair for {symbol}")
+            return None
+
+        url = f"https://api.kraken.com/0/public/OHLC?pair={pair}&interval={interval}"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=10)
+
+        if response.status_code != 200:
+            print(f"[ERROR] {symbol} fetch failed: HTTP {response.status_code} - {response.text}")
+            return None
+
+        raw = response.json()
+        if 'error' in raw and raw['error']:
+            print(f"[ERROR] Kraken API error for {symbol}: {raw['error']}")
+            return None
+
+        result = raw.get('result', {})
+        pair_key = next((k for k in result if k != 'last'), None)
+        if not pair_key or pair_key not in result:
+            print(f"[ERROR] No data returned for {symbol}. Keys: {list(result.keys())}")
+            return None
+
+        df = pd.DataFrame(result[pair_key], columns=[
+            "time", "open", "high", "low", "close", "vwap", "volume", "count"
+        ])
+        df[["open", "high", "low", "close", "volume"]] = df[["open", "high", "low", "close", "volume"]].astype(float)
+        df["time"] = pd.to_datetime(df["time"], unit="s")
+        df.set_index("time", inplace=True)
+
+        return apply_indicators(df)
     except Exception as e:
-        print(f"[ERROR] OHLC fetch for {symbol}: {e}")
+        print(f"[ERROR] Exception in fetch_ohlc({symbol}): {e}")
         return None
 
 # [apply_indicators and detect_trade unchanged from previous step]
@@ -160,6 +185,19 @@ async def ethreport(ctx):
         await ctx.send("❌ Please use this command in the ETH report channel.")
         return
     await send_eth_status_report(ctx.channel)
+
+@bot.command()
+async def testfetch(ctx, symbol: str = "ETH"):
+    symbol = symbol.upper()
+    if symbol not in KRAKEN_PAIRS:
+        await ctx.send("❌ Unsupported symbol.")
+        return
+
+    df = fetch_ohlc(symbol)
+    if df is not None:
+        await ctx.send(f"✅ Successfully fetched {symbol} OHLC data.")
+    else:
+        await ctx.send(f"❌ Failed to fetch {symbol} OHLC data.")
 
 @bot.event
 async def on_ready():
