@@ -13,24 +13,27 @@ from ta.volatility import average_true_range
 from ta.volume import on_balance_volume
 import datetime
 import pytz
+
 CENTRAL_TZ = pytz.timezone("US/Central")
 
+# Load environment and set tokens
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
 
+# Flask server for uptime
 app = Flask(__name__)
 @app.route("/")
 def home():
     return "Bot is live!"
-
 threading.Thread(target=lambda: app.run(host="0.0.0.0", port=8000)).start()
 
+# Discord setup
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-CHANNEL_ID = 1395604673737789460
-STATUS_CHANNEL_ID = 1397320600359272469  # 30-min ETH report channel
+CHANNEL_ID = 1395604673737789460           # trade alerts
+STATUS_CHANNEL_ID = 1397320600359272469    # ETH report channel
 
 KRAKEN_PAIRS = {
     "BTC": "XXBTZUSD", "ETH": "XETHZUSD", "XRP": "XXRPZUSD", "SOL": "SOLUSD",
@@ -119,31 +122,69 @@ def detect_trade(df):
 
 def format_embed(symbol, trade):
     color = discord.Color.green() if "Long" in trade["type"] else discord.Color.red()
-    
-    # Get Central Time for title
     central_time = datetime.datetime.now(CENTRAL_TZ).strftime("%Y-%m-%d %I:%M %p %Z")
-    
-    embed = discord.Embed(
-        title=f"{symbol} {trade['type']} Alert – {central_time}",
-        color=color
-    )
-
+    embed = discord.Embed(title=f"{symbol} {trade['type']} Alert – {central_time}", color=color)
     embed.add_field(name="💥 Entry", value=f"${trade['entry']:.2f}", inline=True)
     embed.add_field(name="🛑 Stop", value=f"${trade['stop']:.2f}", inline=True)
     embed.add_field(name="🎯 TP1", value=f"${trade['tp1']:.2f}", inline=True)
     embed.add_field(name="🎯 TP2", value=f"${trade['tp2']:.2f}", inline=True)
-
     rr = abs((trade['tp1'] - trade['entry']) / (trade['entry'] - trade['stop']))
     embed.add_field(name="⚖️ Risk/Reward", value=f"{rr:.2f}x", inline=False)
     embed.add_field(name="📊 Confidence", value=f"{trade['confidence']}/6", inline=False)
-
-    # UTC timestamp in footer
     utc_time = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     embed.set_footer(text=f"Alert generated at {utc_time}")
-
     return embed
 
-# === Auto Scan Loop ===
+# === ETH Status Report (Shared Logic) ===
+async def send_eth_status_report(channel):
+    df = fetch_ohlc("ETH")
+    if df is None:
+        await channel.send("❌ ETH data fetch failed.")
+        return
+
+    latest = df.iloc[-1]
+    previous = df.iloc[-2]
+    price_now = latest['close']
+    price_prev = previous['close']
+    pct_change = ((price_now - price_prev) / price_prev) * 100
+    direction = "⬆️" if pct_change >= 0 else "⬇️"
+    twist = "⚠️ Twist detected" if df['ichimoku_bullish'].iloc[-1] != df['ichimoku_bullish'].iloc[-2] else "No twist"
+
+    supertrend = "🟢 Bullish" if latest['supertrend_bull'] else "🔴 Bearish"
+    alligator = "🟢 Bullish" if latest['alligator_bullish'] else "🔴 Bearish"
+    ichimoku = "🟢 Bullish" if latest['ichimoku_bullish'] else "🔴 Bearish"
+    obv_trend = "📈 Bullish" if latest['obv'] > df['obv'].rolling(5).mean().iloc[-1] else "📉 Bearish"
+
+    signal_count = sum([
+        latest['supertrend_bull'],
+        latest['alligator_bullish'],
+        latest['ichimoku_bullish']
+    ])
+    bias = "🟢 Bullish" if signal_count >= 2 else "🔴 Bearish"
+
+    embed = discord.Embed(
+        title=f"📊 ETH Strategy Status {direction} ({pct_change:+.2f}%) at {pd.Timestamp.now(CENTRAL_TZ).strftime('%Y-%m-%d %I:%M %p %Z')}",
+        color=discord.Color.blue()
+    )
+
+    report = (
+        f"💰 **Price:** ${price_now:,.2f}\n"
+        f"📈 **RSI:** {latest['rsi']:.2f}\n"
+        f"📉 **MACD:** {latest['macd']:.4f} | Signal: {latest['signal']:.4f}\n"
+        f"📊 **Stoch RSI:** {latest['stochrsi']:.2f}\n"
+        f"📊 **EMA50:** ${latest['ema50']:.2f}\n"
+        f"📶 **OBV:** {obv_trend}\n\n"
+        f"🧠 **Supertrend:** {supertrend}\n"
+        f"🐊 **Alligator:** {alligator}\n"
+        f"☁️ **Ichimoku:** {ichimoku}\n"
+        f"🌪️ **Twist Alert:** {twist}\n\n"
+        f"📈 **Market Bias:** {bias}"
+    )
+
+    embed.add_field(name="", value=report, inline=False)
+    await channel.send(embed=embed)
+
+# === Loops ===
 last_alerts = {}
 
 @tasks.loop(minutes=1)
@@ -161,46 +202,8 @@ async def scan_coins():
 
 @tasks.loop(minutes=30)
 async def eth_status_report():
-    channel = bot.get_channel(1397320600359272469)
-    df = fetch_ohlc("ETH")
-    if df is None:
-        await channel.send("❌ ETH data fetch failed.")
-        return
-
-    latest = df.iloc[-1]
-    previous = df.iloc[-2]
-
-    # Price change
-    price_now = latest['close']
-    price_prev = previous['close']
-    pct_change = ((price_now - price_prev) / price_prev) * 100
-    direction = "⬆️" if pct_change >= 0 else "⬇️"
-    twist = "⚠️ Twist detected" if df['ichimoku_bullish'].iloc[-1] != df['ichimoku_bullish'].iloc[-2] else "No twist"
-
-    embed = discord.Embed(
-        title=f"📊 ETH Strategy Status {direction} ({pct_change:+.2f}%) at {pd.Timestamp.now(CENTRAL_TZ).strftime('%Y-%m-%d %I:%M %p %Z')
-}",
-        color=discord.Color.blue()
-    )
-
-    embed.add_field(name="💰 Price", value=f"${price_now:,.2f}", inline=True)
-    embed.add_field(name="📈 RSI", value=f"{latest['rsi']:.2f}", inline=True)
-    embed.add_field(name="📉 MACD", value=f"{latest['macd']:.4f} | Signal: {latest['signal']:.4f}", inline=True)
-    embed.add_field(name="📊 Stoch RSI", value=f"{latest['stochrsi']:.2f}", inline=True)
-    embed.add_field(name="📊 EMA50", value=f"${latest['ema50']:.2f}", inline=True)
-
-    # OBV trend
-    obv_trend = "📈 Bullish" if latest['obv'] > df['obv'].rolling(5).mean().iloc[-1] else "📉 Bearish"
-    embed.add_field(name="📶 OBV", value=obv_trend, inline=True)
-
-    # Signal states
-    embed.add_field(name="🧠 Supertrend", value="🟢 Bullish" if latest['supertrend_bull'] else "🔴 Bearish", inline=True)
-    embed.add_field(name="🐊 Alligator", value="🟢 Bullish" if latest['alligator_bullish'] else "🔴 Bearish", inline=True)
-    embed.add_field(name="☁️ Ichimoku", value="🟢 Bullish" if latest['ichimoku_bullish'] else "🔴 Bearish", inline=True)
-    embed.add_field(name="🌪️ Twist Alert", value=twist, inline=True)
-
-    await channel.send(embed=embed)
-
+    channel = bot.get_channel(STATUS_CHANNEL_ID)
+    await send_eth_status_report(channel)
 
 # === Commands ===
 @bot.command()
@@ -232,15 +235,24 @@ async def confidence(ctx, symbol: str):
     else:
         await ctx.send(f"❌ Could not fetch data for {symbol}.")
 
+@bot.command()
+async def ethreport(ctx):
+    """Send an on-demand ETH strategy status report."""
+    if ctx.channel.id != STATUS_CHANNEL_ID:
+        await ctx.send("❌ Please use this command in the ETH report channel.")
+        return
+    await send_eth_status_report(ctx.channel)
+
+# === Ready Event ===
 @bot.event
 async def on_ready():
     print(f"✅ {bot.user} is online.")
     scan_coins.start()
     eth_status_report.start()
 
+# === Start Bot ===
 if TOKEN:
     bot.run(TOKEN)
 else:
     print("❌ TOKEN not found.")
-
 
