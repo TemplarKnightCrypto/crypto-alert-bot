@@ -1,7 +1,8 @@
-nextcord[no-voice]==2.5.0
+discord.py==2.3.2
 Flask
 python-dotenv
 requests
+
 
 
 
