@@ -4,10 +4,10 @@ import requests
 from flask import Flask
 from dotenv import load_dotenv
 
-from discord.ext import commands
 import discord
+from discord.ext import commands
 
-# === Load environment variables ===
+# === Load Environment Variables ===
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
 
@@ -22,12 +22,12 @@ def run_flask():
 
 threading.Thread(target=run_flask).start()
 
-# === Bot Setup ===
+# === Discord Bot Setup ===
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# === CoinGecko Coin IDs ===
+# === Supported Coins ===
 COIN_IDS = {
     "BTC": "bitcoin", "ETH": "ethereum", "XRP": "ripple",
     "BNB": "binancecoin", "SOL": "solana", "DOGE": "dogecoin",
@@ -35,7 +35,7 @@ COIN_IDS = {
     "AVAX": "avalanche-2", "PNIC": "phoenic-token"
 }
 
-# === Fetch coin price ===
+# === Price Fetching ===
 def fetch_price(symbol):
     coin_id = COIN_IDS.get(symbol.upper())
     if not coin_id:
@@ -49,7 +49,7 @@ def fetch_price(symbol):
         print(f"[ERROR] Failed to fetch {symbol}: {e}")
         return None
 
-# === Trade Message Generator ===
+# === Trade Strategy Message ===
 def generate_trade_message(symbol, price):
     if price is None:
         return "❌ Failed to fetch price."
@@ -96,13 +96,14 @@ def generate_trade_message(symbol, price):
 • TP2: ${breakout_stop}
 """
 
-# === Commands ===
+# === !trade Command ===
 @bot.command()
 async def trade(ctx, symbol: str = "ETH"):
     price = fetch_price(symbol)
     message = generate_trade_message(symbol, price)
     await ctx.send(message)
 
+# === !test Command ===
 @bot.command()
 async def test(ctx):
     await ctx.send("✅ Bot is online and responding!")
@@ -112,4 +113,3 @@ if TOKEN:
     bot.run(TOKEN)
 else:
     print("[FATAL] Discord bot TOKEN not found in environment variables.")
-
