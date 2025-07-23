@@ -1,7 +1,8 @@
-nextcord==2.5.0
+nextcord[no-voice]==2.5.0
 Flask
 python-dotenv
 requests
+
 
 
 
