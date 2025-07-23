@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 import discord
 from discord.ext import commands, tasks
 from ta.trend import ema_indicator, sma_indicator
-from ta.momentum import rsi, stochrsi, MACD
+from ta.momentum import rsi, stochrsi
 from ta.volatility import average_true_range
 from ta.volume import on_balance_volume
 import datetime
@@ -99,12 +99,13 @@ def calculate_indicators(df):
     df["rsi"] = rsi(df["close"], window=14)
     df["atr"] = average_true_range(df["high"], df["low"], df["close"], window=14)
     df["obv"] = on_balance_volume(df["close"], df["volume"])
-    
-    # INSERT THIS BLOCK RIGHT HERE ⬇️
-    macd = MACD(close=df["close"])
-    df["macd"] = macd.macd()
-    df["macd_signal"] = macd.macd_signal()
-    df["macd_hist"] = macd.macd_diff()
+
+    # ✅ Manually calculate MACD and Histogram (INSIDE the function)
+    ema_12 = df["close"].ewm(span=12, adjust=False).mean()
+    ema_26 = df["close"].ewm(span=26, adjust=False).mean()
+    df["macd"] = ema_12 - ema_26
+    df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
+    df["macd_hist"] = df["macd"] - df["macd_signal"]
 
     # StochRSI
     df["stoch_rsi"] = stochrsi(df["close"])
