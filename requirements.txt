@@ -1,11 +1,9 @@
-discord.py==2.3.2
-flask
-pytz
-requests
+nextcord==2.5.0
+Flask
 python-dotenv
-pandas
-numpy
-ta
+requests
+
+
 
 
 
