@@ -7,12 +7,13 @@ from flask import Flask
 from dotenv import load_dotenv
 import discord
 from discord.ext import commands, tasks
-from ta.trend import ema_indicator, sma_indicator
-from ta.momentum import rsi, stochrsi, macd_diff
+from ta.trend import ema_indicator, sma_indicator, MACDIndicator
+from ta.momentum import rsi, stochrsi
 from ta.volatility import average_true_range
 from ta.volume import on_balance_volume
 import datetime
 import pytz
+
 
 # ==== TIMEZONES ====
 CENTRAL_TZ = pytz.timezone("US/Central")
@@ -98,9 +99,12 @@ def calculate_indicators(df):
     df["rsi"] = rsi(df["close"], window=14)
     df["atr"] = average_true_range(df["high"], df["low"], df["close"], window=14)
     df["obv"] = on_balance_volume(df["close"], df["volume"])
-
-    # MACD Histogram
-    df["macd_hist"] = macd_diff(df["close"])
+    
+    # INSERT THIS BLOCK RIGHT HERE ⬇️
+    macd = MACDIndicator(close=df["close"])
+    df["macd"] = macd.macd()
+    df["macd_signal"] = macd.macd_signal()
+    df["macd_hist"] = macd.macd_diff()
 
     # StochRSI
     df["stoch_rsi"] = stochrsi(df["close"])
