@@ -1,0 +1,11 @@
+discord.py==2.3.2
+flask
+pytz
+requests
+python-dotenv
+pandas
+numpy
+ta
+
+
+
