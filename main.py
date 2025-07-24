@@ -7,9 +7,9 @@ from flask import Flask
 from dotenv import load_dotenv
 import discord
 from discord.ext import commands, tasks
-from ta.trend import ema_indicator, sma_indicator
-from ta.momentum import rsi, stochrsi
-from ta.volatility import average_true_range
+from ta.trend import ema_indicator, sma_indicator, adx
+from ta.momentum import rsi, stochrsi, cci, williams_r
+from ta.volatility import average_true_range, bollinger_hband, bollinger_lband, keltner_channel_hband, keltner_channel_lband
 from ta.volume import on_balance_volume
 import datetime
 import pytz
@@ -63,6 +63,72 @@ def fmt_utc(dt):
     return dt.strftime("%Y-%m-%d %H:%M UTC")
 
 # -------------------------------------------------------------------
+def calculate_indicators(df):
+    df["ema50"] = ema_indicator(df["close"], window=50)
+    df["ema200"] = ema_indicator(df["close"], window=200)
+    df["rsi"] = rsi(df["close"], window=14)
+    df["atr"] = average_true_range(df["high"], df["low"], df["close"], window=14)
+    df["obv"] = on_balance_volume(df["close"], df["volume"])
+    df["adx"] = adx(df["high"], df["low"], df["close"], window=14)
+    df["cci"] = cci(df["high"], df["low"], df["close"], window=20)
+    df["williams_r"] = williams_r(df["high"], df["low"], df["close"], lbp=14)
+    df["bb_upper"] = bollinger_hband(df["close"], window=20)
+    df["bb_lower"] = bollinger_lband(df["close"], window=20)
+    df["bb_width"] = (df["bb_upper"] - df["bb_lower"]) / df["bb_lower"]
+    df["donchian_high"] = df["high"].rolling(window=20).max()
+    df["donchian_low"] = df["low"].rolling(window=20).min()
+    df["kc_upper"] = keltner_channel_hband(df["high"], df["low"], df["close"], window=20)
+    df["kc_lower"] = keltner_channel_lband(df["high"], df["low"], df["close"], window=20)
+    df["squeeze"] = (df["bb_lower"] > df["kc_lower"]) & (df["bb_upper"] < df["kc_upper"])
+
+    mfv = ((df["close"] - df["low"]) - (df["high"] - df["close"])) / (df["high"] - df["low"] + 1e-9) * df["volume"]
+    df["cmf"] = mfv.rolling(window=20).sum() / df["volume"].rolling(window=20).sum()
+
+    return df
+
+# -------------------------------------------------------------------
+def detect_trade(df):
+    latest = df.iloc[-1]
+    if latest["adx"] < 20 or latest["close"] < latest["ema200"]:
+        return None
+
+    strategy = None
+    emoji = ""
+    confidence = 3
+
+    if latest["rsi"] < 30 and latest["williams_r"] < -80:
+        strategy = "Mean Reversion"
+        emoji = "🔁"
+        confidence = 4
+    elif latest["close"] > latest["donchian_high"] and latest["cmf"] > 0:
+        strategy = "Breakout Anticipation"
+        emoji = "🚀"
+        confidence = 5
+    elif latest["squeeze"] and latest["bb_width"] > 0.05:
+        strategy = "Volatility Squeeze"
+        emoji = "📊"
+        confidence = 3
+    elif latest["cci"] > 100 and latest["cmf"] > 0:
+        strategy = "Swing Trade"
+        emoji = "🌀"
+        confidence = 4
+    elif latest["rsi"] > 50 and latest["close"] > latest["ema50"]:
+        strategy = "Pullback Long"
+        emoji = "📈"
+        confidence = 3
+
+    if strategy:
+        return {
+            "type": f"{emoji} {strategy}",
+            "entry": latest["close"],
+            "stop": latest["close"] - latest["atr"] * 1.5,
+            "tp1": latest["close"] + latest["atr"] * 1.5,
+            "tp2": latest["close"] + latest["atr"] * 2.5,
+            "confidence": confidence
+        }
+    return None
+
+# -------------------------------------------------------------------
 def log_trade_to_csv(trade_data):
     date_str = datetime.datetime.utcnow().strftime("%Y-%m-%d")
     filename = f"trade_log_{date_str}.csv"
@@ -83,32 +149,32 @@ def log_trade_to_csv(trade_data):
         ])
 
 # -------------------------------------------------------------------
-def format_exit_embed(symbol, direction, entry, tp1, tp2, stop, price, result):
+def format_embed(symbol, trade):
     header = fmt_central(now_times()[1])
     footer = fmt_utc(now_times()[0])
-    emoji = "🟢" if direction == "Long" else "🔴"
-    color = discord.Color.green() if "Take Profit" in result else discord.Color.red()
+    emoji = "🟢" if "Long" in trade["type"] else "🔴"
+    confidence_emoji = {6: "🔥", 5: "✅", 4: "🟢", 3: "⚪", 2: "🔻", 1: "🟥", 0: "❌"}.get(trade["confidence"], "❓")
 
     embed = discord.Embed(
-        title=f"{emoji} {symbol} {direction} Exit – {header}",
-        description=result,
-        color=color
+        title=f"{emoji} {symbol} {trade['type']} – {header}",
+        color=discord.Color.green() if "Long" in trade["type"] else discord.Color.red()
     )
     embed.add_field(
-        name="📊 Trade Summary",
-        value=(
-            f"""📈 Entry: **${entry:.2f}**
-🎯 TP2:   **${tp2:.2f}**
-🛑 Stop:  `${stop:.2f}`"""
-        ),
+        name="📊 Trade Setup",
+        value=f"📈 Entry: **${trade['entry']:.2f}**\n🛑 Stop:  `${trade['stop']:.2f}`",
         inline=False
     )
     embed.add_field(
-        name="📉 Exit Price",
-        value=f"**${price:.2f}**",
+        name="🎯 Targets",
+        value=f"TP1: ${trade['tp1']:.2f}\nTP2: ${trade['tp2']:.2f}",
         inline=False
     )
-    embed.set_footer(text=f"Closed {footer}")
+    embed.add_field(
+        name="🧠 Confidence",
+        value=f"{confidence_emoji} {trade['confidence']}/6",
+        inline=False
+    )
+    embed.set_footer(text=f"Generated {footer}")
     return embed
 
 # -------------------------------------------------------------------
