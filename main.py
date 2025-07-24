@@ -7,8 +7,8 @@ from flask import Flask
 from dotenv import load_dotenv
 import discord
 from discord.ext import commands, tasks
-from ta.trend import ema_indicator, sma_indicator, adx
-from ta.momentum import rsi, stochrsi, cci, williams_r
+from ta.momentum import rsi, stochrsi, williams_r
+from ta.trend import ema_indicator, sma_indicator, adx, cci
 from ta.volatility import average_true_range, bollinger_hband, bollinger_lband, keltner_channel_hband, keltner_channel_lband
 from ta.volume import on_balance_volume
 import datetime
