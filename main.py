@@ -209,7 +209,7 @@ def format_embed(symbol, trade):
     value="📈 Entry: **${:.2f}**\n🛑 Stop:  `${:.2f}`".format(trade['entry'], trade['stop']),
     inline=False
     )
-    eembed.add_field(
+    embed.add_field(
     name="🎯 Targets",
     value="TP1: ${:.2f}\nTP2: ${:.2f}".format(trade['tp1'], trade['tp2']),
     inline=False
