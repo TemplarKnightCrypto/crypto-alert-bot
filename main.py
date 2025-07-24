@@ -206,8 +206,11 @@ def format_embed(symbol, trade):
     )
     embed.add_field(
         name="📊 Trade Setup",
-        value=f"📈 Entry: **${trade['entry']:.2f}**
-🛑 Stop:  `${trade['stop']:.2f}`",
+        value=(
+            f"📈 Entry: **${trade['entry']:.2f}**
+"
+            f"🛑 Stop:  `${trade['stop']:.2f}`"
+        ),
         inline=False
     )
     embed.add_field(
