@@ -215,8 +215,11 @@ def format_embed(symbol, trade):
     )
     embed.add_field(
         name="🎯 Targets",
-        value=f"TP1: ${trade['tp1']:.2f}
-TP2: ${trade['tp2']:.2f}",
+        value=(
+            f"TP1: ${trade['tp1']:.2f}
+"
+            f"TP2: ${trade['tp2']:.2f}"
+        ),
         inline=False
     )
     embed.add_field(
