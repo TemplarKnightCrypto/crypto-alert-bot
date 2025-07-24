@@ -64,7 +64,7 @@ def fmt_utc(dt):
 
 # -------------------------------------------------------------------
 @tasks.loop(minutes=1)
-async def scheduled_status_report():
+async def eth_status_report():
     now = datetime.datetime.now(CENTRAL_TZ)
     if now.minute in (0, 30):
         channel = bot.get_channel(STATUS_CHANNEL_ID)
@@ -82,7 +82,8 @@ async def scheduled_status_report():
         alligator_text = "🟢 Bullish" if latest.get("alligator") else "🔴 Bearish"
         ichimoku_text = "🟢 Bullish" if latest.get("ichimoku_bull") else "🔴 Bearish"
         twist_text = "✅ Twist" if latest.get("twist") else "No twist"
-        bias = "🟢 Bullish Bias" if latest["close"] > latest["ema200"] else "🔴 Bearish Bias"
+        bias = calculate_market_bias(latest)
+
 
         embed = discord.Embed(
             title=f"📊 ETH 30-Min Status – {header}",
@@ -120,6 +121,58 @@ async def scheduled_status_report():
 async def on_ready():
     print(f"✅ Bot is online as {bot.user}")
     scheduled_status_report.start()
+
+# -------------------------------------------------------------------
+@bot.command()
+async def ethreport(ctx):
+    channel = ctx.channel
+    df = fetch_ohlc("ETH")
+    if df is None:
+        await channel.send("❌ Could not fetch ETH data.")
+        return
+    df = calculate_indicators(df)
+    latest = df.iloc[-1]
+
+    header = fmt_central(now_times()[1])
+    footer = fmt_utc(now_times()[0])
+    trend_text = "📈 Bullish (EMA50)" if latest["close"] > latest["ema50"] else "📉 Bearish (EMA50)"
+    supertrend_text = "🟢 Bullish" if latest.get("supertrend") else "🔴 Bearish"
+    alligator_text = "🟢 Bullish" if latest.get("alligator") else "🔴 Bearish"
+    ichimoku_text = "🟢 Bullish" if latest.get("ichimoku_bull") else "🔴 Bearish"
+    twist_text = "✅ Twist" if latest.get("twist") else "No twist"
+    bias = calculate_market_bias(latest)
+
+
+    embed = discord.Embed(
+        title=f"📊 ETH 30-Min Status – {header}",
+        color=discord.Color.blue()
+    )
+    embed.add_field(
+        name="💵 Price & Trend",
+        value=(
+            f"💰 Price: **${latest['close']:.2f}**\n"
+            f"📉 RSI: `{latest['rsi']:.1f}` | 📏 ATR: `{latest['atr']:.2f}`\n"
+            f"{trend_text}"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="📈 Indicator Summary",
+        value=(
+            f"🧠 Supertrend: {supertrend_text}\n"
+            f"🐊 Alligator: {alligator_text}\n"
+            f"☁️ Ichimoku: {ichimoku_text}\n"
+            f"🌪️ Twist Alert: {twist_text}"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="📊 Market Bias",
+        value=bias,
+        inline=False
+    )
+    embed.set_footer(text=f"Updated {footer}")
+    await channel.send(embed=embed)
 
 # -------------------------------------------------------------------
 def calculate_indicators(df):
@@ -227,6 +280,36 @@ def log_trade_to_csv(trade_data):
         ])
 
 # -------------------------------------------------------------------
+def fetch_ohlc(symbol, interval="30"):
+    url = f"https://api.kraken.com/0/public/OHLC?pair={KRAKEN_PAIRS[symbol]}&interval={interval}"
+    try:
+        response = requests.get(url)
+        data = response.json()
+        key = list(data["result"].keys())[0]
+        ohlc = pd.DataFrame(data["result"][key], columns=[
+            "time", "open", "high", "low", "close", "vwap", "volume", "count"
+        ])
+        ohlc = ohlc.astype({
+            "time": "int64", "open": "float", "high": "float",
+            "low": "float", "close": "float", "volume": "float"
+        })
+        ohlc["time"] = pd.to_datetime(ohlc["time"], unit="s")
+        ohlc.set_index("time", inplace=True)
+        return ohlc
+    except Exception as e:
+        print(f"Error fetching OHLC data: {e}")
+        return None
+
+# -------------------------------------------------------------------
+def calculate_market_bias(latest):
+    if latest["rsi"] > 60 and latest["cmf"] > 0:
+        return "🟢 Bullish Bias"
+    elif latest["rsi"] < 40 and latest["cmf"] < 0:
+        return "🔴 Bearish Bias"
+    else:
+        return "⚠️ Neutral Bias"
+
+# -------------------------------------------------------------------
 def format_embed(symbol, trade):
     header = fmt_central(now_times()[1])
     footer = fmt_utc(now_times()[0])
@@ -254,56 +337,6 @@ def format_embed(symbol, trade):
     )
     embed.set_footer(text=f"Generated {footer}")
     return embed
-
-@bot.command()
-async def ethreport(ctx):
-    channel = ctx.channel
-    df = fetch_ohlc("ETH")
-    if df is None:
-        await channel.send("❌ Could not fetch ETH data.")
-        return
-    df = calculate_indicators(df)
-    latest = df.iloc[-1]
-    header = fmt_central(now_times()[1])
-    footer = fmt_utc(now_times()[0])
-    trend_text = "📈 Bullish (EMA50)" if latest["close"] > latest["ema50"] else "📉 Bearish (EMA50)"
-    supertrend_text = "🟢 Bullish" if latest["supertrend"] else "🔴 Bearish"
-    alligator_text = "🟢 Bullish" if latest["alligator"] else "🔴 Bearish"
-    ichimoku_text = "🟢 Bullish" if latest["ichimoku_bull"] else "🔴 Bearish"
-    twist_text = "✅ Twist" if latest["twist"] else "No twist"
-    bias = calculate_market_bias(latest)
-    bias_emoji = bias.split()[0]
-
-    embed = discord.Embed(
-        title=f"📊 ETH 30-Min Status – {header} {bias_emoji}",
-        color=discord.Color.blue()
-    )
-    embed.add_field(
-        name="💵 Price & Trend",
-        value=(
-            f"""💰 Price: **${latest['close']:.2f}**
-📉 RSI: `{latest['rsi']:.1f}` | 📏 ATR: `{latest['atr']:.2f}`
-{trend_text}"""
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="📈 Indicator Summary",
-        value=(
-            f"""🧠 Supertrend: {supertrend_text}
-🐊 Alligator: {alligator_text}
-☁️ Ichimoku: {ichimoku_text}
-🌪️ Twist Alert: {twist_text}"""
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="📊 Market Bias",
-        value=bias,
-        inline=False
-    )
-    embed.set_footer(text=f"Updated {footer}")
-    await channel.send(embed=embed)
 
 @bot.command()
 async def leaderboard(ctx):
