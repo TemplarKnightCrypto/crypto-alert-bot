@@ -209,6 +209,22 @@ async def strategies(ctx):
     embed.add_field(name="📈 Pullback Long", value="RSI > 50 and Price > EMA50\nConfidence: 3️⃣", inline=False)
     await ctx.send(embed=embed)
 
+@bot.command()
+async def testeth(ctx):
+    df = fetch_ohlc("ETH")
+    if df is None:
+        await ctx.send("❌ Failed to fetch ETH data.")
+        return
+    df = calculate_indicators(df)
+    trade = detect_trade(df)
+    if trade:
+        embed = format_embed("ETH", trade)
+        await ctx.send("✅ ETH trade detected:")
+        await ctx.send(embed=embed)
+    else:
+        await ctx.send("⚠️ No valid ETH trade setup found at the moment.")
+
+
 # -------------------------------------------------------------------
 def detect_trade(df):
     latest = df.iloc[-1]
