@@ -429,7 +429,7 @@ async def reset_leaderboard_daily():
 @tasks.loop(minutes=1)
 async def scan_coins():
     channel = bot.get_channel(CHANNEL_ID)
-    now_utc, _ = now_times()
+    now_utc, now_central = now_times()
 
     for symbol in KRAKEN_PAIRS:
         df = fetch_ohlc(symbol)
@@ -440,6 +440,7 @@ async def scan_coins():
         latest = df.iloc[-1]
         price = latest["close"]
 
+        # Check for open trade
         if symbol in active_alerts:
             entry, tp1, tp2, stop, open_time_utc = active_alerts[symbol]
             direction = "Long" if entry < stop else "Short"
@@ -449,40 +450,45 @@ async def scan_coins():
             if hit_tp2 or hit_sl:
                 result = "🎯 Take Profit 2 Hit!" if hit_tp2 else "💥 Stop Loss Hit!"
                 leaderboard_stats[symbol]["wins" if hit_tp2 else "losses"] += 1
-                embed = format_exit_embed(symbol, direction, entry, tp1, tp2, stop, price, result)
+                central_time = fmt_central(now_utc.astimezone(CENTRAL_TZ))
+                utc_time = fmt_utc(now_utc)
+                embed = format_exit_embed(symbol, direction, entry, tp1, tp2, stop, price, result, central_time, utc_time)
                 if symbol == "ETH":
                     await channel.send(embed=embed)
                 del active_alerts[symbol]
             continue
 
+        # Cooldown check
         last_time = cooldowns.get(symbol)
         if last_time and (now_utc - last_time).total_seconds() < 1800:
             continue
 
+        # Trade detection
         trade = detect_trade(df, mode=bot_mode)
         if trade:
-    log_trade_to_csv({
-        "time": now_utc.isoformat(),
-        "symbol": symbol,
-        "type": trade["type"],
-        "entry": trade["entry"],
-        "stop": trade["stop"],
-        "tp1": trade["tp1"],
-        "tp2": trade["tp2"],
-        "confidence": trade["confidence"],
-        "strategies_matched": trade.get("strategies_matched", []),
-        "weak_signal": trade["type"] == "🟡 Weak Signal"
-    })
+            log_trade_to_csv({
+                "time": now_utc.isoformat(),
+                "symbol": symbol,
+                "type": trade["type"],
+                "entry": trade["entry"],
+                "stop": trade["stop"],
+                "tp1": trade["tp1"],
+                "tp2": trade["tp2"],
+                "confidence": trade["confidence"],
+                "strategies_matched": trade.get("strategies_matched", []),
+                "weak_signal": trade["type"] == "🟡 Weak Signal"
+            })
 
-    if symbol == "ETH":
-        central_time = fmt_central(now_utc.astimezone(CENTRAL_TZ))
-        utc_time = fmt_utc(now_utc)
-        await channel.send(embed=format_embed(symbol, trade, central_time, utc_time))
+            if symbol == "ETH":
+                central_time = fmt_central(now_utc.astimezone(CENTRAL_TZ))
+                utc_time = fmt_utc(now_utc)
+                embed = format_embed(symbol, trade, central_time, utc_time)
+                await channel.send(embed=embed)
 
-    active_alerts[symbol] = (
-        trade["entry"], trade["tp1"], trade["tp2"], trade["stop"], now_utc
-    )
-    cooldowns[symbol] = now_utc
+            active_alerts[symbol] = (
+                trade["entry"], trade["tp1"], trade["tp2"], trade["stop"], now_utc
+            )
+            cooldowns[symbol] = now_utc
 
 # === Bot Ready ===
 @bot.event
