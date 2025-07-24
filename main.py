@@ -133,7 +133,7 @@ def detect_trade(df, mode="aggressive"):
 
 
 def log_trade_to_csv(trade_data):
-    filename = f"trade_log_{datetime.datetime.utcnow().strftime('%Y-%m-%d')}.csv"
+    filename = f"trade_log_{datetime.datetime.now(UTC_TZ).strftime('%Y-%m-%d')}.csv"
     file_exists = os.path.isfile(filename)
     with open(filename, mode="a", newline="") as file:
         writer = csv.writer(file)
