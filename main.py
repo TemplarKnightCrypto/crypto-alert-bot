@@ -307,53 +307,70 @@ async def logsummary(ctx):
     await ctx.send(embed=embed)
 
 # -------------------------------------------------------------------
-def detect_trade(df):
+def detect_trade(df, mode="aggressive"):
     latest = df.iloc[-1]
-    if latest["adx"] < 20 or latest["close"] < latest["ema200"]:
-        return None
+    strategies = []
 
-    strategy = None
-    emoji = ""
-    confidence = 3
+    # Set thresholds based on mode
+    strict = mode == "strict"
 
-    if latest["rsi"] < 30 and latest["williams_r"] < -80:
-        strategy = "Mean Reversion"
-        emoji = "🔁"
-        confidence = 4
-    elif latest["close"] > latest["donchian_high"] and latest["cmf"] > 0:
-        strategy = "Breakout Anticipation"
-        emoji = "🚀"
-        confidence = 5
-    elif latest["squeeze"] and latest["bb_width"] > 0.05:
-        strategy = "Volatility Squeeze"
-        emoji = "📊"
-        confidence = 3
-    elif latest["cci"] > 100 and latest["cmf"] > 0:
-        strategy = "Swing Trade"
-        emoji = "🌀"
-        confidence = 4
-    elif latest["rsi"] > 50 and latest["close"] > latest["ema50"]:
-        strategy = "Pullback Long"
-        emoji = "📈"
-        confidence = 3
+    # === Strategy Logic ===
+    # 🔁 Mean Reversion
+    if (latest["rsi"] < (30 if strict else 40)) or (latest["williams_r"] < (-80 if strict else -70)):
+        strategies.append({
+            "type": "🔁 Mean Reversion",
+            "confidence": 4 if strict else 3
+        })
 
-    # === DYNAMIC CONFIDENCE TUNING ===
-    if strategy:
+    # 🚀 Breakout Anticipation
+    if (latest["close"] > latest["donchian_high"]) or (latest["cmf"] > (0 if strict else 0.05)):
+        strategies.append({
+            "type": "🚀 Breakout Anticipation",
+            "confidence": 5 if strict else 4
+        })
+
+    # 🌀 Swing Trade
+    if (latest["cci"] > (100 if strict else 80)) or (latest["cmf"] > 0):
+        strategies.append({
+            "type": "🌀 Swing Trade",
+            "confidence": 4 if strict else 3
+        })
+
+    # 📈 Pullback Long
+    if (latest["rsi"] > (50 if strict else 45)) or (latest["close"] > latest["ema50"]):
+        strategies.append({
+            "type": "📈 Pullback Long",
+            "confidence": 3 if strict else 2
+        })
+
+    # === Determine best strategy ===
+    best_strategy = None
+    if strategies:
+        best_strategy = max(strategies, key=lambda x: x["confidence"])
+
+    # === Weak Signal fallback ===
+    if not best_strategy and latest["rsi"] > 40 and latest["cci"] > 0:
+        best_strategy = {
+            "type": "🟡 Weak Signal",
+            "confidence": 1
+        }
+
+    # === Final Trade Dictionary ===
+    if best_strategy:
         atr_avg = df["atr"].rolling(window=50).mean().iloc[-1]
-        if latest["adx"] > 25:
-            confidence += 1
         if latest["atr"] > 1.5 * atr_avg:
-            confidence -= 1
-        confidence = max(0, min(confidence, 6))
+            best_strategy["confidence"] -= 1
 
         return {
-            "type": f"{emoji} {strategy} Strategy",
+            "strategies_matched": [s["type"] for s in strategies] if strategies else ["🟡 Weak Signal"],
+            "type": best_strategy["type"],
             "entry": latest["close"],
             "stop": latest["close"] - latest["atr"] * 1.5,
             "tp1": latest["close"] + latest["atr"] * 1.5,
             "tp2": latest["close"] + latest["atr"] * 2.5,
-            "confidence": confidence
+            "confidence": max(0, min(best_strategy["confidence"], 6))
         }
+
     return None
 
 # -------------------------------------------------------------------
@@ -538,6 +555,12 @@ async def scan_coins():
                 trade["entry"], trade["tp1"], trade["tp2"], trade["stop"], now_utc
             )
             cooldowns[symbol] = now_utc
+
+@tasks.loop(time=datetime.time(hour=0, minute=0, tzinfo=UTC_TZ))
+async def reset_leaderboard_daily():
+    global leaderboard_stats
+    leaderboard_stats = {sym: {"wins": 0, "losses": 0} for sym in KRAKEN_PAIRS}
+    print("🔁 Leaderboard has been reset for the new day.")
 
 # -------------------------------------------------------------------
 # Bot Startup
