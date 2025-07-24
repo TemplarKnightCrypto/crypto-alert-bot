@@ -204,19 +204,26 @@ def format_embed(symbol, trade):
         title=f"{emoji} {symbol} {trade['type']} – {header}",
         color=discord.Color.green() if "Long" in trade["type"] else discord.Color.red()
     )
+
+    entry = trade['entry']
+    stop = trade['stop']
+    tp1 = trade['tp1']
+    tp2 = trade['tp2']
+    confidence = trade['confidence']
+
     embed.add_field(
-    name="📊 Trade Setup",
-    value="📈 Entry: **${:.2f}**\n🛑 Stop:  `${:.2f}`".format(trade['entry'], trade['stop']),
-    inline=False
+        name="📊 Trade Setup",
+        value=f"📈 Entry: **${entry:.2f}**\n🛑 Stop:  `${stop:.2f}`",
+        inline=False
     )
     embed.add_field(
-    name="🎯 Targets",
-    value="TP1: ${:.2f}\nTP2: ${:.2f}".format(trade['tp1'], trade['tp2']),
-    inline=False
+        name="🎯 Targets",
+        value=f"TP1: ${tp1:.2f}\nTP2: ${tp2:.2f}",
+        inline=False
     )
     embed.add_field(
         name="🧠 Confidence",
-        value=f"{confidence_emoji} {trade['confidence']}/6",
+        value=f"{confidence_emoji} {confidence}/6",
         inline=False
     )
     embed.set_footer(text=f"Generated {footer}")
