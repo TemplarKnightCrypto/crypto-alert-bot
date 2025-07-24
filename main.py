@@ -83,153 +83,6 @@ def log_trade_to_csv(trade_data):
         ])
 
 # -------------------------------------------------------------------
-def calculate_indicators(df):
-    df["ema50"] = ema_indicator(df["close"], window=50)
-    df["rsi"] = rsi(df["close"], window=14)
-    df["atr"] = average_true_range(df["high"], df["low"], df["close"], window=14)
-    df["obv"] = on_balance_volume(df["close"], df["volume"])
-
-    ema_12 = df["close"].ewm(span=12, adjust=False).mean()
-    ema_26 = df["close"].ewm(span=26, adjust=False).mean()
-    df["macd"] = ema_12 - ema_26
-    df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
-    df["macd_hist"] = df["macd"] - df["macd_signal"]
-
-    df["stoch_rsi"] = stochrsi(df["close"])
-
-    hl2 = (df["high"] + df["low"]) / 2
-    factor = 3.0
-    upperband = hl2 + factor * df["atr"]
-    lowerband = hl2 - factor * df["atr"]
-    direction = [True] * len(df)
-    for i in range(1, len(df)):
-        if df["close"].iloc[i] > upperband.iloc[i - 1]:
-            direction[i] = True
-        elif df["close"].iloc[i] < lowerband.iloc[i - 1]:
-            direction[i] = False
-        else:
-            direction[i] = direction[i - 1]
-    df["supertrend"] = direction
-
-    df["jaw"] = sma_indicator(df["close"], window=13).shift(8)
-    df["teeth"] = sma_indicator(df["close"], window=8).shift(5)
-    df["lips"] = sma_indicator(df["close"], window=5).shift(3)
-    df["alligator"] = (df["lips"] > df["teeth"]) & (df["teeth"] > df["jaw"])
-
-    nine_high = df["high"].rolling(9).max()
-    nine_low = df["low"].rolling(9).min()
-    df["tenkan"] = (nine_high + nine_low) / 2
-    period26_high = df["high"].rolling(26).max()
-    period26_low = df["low"].rolling(26).min()
-    df["kijun"] = (period26_high + period26_low) / 2
-    df["senkou_a"] = ((df["tenkan"] + df["kijun"]) / 2).shift(26)
-    period52_high = df["high"].rolling(52).max()
-    period52_low = df["low"].rolling(52).min()
-    df["senkou_b"] = ((period52_high + period52_low) / 2).shift(26)
-    df["ichimoku_bull"] = (df["close"] > df["senkou_a"]) & (df["close"] > df["senkou_b"])
-    df["twist"] = (df["senkou_a"].shift(1) < df["senkou_b"].shift(1)) & (df["senkou_a"] > df["senkou_b"])
-
-    return df
-
-# -------------------------------------------------------------------
-def calculate_market_bias(latest):
-    bullish_signals = 0
-    if latest["close"] > latest["ema50"]:
-        bullish_signals += 1
-    if latest["rsi"] > 50:
-        bullish_signals += 1
-    if latest["supertrend"]:
-        bullish_signals += 1
-    if latest["alligator"]:
-        bullish_signals += 1
-    if latest["ichimoku_bull"]:
-        bullish_signals += 1
-    if bullish_signals >= 4:
-        return "🟢 Bullish"
-    elif bullish_signals <= 2:
-        return "🔴 Bearish"
-    else:
-        return "⚠️ Mixed"
-
-# -------------------------------------------------------------------
-def detect_trade(df):
-    df = calculate_indicators(df)
-    if len(df) < 2:
-        return None
-    latest = df.iloc[-1]
-    previous = df.iloc[-2]
-
-    confidence = 0
-    if latest["close"] > latest["ema50"]:
-        confidence += 1
-    if latest["rsi"] > 50:
-        confidence += 1
-    if latest["obv"] > previous["obv"]:
-        confidence += 1
-    if latest["supertrend"]:
-        confidence += 1
-    if latest["alligator"]:
-        confidence += 1
-    if latest["ichimoku_bull"]:
-        confidence += 1
-
-    if confidence >= 4:
-        return {
-            "type": "Breakout Long",
-            "entry": latest["close"],
-            "stop": latest["close"] - latest["atr"],
-            "tp1": latest["close"] + latest["atr"] * 1.5,
-            "tp2": latest["close"] + latest["atr"] * 2.5,
-            "confidence": confidence
-        }
-    elif confidence <= 2:
-        return {
-            "type": "Breakdown Short",
-            "entry": latest["close"],
-            "stop": latest["close"] + latest["atr"],
-            "tp1": latest["close"] - latest["atr"] * 1.5,
-            "tp2": latest["close"] - latest["atr"] * 2.5,
-            "confidence": 6 - confidence
-        }
-    return None
-
-# -------------------------------------------------------------------
-def format_embed(symbol, trade):
-    header = fmt_central(now_times()[1])
-    footer = fmt_utc(now_times()[0])
-    emoji = "🟢" if "Long" in trade["type"] else "🔴"
-    confidence_emoji = {6: "🔥", 5: "✅", 4: "🟢", 3: "⚪", 2: "🔻", 1: "🟥", 0: "❌"}.get(trade["confidence"], "❓")
-
-    embed = discord.Embed(
-        title=f"{emoji} {symbol} {trade['type']} – {header}",
-        color=discord.Color.green() if "Long" in trade["type"] else discord.Color.red()
-    )
-
-    entry = trade['entry']
-    stop = trade['stop']
-    tp1 = trade['tp1']
-    tp2 = trade['tp2']
-    confidence = trade['confidence']
-
-    embed.add_field(
-        name="📊 Trade Setup",
-        value=f"📈 Entry: **${entry:.2f}**\n🛑 Stop:  `${stop:.2f}`",
-        inline=False
-    )
-    embed.add_field(
-        name="🎯 Targets",
-        value=f"TP1: ${tp1:.2f}\nTP2: ${tp2:.2f}",
-        inline=False
-    )
-    embed.add_field(
-        name="🧠 Confidence",
-        value=f"{confidence_emoji} {confidence}/6",
-        inline=False
-    )
-    embed.set_footer(text=f"Generated {footer}")
-    return embed
-
-# -------------------------------------------------------------------
 def format_exit_embed(symbol, direction, entry, tp1, tp2, stop, price, result):
     header = fmt_central(now_times()[1])
     footer = fmt_utc(now_times()[0])
@@ -243,9 +96,11 @@ def format_exit_embed(symbol, direction, entry, tp1, tp2, stop, price, result):
     )
     embed.add_field(
         name="📊 Trade Summary",
-        value=f"📈 Entry: **${entry:.2f}**
+        value=(
+            f"""📈 Entry: **${entry:.2f}**
 🎯 TP2:   **${tp2:.2f}**
-🛑 Stop:  `${stop:.2f}`",
+🛑 Stop:  `${stop:.2f}`"""
+        ),
         inline=False
     )
     embed.add_field(
@@ -255,30 +110,6 @@ def format_exit_embed(symbol, direction, entry, tp1, tp2, stop, price, result):
     )
     embed.set_footer(text=f"Closed {footer}")
     return embed
-
-# -------------------------------------------------------------------
-def fetch_ohlc(symbol, interval=30):
-    try:
-        pair = KRAKEN_PAIRS.get(symbol)
-        url = f"https://api.kraken.com/0/public/OHLC?pair={pair}&interval={interval}"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers, timeout=10)
-        raw = response.json()
-        if 'error' in raw and raw['error']:
-            return None
-        result = raw.get('result', {})
-        pair_key = next((k for k in result if k != 'last'), None)
-        if not pair_key:
-            return None
-        df = pd.DataFrame(result[pair_key], columns=[
-            "time", "open", "high", "low", "close", "vwap", "volume", "count"
-        ])
-        df[["open", "high", "low", "close", "volume"]] = df[["open", "high", "low", "close", "volume"]].astype(float)
-        df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
-        df.set_index("time", inplace=True)
-        return df
-    except:
-        return None
 
 # -------------------------------------------------------------------
 @tasks.loop(minutes=30)
@@ -308,24 +139,19 @@ async def eth_status_report():
     embed.add_field(
         name="💵 Price & Trend",
         value=(
-            f"💰 Price: **${latest['close']:.2f}**
-"
-            f"📉 RSI: `{latest['rsi']:.1f}` | 📏 ATR: `{latest['atr']:.2f}`
-"
-            f"{trend_text}"
+            f"""💰 Price: **${latest['close']:.2f}**
+📉 RSI: `{latest['rsi']:.1f}` | 📏 ATR: `{latest['atr']:.2f}`
+{trend_text}"""
         ),
         inline=False
     )
     embed.add_field(
         name="📈 Indicator Summary",
         value=(
-            f"🧠 Supertrend: {supertrend_text}
-"
-            f"🐊 Alligator: {alligator_text}
-"
-            f"☁️ Ichimoku: {ichimoku_text}
-"
-            f"🌪️ Twist Alert: {twist_text}"
+            f"""🧠 Supertrend: {supertrend_text}
+🐊 Alligator: {alligator_text}
+☁️ Ichimoku: {ichimoku_text}
+🌪️ Twist Alert: {twist_text}"""
         ),
         inline=False
     )
@@ -336,72 +162,6 @@ async def eth_status_report():
     )
     embed.set_footer(text=f"Updated {footer}")
     await channel.send(embed=embed)
-
-# -------------------------------------------------------------------
-@tasks.loop(minutes=1)
-async def send_leaderboard_report():
-    now_utc, _ = now_times()
-    if now_utc.hour == 23 and now_utc.minute == 59:
-        channel = bot.get_channel(STATUS_CHANNEL_ID)
-        embed = discord.Embed(title="📊 Daily Leaderboard Summary", color=discord.Color.gold())
-        sorted_stats = sorted(leaderboard_stats.items(), key=lambda x: x[1]["wins"], reverse=True)
-        for symbol, stats in sorted_stats:
-            wins = stats["wins"]
-            losses = stats["losses"]
-            total = wins + losses if (wins + losses) > 0 else 1
-            winrate = round((wins / total) * 100)
-            embed.add_field(
-                name=symbol,
-                value=f"✅ Wins: {wins} | 💥 Losses: {losses} | 📊 Win Rate: {winrate}%",
-                inline=False
-            )
-        embed.set_footer(text=f"Report sent {fmt_utc(now_utc)}")
-        await channel.send(embed=embed)
-
-        file_name = f"trade_log_{now_utc.strftime('%Y-%m-%d')}.csv"
-        if os.path.exists(file_name):
-            try:
-                await channel.send("📄 Daily Trade Log File:", file=discord.File(file_name))
-            except Exception as e:
-                await channel.send(f"❌ Could not send trade log: {e}")
-
-# -------------------------------------------------------------------
-@bot.event
-async def on_ready():
-    print(f"✅ Bot is online as {bot.user}")
-    scan_coins.start()
-    eth_status_report.start()
-    send_leaderboard_report.start()
-
-# -------------------------------------------------------------------
-@bot.command()
-async def scan(ctx):
-    for symbol in KRAKEN_PAIRS:
-        df = fetch_ohlc(symbol)
-        if df is None:
-            await ctx.send(f"❌ {symbol} fetch failed.")
-            continue
-        trade = detect_trade(df)
-        if trade:
-            await ctx.send(embed=format_embed(symbol, trade))
-        else:
-            await ctx.send(f"🔍 No setup for {symbol}.")
-
-@bot.command()
-async def confidence(ctx, symbol: str):
-    symbol = symbol.upper()
-    if symbol not in KRAKEN_PAIRS:
-        await ctx.send("❌ Invalid symbol.")
-        return
-    df = fetch_ohlc(symbol)
-    if df is None:
-        await ctx.send(f"❌ Failed to fetch {symbol}.")
-        return
-    trade = detect_trade(df)
-    if trade:
-        await ctx.send(embed=format_embed(symbol, trade))
-    else:
-        await ctx.send(f"ℹ️ No signal for {symbol}.")
 
 @bot.command()
 async def ethreport(ctx):
@@ -429,24 +189,19 @@ async def ethreport(ctx):
     embed.add_field(
         name="💵 Price & Trend",
         value=(
-            f"💰 Price: **${latest['close']:.2f}**
-"
-            f"📉 RSI: `{latest['rsi']:.1f}` | 📏 ATR: `{latest['atr']:.2f}`
-"
-            f"{trend_text}"
+            f"""💰 Price: **${latest['close']:.2f}**
+📉 RSI: `{latest['rsi']:.1f}` | 📏 ATR: `{latest['atr']:.2f}`
+{trend_text}"""
         ),
         inline=False
     )
     embed.add_field(
         name="📈 Indicator Summary",
         value=(
-            f"🧠 Supertrend: {supertrend_text}
-"
-            f"🐊 Alligator: {alligator_text}
-"
-            f"☁️ Ichimoku: {ichimoku_text}
-"
-            f"🌪️ Twist Alert: {twist_text}"
+            f"""🧠 Supertrend: {supertrend_text}
+🐊 Alligator: {alligator_text}
+☁️ Ichimoku: {ichimoku_text}
+🌪️ Twist Alert: {twist_text}"""
         ),
         inline=False
     )
