@@ -63,6 +63,65 @@ def fmt_utc(dt):
     return dt.strftime("%Y-%m-%d %H:%M UTC")
 
 # -------------------------------------------------------------------
+@tasks.loop(minutes=1)
+async def scheduled_status_report():
+    now = datetime.datetime.now(CENTRAL_TZ)
+    if now.minute in (0, 30):
+        channel = bot.get_channel(STATUS_CHANNEL_ID)
+        df = fetch_ohlc("ETH")
+        if df is None:
+            await channel.send("❌ Could not fetch ETH data.")
+            return
+        df = calculate_indicators(df)
+        latest = df.iloc[-1]
+
+        header = fmt_central(now)
+        footer = fmt_utc(datetime.datetime.now(UTC_TZ))
+        trend_text = "📈 Bullish (EMA50)" if latest["close"] > latest["ema50"] else "📉 Bearish (EMA50)"
+        supertrend_text = "🟢 Bullish" if latest.get("supertrend") else "🔴 Bearish"
+        alligator_text = "🟢 Bullish" if latest.get("alligator") else "🔴 Bearish"
+        ichimoku_text = "🟢 Bullish" if latest.get("ichimoku_bull") else "🔴 Bearish"
+        twist_text = "✅ Twist" if latest.get("twist") else "No twist"
+        bias = "🟢 Bullish Bias" if latest["close"] > latest["ema200"] else "🔴 Bearish Bias"
+
+        embed = discord.Embed(
+            title=f"📊 ETH 30-Min Status – {header}",
+            color=discord.Color.blue()
+        )
+        embed.add_field(
+            name="💵 Price & Trend",
+            value=(
+                f"💰 Price: **${latest['close']:.2f}**\n"
+                f"📉 RSI: `{latest['rsi']:.1f}` | 📏 ATR: `{latest['atr']:.2f}`\n"
+                f"{trend_text}"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="📈 Indicator Summary",
+            value=(
+                f"🧠 Supertrend: {supertrend_text}\n"
+                f"🐊 Alligator: {alligator_text}\n"
+                f"☁️ Ichimoku: {ichimoku_text}\n"
+                f"🌪️ Twist Alert: {twist_text}"
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="📊 Market Bias",
+            value=bias,
+            inline=False
+        )
+        embed.set_footer(text=f"Updated {footer}")
+        await channel.send(embed=embed)
+
+# Activate the status report task
+@bot.event
+async def on_ready():
+    print(f"✅ Bot is online as {bot.user}")
+    scheduled_status_report.start()
+
+# -------------------------------------------------------------------
 def calculate_indicators(df):
     df["ema50"] = ema_indicator(df["close"], window=50)
     df["ema200"] = ema_indicator(df["close"], window=200)
@@ -128,9 +187,17 @@ def detect_trade(df):
         emoji = "📈"
         confidence = 3
 
+    # === DYNAMIC CONFIDENCE TUNING ===
     if strategy:
+        atr_avg = df["atr"].rolling(window=50).mean().iloc[-1]
+        if latest["adx"] > 25:
+            confidence += 1
+        if latest["atr"] > 1.5 * atr_avg:
+            confidence -= 1
+        confidence = max(0, min(confidence, 6))
+
         return {
-            "type": f"{emoji} {strategy}",
+            "type": f"{emoji} {strategy} Strategy",
             "entry": latest["close"],
             "stop": latest["close"] - latest["atr"] * 1.5,
             "tp1": latest["close"] + latest["atr"] * 1.5,
@@ -187,58 +254,6 @@ def format_embed(symbol, trade):
     )
     embed.set_footer(text=f"Generated {footer}")
     return embed
-
-# -------------------------------------------------------------------
-@tasks.loop(minutes=30)
-async def eth_status_report():
-    channel = bot.get_channel(STATUS_CHANNEL_ID)
-    df = fetch_ohlc("ETH")
-    if df is None:
-        await channel.send("❌ Could not fetch ETH data.")
-        return
-    df = calculate_indicators(df)
-    latest = df.iloc[-1]
-
-    header = fmt_central(now_times()[1])
-    footer = fmt_utc(now_times()[0])
-    trend_text = "📈 Bullish (EMA50)" if latest["close"] > latest["ema50"] else "📉 Bearish (EMA50)"
-    supertrend_text = "🟢 Bullish" if latest["supertrend"] else "🔴 Bearish"
-    alligator_text = "🟢 Bullish" if latest["alligator"] else "🔴 Bearish"
-    ichimoku_text = "🟢 Bullish" if latest["ichimoku_bull"] else "🔴 Bearish"
-    twist_text = "✅ Twist" if latest["twist"] else "No twist"
-    bias = calculate_market_bias(latest)
-    bias_emoji = bias.split()[0]
-
-    embed = discord.Embed(
-        title=f"📊 ETH 30-Min Status – {header} {bias_emoji}",
-        color=discord.Color.blue()
-    )
-    embed.add_field(
-        name="💵 Price & Trend",
-        value=(
-            f"""💰 Price: **${latest['close']:.2f}**
-📉 RSI: `{latest['rsi']:.1f}` | 📏 ATR: `{latest['atr']:.2f}`
-{trend_text}"""
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="📈 Indicator Summary",
-        value=(
-            f"""🧠 Supertrend: {supertrend_text}
-🐊 Alligator: {alligator_text}
-☁️ Ichimoku: {ichimoku_text}
-🌪️ Twist Alert: {twist_text}"""
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="📊 Market Bias",
-        value=bias,
-        inline=False
-    )
-    embed.set_footer(text=f"Updated {footer}")
-    await channel.send(embed=embed)
 
 @bot.command()
 async def ethreport(ctx):
