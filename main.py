@@ -24,6 +24,8 @@ load_dotenv()
 TOKEN = os.getenv("TOKEN")
 
 # ==== STATE ====
+bot_mode = "aggressive"  # default behavior
+
 KRAKEN_PAIRS = {
     "BTC": "XXBTZUSD", "ETH": "XETHZUSD", "XRP": "XXRPZUSD", "SOL": "SOLUSD",
     "DOGE": "DOGEUSD", "ADA": "ADAUSD", "SUI": "SUIUSD", "HBAR": "HBARUSD",
@@ -116,6 +118,50 @@ async def eth_status_report():
         embed.set_footer(text=f"Updated {footer}")
         await channel.send(embed=embed)
 
+@tasks.loop(time=datetime.time(hour=23, minute=59, tzinfo=UTC_TZ))
+async def send_leaderboard_report():
+    channel = bot.get_channel(STATUS_CHANNEL_ID)
+    now = datetime.datetime.now(UTC_TZ)
+    date_str = now.strftime("%Y-%m-%d")
+    filename = f"trade_log_{date_str}.csv"
+
+    # === Leaderboard Summary ===
+    embed = discord.Embed(
+        title="🏆 Daily Trade Report",
+        color=discord.Color.gold()
+    )
+    embed.add_field(name="📅 Date", value=date_str, inline=False)
+
+    sorted_stats = sorted(leaderboard_stats.items(), key=lambda x: x[1]["wins"], reverse=True)
+    for symbol, stats in sorted_stats:
+        wins = stats["wins"]
+        losses = stats["losses"]
+        total = wins + losses if (wins + losses) > 0 else 1
+        win_rate = round((wins / total) * 100)
+        embed.add_field(
+            name=symbol,
+            value=f"✅ Wins: {wins} | 💥 Losses: {losses} | 📊 Win Rate: {win_rate}%",
+            inline=False
+        )
+
+    # === Log Summary ===
+    if os.path.exists(filename):
+        df = pd.read_csv(filename)
+        total = len(df)
+        weak_signals = df[df["WeakSignal"] == "Yes"]
+        weak_count = len(weak_signals)
+        strong_count = total - weak_count
+        percent_weak = round((weak_count / total) * 100) if total > 0 else 0
+
+        embed.add_field(name="📦 Total Trades", value=total, inline=True)
+        embed.add_field(name="🟡 Weak Signals", value=f"{weak_count} ({percent_weak}%)", inline=True)
+        embed.add_field(name="🧠 Strong Signals", value=strong_count, inline=True)
+    else:
+        embed.add_field(name="📦 Trade Log", value="No trades logged today.", inline=False)
+
+    embed.set_footer(text=f"Generated {fmt_utc(now)}")
+    await channel.send(embed=embed)
+
 # Activate the status report task
 @bot.event
 async def on_ready():
@@ -123,6 +169,15 @@ async def on_ready():
     scheduled_status_report.start()
 
 # -------------------------------------------------------------------
+@bot.command()
+async def mode(ctx, selected_mode: str):
+    global bot_mode
+    if selected_mode.lower() in ["strict", "aggressive"]:
+        bot_mode = selected_mode.lower()
+        await ctx.send(f"✅ Bot mode set to: **{bot_mode.upper()}**")
+    else:
+        await ctx.send("⚠️ Invalid mode. Use `!mode strict` or `!mode aggressive`.")
+
 @bot.command()
 async def ethreport(ctx):
     channel = ctx.channel
@@ -216,7 +271,7 @@ async def testeth(ctx):
         await ctx.send("❌ Failed to fetch ETH data.")
         return
     df = calculate_indicators(df)
-    trade = detect_trade(df)
+    trade = detect_trade(df, mode=bot_mode)
     if trade:
         embed = format_embed("ETH", trade)
         await ctx.send("✅ ETH trade detected:")
@@ -224,6 +279,32 @@ async def testeth(ctx):
     else:
         await ctx.send("⚠️ No valid ETH trade setup found at the moment.")
 
+@bot.command()
+async def logsummary(ctx):
+    date_str = datetime.datetime.now(UTC_TZ).strftime("%Y-%m-%d")
+    filename = f"trade_log_{date_str}.csv"
+
+    if not os.path.exists(filename):
+        await ctx.send("📭 No trades logged yet today.")
+        return
+
+    df = pd.read_csv(filename)
+    total = len(df)
+    weak_signals = df[df["WeakSignal"] == "Yes"]
+    weak_count = len(weak_signals)
+    strong_count = total - weak_count
+    percent_weak = round((weak_count / total) * 100) if total > 0 else 0
+
+    embed = discord.Embed(
+        title="📊 Trade Log Summary",
+        color=discord.Color.purple()
+    )
+    embed.add_field(name="📅 Date", value=date_str, inline=False)
+    embed.add_field(name="📦 Total Trades", value=total, inline=True)
+    embed.add_field(name="🟡 Weak Signals", value=f"{weak_count} ({percent_weak}%)", inline=True)
+    embed.add_field(name="🧠 Strong Signals", value=strong_count, inline=True)
+    embed.set_footer(text=f"Updated {fmt_utc(datetime.datetime.now(UTC_TZ))}")
+    await ctx.send(embed=embed)
 
 # -------------------------------------------------------------------
 def detect_trade(df):
@@ -283,7 +364,10 @@ def log_trade_to_csv(trade_data):
     with open(filename, mode="a", newline="") as file:
         writer = csv.writer(file)
         if not file_exists:
-            writer.writerow(["Time", "Symbol", "Type", "Entry", "Stop", "TP1", "TP2", "Confidence"])
+            writer.writerow([
+                "Time", "Symbol", "Type", "Entry", "Stop", "TP1", "TP2",
+                "Confidence", "StrategiesMatched", "WeakSignal"
+            ])
         writer.writerow([
             trade_data["time"],
             trade_data["symbol"],
@@ -292,7 +376,9 @@ def log_trade_to_csv(trade_data):
             f"{trade_data['stop']:.2f}",
             f"{trade_data['tp1']:.2f}",
             f"{trade_data['tp2']:.2f}",
-            trade_data["confidence"]
+            trade_data["confidence"],
+            "; ".join(trade_data["strategies_matched"]),
+            "Yes" if trade_data["type"] == "🟡 Weak Signal" else "No"
         ])
 
 # -------------------------------------------------------------------
@@ -332,6 +418,11 @@ def format_embed(symbol, trade):
     emoji = "🟢" if "Long" in trade["type"] else "🔴"
     confidence_emoji = {6: "🔥", 5: "✅", 4: "🟢", 3: "⚪", 2: "🔻", 1: "🟥", 0: "❌"}.get(trade["confidence"], "❓")
 
+    # ⬇️ NEW: Strategies Matched with Weak Signal flag
+    matched = "\n".join(trade.get("strategies_matched", [trade["type"]]))
+    if trade["type"] == "🟡 Weak Signal":
+        matched += "\n⚠️ *Only weak signal triggered*"
+
     embed = discord.Embed(
         title=f"{emoji} {symbol} {trade['type']} – {header}",
         color=discord.Color.green() if "Long" in trade["type"] else discord.Color.red()
@@ -351,8 +442,14 @@ def format_embed(symbol, trade):
         value=f"{confidence_emoji} {trade['confidence']}/6",
         inline=False
     )
+    embed.add_field(
+        name="🧪 Strategies Matched",
+        value=matched,
+        inline=False
+    )
     embed.set_footer(text=f"Generated {footer}")
     return embed
+
 
 def format_exit_embed(symbol, direction, entry, tp1, tp2, stop, exit_price, result):
     header = fmt_central(now_times()[1])
@@ -423,7 +520,7 @@ async def scan_coins():
         if last_time and (now_utc - last_time).total_seconds() < 30 * 60:
             continue
 
-        trade = detect_trade(df)
+        trade = detect_trade(df, mode=bot_mode)
         if trade:
             log_trade_to_csv({
                 "time": now_utc.isoformat(),
