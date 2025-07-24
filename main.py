@@ -87,6 +87,17 @@ def calculate_indicators(df):
     return df
 
 # -------------------------------------------------------------------
+@bot.command()
+async def strategies(ctx):
+    embed = discord.Embed(title="📘 Available Trade Strategies", color=discord.Color.teal())
+    embed.add_field(name="🔁 Mean Reversion", value="RSI < 30 and Williams %R < -80\nConfidence: 4️⃣", inline=False)
+    embed.add_field(name="🚀 Breakout Anticipation", value="Price > Donchian High and CMF > 0\nConfidence: 5️⃣", inline=False)
+    embed.add_field(name="📊 Volatility Squeeze", value="Bollinger inside Keltner + BB Width > 5%\nConfidence: 3️⃣", inline=False)
+    embed.add_field(name="🌀 Swing Trade", value="CCI > 100 and CMF > 0\nConfidence: 4️⃣", inline=False)
+    embed.add_field(name="📈 Pullback Long", value="RSI > 50 and Price > EMA50\nConfidence: 3️⃣", inline=False)
+    await ctx.send(embed=embed)
+
+# -------------------------------------------------------------------
 def detect_trade(df):
     latest = df.iloc[-1]
     if latest["adx"] < 20 or latest["close"] < latest["ema200"]:
