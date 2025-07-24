@@ -277,7 +277,7 @@ def detect_trade(df):
 
 # -------------------------------------------------------------------
 def log_trade_to_csv(trade_data):
-    date_str = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+    date_str = datetime.datetime.now(UTC_TZ).strftime("%Y-%m-%d")
     filename = f"trade_log_{date_str}.csv"
     file_exists = os.path.isfile(filename)
     with open(filename, mode="a", newline="") as file:
@@ -352,6 +352,22 @@ def format_embed(symbol, trade):
         inline=False
     )
     embed.set_footer(text=f"Generated {footer}")
+    return embed
+
+def format_exit_embed(symbol, direction, entry, tp1, tp2, stop, exit_price, result):
+    header = fmt_central(now_times()[1])
+    footer = fmt_utc(now_times()[0])
+    emoji = "🟢" if direction == "Long" else "🔴"
+
+    embed = discord.Embed(
+        title=f"{emoji} {symbol} Trade Exit – {result}",
+        color=discord.Color.green() if direction == "Long" else discord.Color.red()
+    )
+    embed.add_field(name="📈 Entry", value=f"${entry:.2f}")
+    embed.add_field(name="🎯 TP2", value=f"${tp2:.2f}")
+    embed.add_field(name="🛑 Stop", value=f"${stop:.2f}")
+    embed.add_field(name="💸 Exit Price", value=f"${exit_price:.2f}")
+    embed.set_footer(text=f"Closed {footer}")
     return embed
 
 @bot.command()
