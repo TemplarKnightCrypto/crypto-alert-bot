@@ -331,7 +331,7 @@ async def eth_status_report():
 
         channel = bot.get_channel(STATUS_CHANNEL_ID)
         if channel is None:
-            print("[ERROR] STATUS_CHANNEL_ID not found. Channel is None.")
+            print(f"[ERROR] Status channel {STATUS_CHANNEL_ID} not found. Skipping report.")
             return
 
         df = fetch_ohlc("ETH")
@@ -341,7 +341,7 @@ async def eth_status_report():
             return
 
         df = calculate_indicators(df)
-        latest = df.iloc[-2]  # Use closed candle to avoid flicker
+        latest = df.iloc[-2]  # Use closed candle
         header = fmt_central(now)
         footer = fmt_utc(datetime.datetime.now(UTC_TZ))
 
@@ -380,7 +380,7 @@ async def eth_status_report():
 
         try:
             await channel.send(embed=embed)
-            print(f"[DEBUG] ETH 30-min status report sent at {footer}")
+            print(f"[DEBUG] ETH 30-min report sent at {footer}")
         except Exception as e:
             print(f"[ERROR] Failed to send ETH report: {e}")
 
