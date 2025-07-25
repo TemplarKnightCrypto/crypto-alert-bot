@@ -197,17 +197,19 @@ def format_embed(symbol, trade, central_time, utc_time):
     return embed
 
 
-def format_exit_embed(symbol, direction, entry, tp1, tp2, stop, exit_price, result, central_time, utc_time):
-    emoji = "🟢" if direction == "Long" else "🔴"
+def format_exit_embed(symbol, direction, entry, tp1, tp2, stop, exit_price, result,
+                      close_time_ct, close_time_utc, open_time_ct, elapsed_str):
     embed = discord.Embed(
-        title=f"{emoji} {symbol} Trade Exit – {result}",
-        color=discord.Color.green() if direction == "Long" else discord.Color.red()
+        title=f"{symbol} Trade Exit – {result}",
+        color=discord.Color.green() if "Take Profit" in result else discord.Color.red()
     )
-    embed.add_field(name="📈 Entry", value=f"${entry:.2f}")
-    embed.add_field(name="🎯 TP2", value=f"${tp2:.2f}")
-    embed.add_field(name="🛑 Stop", value=f"${stop:.2f}")
-    embed.add_field(name="💸 Exit Price", value=f"${exit_price:.2f}")
-    embed.set_footer(text=f"Closed {utc_time}")
+    embed.add_field(name="📈 Entry", value=f"${entry:.2f}", inline=True)
+    embed.add_field(name="🎯 TP2", value=f"${tp2:.2f}", inline=True)
+    embed.add_field(name="🛑 Stop", value=f"${stop:.2f}", inline=True)
+    embed.add_field(name="💰 Exit Price", value=f"${exit_price:.2f}", inline=True)
+    embed.add_field(name="⏰ Alert Sent", value=f"{open_time_ct} CT", inline=True)
+    embed.add_field(name="⏳ Elapsed", value=f"{elapsed_str}", inline=True)
+    embed.set_footer(text=f"Closed {close_time_utc} UTC")
     return embed
 
 # === Commands Placeholder ===
@@ -421,11 +423,25 @@ async def scan_coins():
             if hit_tp2 or hit_sl:
                 result = "🎯 Take Profit 2 Hit!" if hit_tp2 else "💥 Stop Loss Hit!"
                 leaderboard_stats[symbol]["wins" if hit_tp2 else "losses"] += 1
+
                 central_time = fmt_central(now_utc.astimezone(CENTRAL_TZ))
                 utc_time = fmt_utc(now_utc)
-                embed = format_exit_embed(symbol, direction, entry, tp1, tp2, stop, price, result, central_time, utc_time)
+
+                elapsed = now_utc - open_time_utc
+                elapsed_minutes = int(elapsed.total_seconds() // 60)
+                hours, minutes = divmod(elapsed_minutes, 60)
+                elapsed_str = f"{hours}h {minutes}m" if hours else f"{minutes}m"
+
+                central_open_time = fmt_central(open_time_utc.astimezone(CENTRAL_TZ))
+
+                embed = format_exit_embed(
+                    symbol, direction, entry, tp1, tp2, stop, price, result,
+                    central_time, utc_time, central_open_time, elapsed_str
+                )
+
                 if symbol == "ETH":
                     await channel.send(embed=embed)
+
                 del active_alerts[symbol]
             continue
 
@@ -433,6 +449,7 @@ async def scan_coins():
         last_time = cooldowns.get(symbol)
         if last_time and (now_utc - last_time).total_seconds() < 1800:
             continue
+
 
         # ✅ Trade detection (indented properly)
         trade = detect_trade(df, mode=bot_mode)
