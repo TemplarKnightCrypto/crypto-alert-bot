@@ -404,7 +404,7 @@ async def scan_coins():
         # Check for open trade
         if symbol in active_alerts:
             entry, tp1, tp2, stop, open_time_utc, trade_type = active_alerts[symbol]
-direction = "Short" if "Short" in trade_type else "Long"
+            direction = "Short" if "Short" in trade_type else "Long"
 
             # === Candle Debug Logging ===
             print(f"\n[DEBUG] ----- {symbol} Active Trade Check -----")
