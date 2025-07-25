@@ -434,7 +434,7 @@ async def scan_coins():
         if last_time and (now_utc - last_time).total_seconds() < 1800:
             continue
 
-        # Trade detection
+        # ✅ Trade detection (indented properly)
         trade = detect_trade(df, mode=bot_mode)
         if trade:
             log_trade_to_csv({
@@ -459,6 +459,9 @@ async def scan_coins():
             active_alerts[symbol] = (
                 trade["entry"], trade["tp1"], trade["tp2"], trade["stop"], now_utc
             )
+
+            print(f"[DEBUG] 🚨 New Trade Set: {symbol} | Entry: {trade['entry']:.2f}, TP2: {trade['tp2']:.2f}, Stop: {trade['stop']:.2f}")
+
             cooldowns[symbol] = now_utc
 
 # === Bot Ready ===
