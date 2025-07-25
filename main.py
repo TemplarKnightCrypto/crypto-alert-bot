@@ -439,13 +439,16 @@ async def scan_coins():
         df = calculate_indicators(df)
         latest = df.iloc[-1]
         price = latest["close"]
+        candle_high = latest["high"]
+        candle_low = latest["low"]
 
         # Check for open trade
         if symbol in active_alerts:
             entry, tp1, tp2, stop, open_time_utc = active_alerts[symbol]
             direction = "Long" if entry < stop else "Short"
-            hit_tp2 = (price >= tp2) if direction == "Long" else (price <= tp2)
-            hit_sl = (price <= stop) if direction == "Long" else (price >= stop)
+
+            hit_tp2 = (candle_high >= tp2) if direction == "Long" else (candle_low <= tp2)
+            hit_sl = (candle_low <= stop) if direction == "Long" else (candle_high >= stop)
 
             if hit_tp2 or hit_sl:
                 result = "🎯 Take Profit 2 Hit!" if hit_tp2 else "💥 Stop Loss Hit!"
