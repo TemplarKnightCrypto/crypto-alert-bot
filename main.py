@@ -325,15 +325,23 @@ async def leaderboard(ctx):
 @tasks.loop(minutes=1)
 async def eth_status_report():
     now = datetime.datetime.now(CENTRAL_TZ)
+
     if now.minute in (0, 30):
+        print(f"[DEBUG] Triggering ETH 30-min report at {now.strftime('%Y-%m-%d %H:%M:%S')} CT")
+
         channel = bot.get_channel(STATUS_CHANNEL_ID)
+        if channel is None:
+            print("[ERROR] STATUS_CHANNEL_ID not found. Channel is None.")
+            return
+
         df = fetch_ohlc("ETH")
         if df is None:
             await channel.send("❌ Could not fetch ETH data.")
+            print("[ERROR] Failed to fetch ETH OHLC data.")
             return
 
         df = calculate_indicators(df)
-        latest = df.iloc[-1]
+        latest = df.iloc[-2]  # Use closed candle to avoid flicker
         header = fmt_central(now)
         footer = fmt_utc(datetime.datetime.now(UTC_TZ))
 
@@ -367,63 +375,14 @@ async def eth_status_report():
             ),
             inline=False
         )
-        embed.add_field(
-            name="📊 Market Bias",
-            value=bias,
-            inline=False
-        )
+        embed.add_field(name="📊 Market Bias", value=bias, inline=False)
         embed.set_footer(text=f"Updated {footer}")
-        await channel.send(embed=embed)
 
-# === Daily Leaderboard Report ===
-@tasks.loop(time=datetime.time(hour=23, minute=59, tzinfo=UTC_TZ))
-async def send_leaderboard_report():
-    channel = bot.get_channel(STATUS_CHANNEL_ID)
-    now = datetime.datetime.now(UTC_TZ)
-    date_str = now.strftime("%Y-%m-%d")
-    filename = f"trade_log_{date_str}.csv"
-
-    embed = discord.Embed(
-        title="🏆 Daily Trade Report",
-        color=discord.Color.gold()
-    )
-    embed.add_field(name="📅 Date", value=date_str, inline=False)
-
-    sorted_stats = sorted(leaderboard_stats.items(), key=lambda x: x[1]["wins"], reverse=True)
-    for symbol, stats in sorted_stats:
-        wins = stats["wins"]
-        losses = stats["losses"]
-        total = wins + losses if (wins + losses) > 0 else 1
-        win_rate = round((wins / total) * 100)
-        embed.add_field(
-            name=symbol,
-            value=f"✅ Wins: {wins} | 💥 Losses: {losses} | 📊 Win Rate: {win_rate}%",
-            inline=False
-        )
-
-    if os.path.exists(filename):
-        df = pd.read_csv(filename)
-        total = len(df)
-        weak_signals = df[df["WeakSignal"] == "Yes"]
-        weak_count = len(weak_signals)
-        strong_count = total - weak_count
-        percent_weak = round((weak_count / total) * 100) if total > 0 else 0
-
-        embed.add_field(name="📦 Total Trades", value=total, inline=True)
-        embed.add_field(name="🟡 Weak Signals", value=f"{weak_count} ({percent_weak}%)", inline=True)
-        embed.add_field(name="🧠 Strong Signals", value=strong_count, inline=True)
-    else:
-        embed.add_field(name="📦 Trade Log", value="No trades logged today.", inline=False)
-
-    embed.set_footer(text=f"Generated {fmt_utc(now)}")
-    await channel.send(embed=embed)
-
-# === Daily Reset ===
-@tasks.loop(time=datetime.time(hour=0, minute=0, tzinfo=UTC_TZ))
-async def reset_leaderboard_daily():
-    global leaderboard_stats
-    leaderboard_stats = {sym: {"wins": 0, "losses": 0} for sym in KRAKEN_PAIRS}
-    print("🔁 Leaderboard has been reset for the new day.")
+        try:
+            await channel.send(embed=embed)
+            print(f"[DEBUG] ETH 30-min status report sent at {footer}")
+        except Exception as e:
+            print(f"[ERROR] Failed to send ETH report: {e}")
 
 # === Real-Time Scanner ===
 @tasks.loop(minutes=1)
@@ -447,14 +406,17 @@ async def scan_coins():
             entry, tp1, tp2, stop, open_time_utc = active_alerts[symbol]
             direction = "Long" if entry < stop else "Short"
 
+            # === Candle Debug Logging ===
+            print(f"\n[DEBUG] ----- {symbol} Active Trade Check -----")
+            print(f"[DEBUG] Direction: {direction}")
+            print(f"[DEBUG] Entry: {entry:.2f}, Stop: {stop:.2f}, TP1: {tp1:.2f}, TP2: {tp2:.2f}")
+            print(f"[DEBUG] Candle Close: {price:.2f}, High: {candle_high:.2f}, Low: {candle_low:.2f}")
+            print(f"[DEBUG] TP2 Condition: {candle_high >= tp2 if direction == 'Long' else candle_low <= tp2}")
+            print(f"[DEBUG] SL Condition: {candle_low <= stop if direction == 'Long' else candle_high >= stop}")
+            print(f"[DEBUG] Timestamp (UTC): {now_utc.isoformat()}")
+
             hit_tp2 = (candle_high >= tp2) if direction == "Long" else (candle_low <= tp2)
             hit_sl = (candle_low <= stop) if direction == "Long" else (candle_high >= stop)
-
-            # 🧪 Debug Logging
-            print(f"[DEBUG] Symbol: {symbol}")
-            print(f"[DEBUG] Entry: {entry}, TP1: {tp1}, TP2: {tp2}, Stop: {stop}")
-            print(f"[DEBUG] Candle High: {candle_high}, Low: {candle_low}, Close: {price}")
-            print(f"[DEBUG] Hit TP2: {hit_tp2}, Hit SL: {hit_sl}")
 
             if hit_tp2 or hit_sl:
                 result = "🎯 Take Profit 2 Hit!" if hit_tp2 else "💥 Stop Loss Hit!"
@@ -505,9 +467,7 @@ async def on_ready():
     print(f"\u2705 Bot is online as {bot.user}")
     scan_coins.start()
     eth_status_report.start()
-    reset_leaderboard_daily.start()
-    send_leaderboard_report.start()
-
+    
 # === Run Bot ===
 if TOKEN:
     bot.run(TOKEN)
