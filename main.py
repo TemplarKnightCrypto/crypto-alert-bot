@@ -437,7 +437,7 @@ async def scan_coins():
             continue
 
         df = calculate_indicators(df)
-        latest = df.iloc[-1]
+        latest = df.iloc[-2]  # Use the most recent *closed* candle
         price = latest["close"]
         candle_high = latest["high"]
         candle_low = latest["low"]
@@ -449,6 +449,12 @@ async def scan_coins():
 
             hit_tp2 = (candle_high >= tp2) if direction == "Long" else (candle_low <= tp2)
             hit_sl = (candle_low <= stop) if direction == "Long" else (candle_high >= stop)
+
+            # 🧪 Debug Logging
+            print(f"[DEBUG] Symbol: {symbol}")
+            print(f"[DEBUG] Entry: {entry}, TP1: {tp1}, TP2: {tp2}, Stop: {stop}")
+            print(f"[DEBUG] Candle High: {candle_high}, Low: {candle_low}, Close: {price}")
+            print(f"[DEBUG] Hit TP2: {hit_tp2}, Hit SL: {hit_sl}")
 
             if hit_tp2 or hit_sl:
                 result = "🎯 Take Profit 2 Hit!" if hit_tp2 else "💥 Stop Loss Hit!"
