@@ -403,8 +403,8 @@ async def scan_coins():
 
         # Check for open trade
         if symbol in active_alerts:
-            entry, tp1, tp2, stop, open_time_utc = active_alerts[symbol]
-            direction = "Long" if entry < stop else "Short"
+            entry, tp1, tp2, stop, open_time_utc, trade_type = active_alerts[symbol]
+direction = "Short" if "Short" in trade_type else "Long"
 
             # === Candle Debug Logging ===
             print(f"\n[DEBUG] ----- {symbol} Active Trade Check -----")
@@ -457,8 +457,8 @@ async def scan_coins():
                 await channel.send(embed=embed)
 
             active_alerts[symbol] = (
-                trade["entry"], trade["tp1"], trade["tp2"], trade["stop"], now_utc
-            )
+    trade["entry"], trade["tp1"], trade["tp2"], trade["stop"], now_utc, trade["type"]
+)
 
             print(f"[DEBUG] 🚨 New Trade Set: {symbol} | Entry: {trade['entry']:.2f}, TP2: {trade['tp2']:.2f}, Stop: {trade['stop']:.2f}")
 
