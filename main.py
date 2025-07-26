@@ -46,8 +46,8 @@ threading.Thread(target=lambda: app.run(host="0.0.0.0", port=8000)).start()
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
-CHANNEL_ID = 1395604673737789460
-STATUS_CHANNEL_ID = 1397320600359272469
+CHANNEL_ID = 1398690647417819198
+STATUS_CHANNEL_ID = 1398691425347961016
 
 # === Time Utilities ===
 def now_times():
