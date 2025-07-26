@@ -7,6 +7,7 @@ import datetime
 import pytz
 import csv
 import discord
+import talib
 from flask import Flask
 from dotenv import load_dotenv
 from discord.ext import commands, tasks
@@ -26,11 +27,14 @@ TOKEN = os.getenv("TOKEN")
 # === Bot State ===
 bot_mode = "aggressive"  # Default mode can be toggled with !mode command
 KRAKEN_PAIRS = {
-    "BTC": "XXBTZUSD", "ETH": "XETHZUSD", "XRP": "XXRPZUSD", "SOL": "SOLUSD",
-    "DOGE": "DOGEUSD", "ADA": "ADAUSD", "SUI": "SUIUSD", "HBAR": "HBARUSD",
-    "AVAX": "AVAXUSD", "LINK": "LINKUSD", "TON": "TONUSD", "PEPE": "PEPEUSD",
-    "OP": "OPUSD", "INJ": "INJUSD"
+    "BTC": "XXBTZUSD",
+    "ETH": "XETHZUSD",
+    "SOL": "SOLUSD",
+    "AVAX": "AVAXUSD",
+    "ADA": "ADAUSD",
+    "HBAR": "HBARUSD"
 }
+
 active_alerts = {}  # Currently active trades
 cooldowns = {}       # Cooldowns to avoid repeated alerts
 leaderboard_stats = {sym: {"wins": 0, "losses": 0} for sym in KRAKEN_PAIRS}  # Daily stats
@@ -63,6 +67,26 @@ def fmt_utc(dt):
 
 # === Logic Placeholder ===
 # ========================
+def calculate_candle_patterns(df):
+    open_ = df["open"]
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+
+    # Bullish patterns
+    df["bull_engulfing"] = talib.CDLENGULFING(open_, high, low, close)
+    df["morning_star"] = talib.CDLMORNINGSTAR(open_, high, low, close)
+    df["hammer"] = talib.CDLHAMMER(open_, high, low, close)
+    df["piercing_line"] = talib.CDLPIERCING(open_, high, low, close)
+
+    # Bearish patterns
+    df["bear_engulfing"] = talib.CDLENGULFING(open_, high, low, close)
+    df["evening_star"] = talib.CDLEVENINGSTAR(open_, high, low, close)
+    df["shooting_star"] = talib.CDLSHOOTINGSTAR(open_, high, low, close)
+    df["dark_cloud"] = talib.CDLDARKCLOUDCOVER(open_, high, low, close)
+
+    return df
+
 def calculate_indicators(df):
     df["ema50"] = ema_indicator(df["close"], window=50)
     df["rsi"] = rsi(df["close"], window=14)
@@ -81,6 +105,7 @@ def calculate_indicators(df):
     df["squeeze"] = (df["bb_lower"] > df["kc_lower"]) & (df["bb_upper"] < df["kc_upper"])
     mfv = ((df["close"] - df["low"]) - (df["high"] - df["close"])) / (df["high"] - df["low"] + 1e-9) * df["volume"]
     df["cmf"] = mfv.rolling(window=20).sum() / df["volume"].rolling(window=20).sum()
+    df = calculate_candle_patterns(df)
     return df
 
 
@@ -90,20 +115,53 @@ def detect_trade(df, mode="aggressive"):
     matches = []
     confidence = 0
 
+    # === Long Trade Setups ===
     if latest["rsi"] < 30 and latest["williams_r"] < -80:
-        matches.append(("🔁 Mean Reversion", 4))
+        matches.append(("📈 🔁 Mean Reversion Long", 4))
     if latest["close"] > latest["donchian_high"] and latest["cmf"] > 0:
-        matches.append(("🚀 Breakout Anticipation", 5))
+        matches.append(("📈 🚀 Breakout Anticipation", 5))
     if latest["squeeze"] and latest["bb_width"] > 0.05:
-        matches.append(("📊 Volatility Squeeze", 3))
+        matches.append(("📈 📊 Volatility Squeeze Long", 3))
     if latest["cci"] > 100 and latest["cmf"] > 0:
-        matches.append(("🌀 Swing Trade", 4))
+        matches.append(("📈 🌀 Swing Trade Long", 4))
     if latest["rsi"] > 50 and latest["close"] > latest["ema50"]:
-        matches.append(("📈 Pullback Long", 3))
+        matches.append(("📈 📈 Pullback Long", 3))
 
+    # === Short Trade Setups ===
+    if latest["rsi"] > 70 and latest["williams_r"] > -20:
+        matches.append(("📉 🔁 Mean Reversion Short", 4))
+    if latest["close"] < latest["donchian_low"] and latest["cmf"] < 0:
+        matches.append(("📉 🔻 Breakdown Anticipation", 5))
+    if latest["squeeze"] and latest["bb_width"] > 0.05 and latest["cmf"] < 0:
+        matches.append(("📉 📊 Volatility Squeeze Short", 3))
+    if latest["cci"] < -100 and latest["cmf"] < 0:
+        matches.append(("📉 🌀 Swing Trade Short", 4))
+    if latest["rsi"] < 50 and latest["close"] < latest["ema50"]:
+        matches.append(("📉 📉 Pullback Short", 3))
+
+    # === Candlestick Pattern Matches ===
+    if latest["bull_engulfing"] == 100:
+        matches.append(("📈 📍 Bullish Engulfing (Candle)", 4))
+    if latest["hammer"] == 100:
+        matches.append(("📈 🔨 Hammer Reversal", 3))
+    if latest["morning_star"] == 100:
+        matches.append(("📈 🌅 Morning Star", 4))
+    if latest["piercing_line"] == 100:
+        matches.append(("📈 ✴️ Piercing Line", 3))
+
+    if latest["bear_engulfing"] == -100:
+        matches.append(("📉 📍 Bearish Engulfing (Candle)", 4))
+    if latest["shooting_star"] == -100:
+        matches.append(("📉 🌠 Shooting Star", 3))
+    if latest["evening_star"] == -100:
+        matches.append(("📉 🌆 Evening Star", 4))
+    if latest["dark_cloud"] == -100:
+        matches.append(("📉 ☁️ Dark Cloud Cover", 3))
+
+    # === No Match Fallback ===
     if not matches:
         if mode == "aggressive":
-            return {
+            return [{
                 "type": "🟡 Weak Signal",
                 "entry": latest["close"],
                 "stop": latest["close"] - latest["atr"] * 1.5,
@@ -111,26 +169,61 @@ def detect_trade(df, mode="aggressive"):
                 "tp2": latest["close"] + latest["atr"] * 2.5,
                 "confidence": 1,
                 "strategies_matched": []
-            }
-        return None
+            }]
+        return []
 
+    # === Generate Trade Objects ===
+    trades = []
+    for match_text, weight in matches:
+        direction = "short" if "📉" in match_text else "long"
+        if direction == "long":
+            stop = latest["close"] - latest["atr"] * 1.5
+            tp1 = latest["close"] + latest["atr"] * 1.5
+            tp2 = latest["close"] + latest["atr"] * 2.5
+        else:
+            stop = latest["close"] + latest["atr"] * 1.5
+            tp1 = latest["close"] - latest["atr"] * 1.5
+            tp2 = latest["close"] - latest["atr"] * 2.5
+
+        trades.append({
+            "type": match_text,
+            "entry": latest["close"],
+            "stop": stop,
+            "tp1": tp1,
+            "tp2": tp2,
+            "confidence": weight,
+            "strategies_matched": [match_text]
+        })
+
+    return trades
+
+    # Pick highest scoring strategy
     best = max(matches, key=lambda x: x[1])
     strategy, confidence = best
+
+    # Bonus for trend strength, penalty for volatility
     if latest["adx"] > 25:
         confidence += 1
     if latest["atr"] > 1.5 * atr_avg:
         confidence -= 1
     confidence = max(0, min(confidence, 6))
+
+    direction = "Short" if "📉" in strategy else "Long"
+    entry = latest["close"]
+    atr = latest["atr"]
+    stop = entry + atr * 1.5 if direction == "Short" else entry - atr * 1.5
+    tp1 = entry - atr * 1.5 if direction == "Short" else entry + atr * 1.5
+    tp2 = entry - atr * 2.5 if direction == "Short" else entry + atr * 2.5
+
     return {
         "type": strategy,
-        "entry": latest["close"],
-        "stop": latest["close"] - latest["atr"] * 1.5,
-        "tp1": latest["close"] + latest["atr"] * 1.5,
-        "tp2": latest["close"] + latest["atr"] * 2.5,
+        "entry": entry,
+        "stop": stop,
+        "tp1": tp1,
+        "tp2": tp2,
         "confidence": confidence,
         "strategies_matched": [s for s, _ in matches]
     }
-
 
 def log_trade_to_csv(trade_data):
     filename = f"trade_log_{datetime.datetime.now(UTC_TZ).strftime('%Y-%m-%d')}.csv"
@@ -179,20 +272,75 @@ def calculate_market_bias(latest):
 
 
 def format_embed(symbol, trade, central_time, utc_time):
-    confidence_emoji = {6: "🔥", 5: "✅", 4: "🟢", 3: "⚪", 2: "🔻", 1: "🟥", 0: "❌"}.get(trade["confidence"], "❓")
+    confidence_emoji = {
+        6: "🔥", 5: "✅", 4: "🟢", 3: "⚪", 2: "🔻", 1: "🟥", 0: "❌"
+    }.get(trade["confidence"], "❓")
+
     matched = "\n".join(trade.get("strategies_matched", [trade["type"]]))
     if trade["type"] == "🟡 Weak Signal":
         matched += "\n⚠️ *Only weak signal triggered*"
-    emoji = "🟢" if "Long" in trade["type"] else "🔴"
+
+    direction = "Short" if "Short" in trade["type"] else "Long"
+    emoji = "📉" if direction == "Short" else "📈"
+    color = discord.Color.red() if direction == "Short" else discord.Color.green()
+
+    # Knight signal mapping
+        knight_signals = {
+        # Strategy Matches
+        "Mean Reversion": "🌙 Orion Vellum",
+        "Breakout": "⚔️ Sir Leonis Ironhart",
+        "Breakdown": "⚔️ Sir Leonis Ironhart",
+        "Volatility Squeeze": "🌘 Orion Vellum",
+        "Swing Trade": "⚔️ Sir Leonis Ironhart",
+        "Pullback Long": "🛡️ Sir Lucien Frostveil",
+        "Pullback Short": "🛡️ Sir Lucien Frostveil",
+
+        # Candlestick Patterns
+        "Bullish Engulfing": "⚔️ Sir Leonis Ironhart",
+        "Bearish Engulfing": "⚔️ Sir Leonis Ironhart",
+        "Hammer": "🛡️ Sir Lucien Frostveil",
+        "Shooting Star": "🌙 Orion Vellum",
+        "Morning Star": "🌙 Orion Vellum",
+        "Evening Star": "🌙 Orion Vellum",
+        "Piercing Line": "🛡️ Sir Lucien Frostveil",
+        "Dark Cloud Cover": "🛡️ Sir Lucien Frostveil"
+    }
+
+    knight = "🧙 Unknown"
+    for key, name in knight_signals.items():
+        if key in trade["type"]:
+            knight = name
+            break
 
     embed = discord.Embed(
         title=f"{emoji} {symbol} {trade['type']} – {central_time}",
-        color=discord.Color.green() if "Long" in trade["type"] else discord.Color.red()
+        color=color
     )
-    embed.add_field(name="📊 Trade Setup", value=f"📈 Entry: **${trade['entry']:.2f}**\n🛑 Stop:  `${trade['stop']:.2f}`", inline=False)
-    embed.add_field(name="🎯 Targets", value=f"TP1: ${trade['tp1']:.2f}\nTP2: ${trade['tp2']:.2f}", inline=False)
-    embed.add_field(name="🧠 Confidence", value=f"{confidence_emoji} {trade['confidence']}/6", inline=False)
-    embed.add_field(name="🧪 Strategy Match", value=matched, inline=False)
+    embed.add_field(
+        name="📊 Trade Setup",
+        value=f"{emoji} Entry: **${trade['entry']:.2f}**\n🛑 Stop: `${trade['stop']:.2f}`",
+        inline=False
+    )
+    embed.add_field(
+        name="🎯 Targets",
+        value=f"TP1: ${trade['tp1']:.2f}\nTP2: ${trade['tp2']:.2f}",
+        inline=False
+    )
+    embed.add_field(
+        name="🧠 Confidence",
+        value=f"{confidence_emoji} {trade['confidence']}/6",
+        inline=False
+    )
+    embed.add_field(
+        name="🧪 Strategy Match",
+        value=matched,
+        inline=False
+    )
+    embed.add_field(
+        name="🧙 Signal Issued By",
+        value=knight,
+        inline=False
+    )
     embed.set_footer(text=f"Generated {utc_time}")
     return embed
 
@@ -439,7 +587,7 @@ async def scan_coins():
                     central_time, utc_time, central_open_time, elapsed_str
                 )
 
-                if symbol == "ETH":
+                if symbol in ["ETH", "BTC", "SOL", "AVAX", "ADA", "HBAR"]:
                     await channel.send(embed=embed)
 
                 del active_alerts[symbol]
