@@ -5,7 +5,7 @@ requests
 Flask
 python-dotenv
 ta
-talib-binary
+
 
 
 
