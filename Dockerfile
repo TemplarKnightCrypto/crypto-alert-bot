@@ -1,9 +1,8 @@
 FROM python:3.12-slim
 
-# Set working directory
 WORKDIR /app
 
-# Install system dependencies for TA-Lib
+# === Install dependencies and TA-Lib from source ===
 RUN apt-get update && apt-get install -y \
     build-essential \
     wget \
@@ -14,18 +13,22 @@ RUN apt-get update && apt-get install -y \
     libbz2-dev \
     libssl-dev \
     zlib1g-dev \
-    libta-lib0 \
-    libta-lib0-dev \
+    libtool \
+    automake \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy your files
-COPY . .
+# === Download and build TA-Lib from source ===
+RUN curl -L http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz | tar zx && \
+    cd ta-lib && \
+    ./configure --prefix=/usr && \
+    make && make install && \
+    cd .. && rm -rf ta-lib
 
-# Install Python dependencies
-RUN pip install --no-cache-dir --upgrade pip
+# === Copy and install Python packages ===
+COPY . .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Expose port and run your bot
 EXPOSE 8000
 CMD ["python", "main.py"]
+
 
