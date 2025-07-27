@@ -7,7 +7,6 @@ import datetime
 import pytz
 import csv
 import discord
-import talib
 from flask import Flask
 from dotenv import load_dotenv
 from discord.ext import commands, tasks
@@ -67,26 +66,6 @@ def fmt_utc(dt):
 
 # === Logic Placeholder ===
 # ========================
-def calculate_candle_patterns(df):
-    open_ = df["open"]
-    high = df["high"]
-    low = df["low"]
-    close = df["close"]
-
-    # Bullish patterns
-    df["bull_engulfing"] = talib.CDLENGULFING(open_, high, low, close)
-    df["morning_star"] = talib.CDLMORNINGSTAR(open_, high, low, close)
-    df["hammer"] = talib.CDLHAMMER(open_, high, low, close)
-    df["piercing_line"] = talib.CDLPIERCING(open_, high, low, close)
-
-    # Bearish patterns
-    df["bear_engulfing"] = talib.CDLENGULFING(open_, high, low, close)
-    df["evening_star"] = talib.CDLEVENINGSTAR(open_, high, low, close)
-    df["shooting_star"] = talib.CDLSHOOTINGSTAR(open_, high, low, close)
-    df["dark_cloud"] = talib.CDLDARKCLOUDCOVER(open_, high, low, close)
-
-    return df
-
 def calculate_indicators(df):
     df["ema50"] = ema_indicator(df["close"], window=50)
     df["rsi"] = rsi(df["close"], window=14)
@@ -105,7 +84,7 @@ def calculate_indicators(df):
     df["squeeze"] = (df["bb_lower"] > df["kc_lower"]) & (df["bb_upper"] < df["kc_upper"])
     mfv = ((df["close"] - df["low"]) - (df["high"] - df["close"])) / (df["high"] - df["low"] + 1e-9) * df["volume"]
     df["cmf"] = mfv.rolling(window=20).sum() / df["volume"].rolling(window=20).sum()
-    df = calculate_candle_patterns(df)
+    
     return df
 
 
@@ -138,25 +117,6 @@ def detect_trade(df, mode="aggressive"):
         matches.append(("📉 🌀 Swing Trade Short", 4))
     if latest["rsi"] < 50 and latest["close"] < latest["ema50"]:
         matches.append(("📉 📉 Pullback Short", 3))
-
-    # === Candlestick Pattern Matches ===
-    if latest["bull_engulfing"] == 100:
-        matches.append(("📈 📍 Bullish Engulfing (Candle)", 4))
-    if latest["hammer"] == 100:
-        matches.append(("📈 🔨 Hammer Reversal", 3))
-    if latest["morning_star"] == 100:
-        matches.append(("📈 🌅 Morning Star", 4))
-    if latest["piercing_line"] == 100:
-        matches.append(("📈 ✴️ Piercing Line", 3))
-
-    if latest["bear_engulfing"] == -100:
-        matches.append(("📉 📍 Bearish Engulfing (Candle)", 4))
-    if latest["shooting_star"] == -100:
-        matches.append(("📉 🌠 Shooting Star", 3))
-    if latest["evening_star"] == -100:
-        matches.append(("📉 🌆 Evening Star", 4))
-    if latest["dark_cloud"] == -100:
-        matches.append(("📉 ☁️ Dark Cloud Cover", 3))
 
     # === No Match Fallback ===
     if not matches:

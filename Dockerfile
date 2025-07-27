@@ -1,31 +1,27 @@
-FROM python:3.10-slim
+# Use a lightweight base Python image
+FROM python:3.12-slim
 
+# Install system dependencies (only what's needed)
+RUN apt-get update && \
+    apt-get install -y gcc && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set working directory
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    gcc \
-    libffi-dev \
-    libssl-dev \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy app code
+# Copy your project files
 COPY . .
 
-# Upgrade pip
+# Upgrade pip and install Python dependencies
 RUN pip install --no-cache-dir --upgrade pip
-
-# Install TA-Lib Python wrapper (prebuilt .whl for Python 3.10)
-RUN pip install --no-cache-dir \
-  https://github.com/mrjbq7/ta-lib/releases/download/0.4.0/TA_Lib-0.4.0-cp310-cp310-manylinux1_x86_64.whl
-
-# Install remaining Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Expose your app's port (if using Flask)
 EXPOSE 8000
+
+# Run your main script
 CMD ["python", "main.py"]
+
 
 
 
