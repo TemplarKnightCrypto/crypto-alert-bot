@@ -1,29 +1,24 @@
 FROM python:3.12-slim
 
-# System dependencies
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies for TA-Lib
 RUN apt-get update && apt-get install -y \
     build-essential \
     wget \
     curl \
-    git \
+    gcc \
+    make \
     libffi-dev \
+    libbz2-dev \
     libssl-dev \
+    zlib1g-dev \
+    libta-lib0 \
+    libta-lib0-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install TA-Lib C library
-RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
-    tar -xvzf ta-lib-0.4.0-src.tar.gz && \
-    cd ta-lib && \
-    ./configure --prefix=/usr && \
-    make && \
-    make install && \
-    cd .. && rm -rf ta-lib ta-lib-0.4.0-src.tar.gz
-
-# Set library path so linker can find libta_lib
-ENV LD_LIBRARY_PATH="/usr/lib:$LD_LIBRARY_PATH"
-
-# Set working directory
-WORKDIR /app
+# Copy your files
 COPY . .
 
 # Install Python dependencies
