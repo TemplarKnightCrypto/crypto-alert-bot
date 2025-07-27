@@ -61,8 +61,11 @@ def fmt_central(dt):
 def fmt_utc(dt):
     return dt.strftime("%Y-%m-%d %H:%M UTC")
 
+# === Indicator Calculation Function ===
 def calculate_indicators(df):
     # === Core Indicators ===
+    df["ema9"] = ema_indicator(df["close"], window=9)
+    df["ema21"] = ema_indicator(df["close"], window=21)
     df["ema50"] = ema_indicator(df["close"], window=50)
     df["rsi"] = rsi(df["close"], window=14)
     df["atr"] = average_true_range(df["high"], df["low"], df["close"], window=14)
@@ -128,9 +131,14 @@ def calculate_indicators(df):
     df["ichimoku_bull"] = (df["close"] > senkou_span_a) & (df["close"] > senkou_span_b)
     df["ichimoku_bear"] = (df["close"] < senkou_span_a) & (df["close"] < senkou_span_b)
     df["twist"] = (senkou_span_a - senkou_span_b).diff().abs() < 1e-3
+    df["kumo_breakout"] = (df["close"] > senkou_span_a) & (df["close"] > senkou_span_b)
+    df["kumo_breakdown"] = (df["close"] < senkou_span_a) & (df["close"] < senkou_span_b)
+    df["inside_kumo"] = ((df["close"] > senkou_span_b) & (df["close"] < senkou_span_a)) | \
+                         ((df["close"] > senkou_span_a) & (df["close"] < senkou_span_b))
 
     return df
 
+# === Main Detection Logic ===
 def detect_trade(df, mode="aggressive"):
     latest = df.iloc[-1]
     matches = []
@@ -191,7 +199,7 @@ def detect_trade(df, mode="aggressive"):
                 "tp2": latest["close"] + latest["atr"] * 2.5,
                 "confidence": 1,
                 "strategies_matched": [],
-                "knight": assign_knight("🟡 Weak Signal", [])
+                "knight": assign_knight("Weak Signal", [])
             }]
         return []
 
@@ -207,7 +215,9 @@ def detect_trade(df, mode="aggressive"):
             tp1 = latest["close"] - latest["atr"] * 1.5
             tp2 = latest["close"] - latest["atr"] * 2.5
 
-        knight = assign_knight(match_text, ["rsi", "ema50", "supertrend", "alligator", "ichimoku_bull", "twist"])
+        knight = assign_knight(match_text, [
+            "rsi", "ema50", "supertrend", "alligator", "ichimoku_bull", "twist"
+        ])
         trades.append({
             "type": match_text,
             "entry": latest["close"],
@@ -220,6 +230,55 @@ def detect_trade(df, mode="aggressive"):
         })
 
     return trades
+
+# === Orion’s Daily Strategy Detection (OUTSIDE detect_trade) ===
+def detect_breakout_orion(df):
+    candle = df.iloc[-2]
+
+    long_breakout = (
+        candle["close"] > 2920 and
+        candle["ema9"] > candle["ema21"] > candle["ema50"] and
+        candle["close"] > candle["ema9"] and
+        candle.get("kumo_breakout", False)
+    )
+
+    short_breakout = (
+        candle["close"] < 2920 and
+        candle["ema9"] < candle["ema21"] < candle["ema50"] and
+        candle["close"] < candle["ema9"] and
+        candle.get("kumo_breakdown", False)
+    )
+
+    if long_breakout:
+        return "Breakout Long"
+    elif short_breakout:
+        return "Breakout Short"
+    else:
+        return None
+
+def detect_pullback_orion(df):
+    candle = df.iloc[-2]
+
+    long_pullback = (
+        2880 <= candle["close"] <= 2900 and
+        candle["rsi"] < 40 and
+        candle["close"] > candle["ema21"] and
+        candle.get("inside_kumo", True)
+    )
+
+    short_pullback = (
+        2940 <= candle["close"] <= 2960 and
+        candle["rsi"] > 60 and
+        candle["close"] < candle["ema21"] and
+        candle.get("inside_kumo", True)
+    )
+
+    if long_pullback:
+        return "Pullback Long"
+    elif short_pullback:
+        return "Pullback Short"
+    else:
+        return None
 
 def log_trade_to_csv(trade_data):
     date_str = datetime.datetime.now(UTC_TZ).strftime('%Y-%m-%d')
@@ -329,6 +388,28 @@ def format_exit_embed(symbol, direction, entry, tp1, tp2, stop, exit_price, resu
     embed.add_field(name="⏰ Alert Sent", value=f"{open_time_ct} CT", inline=True)
     embed.add_field(name="⏳ Elapsed", value=f"{elapsed_str}", inline=True)
     embed.set_footer(text=f"Closed {close_time_utc} UTC")
+    return embed
+def format_orion_embed(strategy_type, entry, stop, tp1, tp2):
+    now_ct = datetime.datetime.now(CENTRAL_TZ).strftime('%b %d • %I:%M %p CT')
+    now_utc = datetime.datetime.now(UTC_TZ).strftime('%H:%M UTC')
+
+    # Orion’s poetic tone based on signal type
+    quotes = {
+        "Breakout Long": "🌘 Orion whispers: *From the depths we rise, unseen yet unstoppable.*",
+        "Pullback Long": "🌘 Orion murmurs: *The moon retreats, only to gather strength anew.*",
+        "Breakout Short": "🌘 Orion intones: *Foundations fracture. The silence begins to scream.*",
+        "Pullback Short": "🌘 Orion breathes: *The winds return. Shadows reclaim what was borrowed.*"
+    }
+    quote = quotes.get(strategy_type, "🌘 Orion watches silently...")
+
+    embed = discord.Embed(
+        title=f"🌘 Orion's Daily ETH Signal – {strategy_type}",
+        color=0x6f42c1  # Mystic purple
+    )
+    embed.add_field(name="🎯 Entry", value=f"`{entry}`", inline=True)
+    embed.add_field(name="🛡️ Stop Loss", value=f"`{stop}`", inline=True)
+    embed.add_field(name="🎯 Targets", value=f"`TP1: {tp1}` → `TP2: {tp2}`", inline=False)
+    embed.set_footer(text=f"{quote}  •  UTC Time: {now_utc}")
     return embed
 
 @bot.command()
@@ -720,6 +801,68 @@ async def hourly_knight_report():
 
 @tasks.loop(minutes=1)
 async def orion_daily_report():
+    now = datetime.datetime.now(CENTRAL_TZ)
+    if now.hour != 11 or now.minute != 0:
+        return
+
+    df = fetch_ohlc("ETH")
+    if df is None:
+        print("[Orion] ❌ Failed to fetch ETH data.")
+        return
+
+    df = calculate_indicators(df)
+    breakout_signal = detect_breakout_orion(df)
+    pullback_signal = detect_pullback_orion(df)
+    signal = breakout_signal or pullback_signal
+
+    if signal:
+        candle = df.iloc[-2]
+        entry = candle["close"]
+        atr = candle["atr"]
+
+        if "Long" in signal:
+            stop = entry - atr * 1.5
+            tp1 = entry + atr * 1.5
+            tp2 = entry + atr * 2.5
+        else:
+            stop = entry + atr * 1.5
+            tp1 = entry - atr * 1.5
+            tp2 = entry - atr * 2.5
+
+        # Quote based on signal type
+        if signal == "Breakout Long":
+            quote = "📜 Orion whispers: *Momentum surges. The skies stir.*"
+        elif signal == "Breakout Short":
+            quote = "🌘 Orion murmurs: *The moon retreats. Shadows grow where greed once stood.*"
+        elif signal == "Pullback Long":
+            quote = "🕊️ Orion intones: *A soft step back, then the rise begins.*"
+        elif signal == "Pullback Short":
+            quote = "☁️ Orion speaks low: *A breath before descent. Even titans exhale.*"
+        else:
+            quote = "🌓 Orion observes: *All patterns return… in time.*"
+
+        embed = discord.Embed(
+            title=f"🌙 Orion Vellum – ETH {signal}",
+            description=(
+                f"**Entry**: `{entry:.2f}`\n"
+                f"**Stop Loss**: `{stop:.2f}`\n"
+                f"**TP1**: `{tp1:.2f}`\n"
+                f"**TP2**: `{tp2:.2f}`\n\n"
+                f"{quote}"
+            ),
+            color=discord.Color.purple()
+        )
+        embed.set_footer(text="Templar Knight Crypto • UTC " + fmt_utc(datetime.datetime.utcnow()))
+
+        channel = bot.get_channel(ETH_REPORT_CHANNEL_ID)
+        await channel.send(embed=embed)
+        print(f"[Orion] ✅ Sent {signal} alert.")
+    else:
+        print("[Orion] No valid ETH signal detected at 11 AM.")
+
+
+@tasks.loop(minutes=1)
+async def orion_daily_report():
     now_utc = datetime.datetime.now(UTC_TZ)
     if now_utc.hour == 23 and now_utc.minute == 59:
         channel = bot.get_channel(STATUS_CHANNEL_ID)
@@ -778,6 +921,7 @@ async def orion_daily_report():
         embed.set_footer(text=f"Sent at {now_utc.strftime('%Y-%m-%d %H:%M UTC')}")
         await channel.send(embed=embed)
         print(f"[DEBUG] Orion daily report sent at {now_utc.isoformat()}")
+
 @tasks.loop(minutes=1)
 async def daily_trade_log_upload():
     now = datetime.datetime.now(UTC_TZ)
