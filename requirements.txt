@@ -5,6 +5,7 @@ requests
 Flask
 python-dotenv
 ta
+ta-lib
 
 
 
