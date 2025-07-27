@@ -829,7 +829,7 @@ async def orion_daily_report():
             tp1 = entry - atr * 1.5
             tp2 = entry - atr * 2.5
 
-        # Quote based on signal type
+        # === Orion Quote Based on Signal Type ===
         if signal == "Breakout Long":
             quote = "📜 Orion whispers: *Momentum surges. The skies stir.*"
         elif signal == "Breakout Short":
@@ -857,8 +857,57 @@ async def orion_daily_report():
         channel = bot.get_channel(ETH_REPORT_CHANNEL_ID)
         await channel.send(embed=embed)
         print(f"[Orion] ✅ Sent {signal} alert.")
+
+        # === CSV Logging for Orion's Daily ETH Signal ===
+        log_data = {
+            "timestamp_utc": datetime.datetime.utcnow().isoformat(),
+            "symbol": "ETH",
+            "trade_type": signal,
+            "entry": round(entry, 2),
+            "tp1": round(tp1, 2),
+            "tp2": round(tp2, 2),
+            "stop": round(stop, 2),
+            "confidence": 4,
+            "knight": "🌙 Orion Vellum"
+        }
+
+        orion_log_path = "orion_log.csv"
+        file_exists = os.path.isfile(orion_log_path)
+        with open(orion_log_path, mode="a", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=log_data.keys())
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(log_data)
+
     else:
         print("[Orion] No valid ETH signal detected at 11 AM.")
+
+@tasks.loop(minutes=1)
+async def orion_weekly_summary():
+    now = datetime.datetime.now(CENTRAL_TZ)
+    if now.weekday() == 6 and now.hour == 23 and now.minute == 59:  # Sunday 11:59 PM
+        source_file = "orion_log.csv"
+        summary_file = "orion_weekly_summary.csv"
+        if not os.path.exists(source_file):
+            print("[Orion Weekly] ❌ No log file found.")
+            return
+
+        df = pd.read_csv(source_file, parse_dates=["timestamp_utc"])
+        one_week_ago = datetime.datetime.utcnow() - datetime.timedelta(days=7)
+        recent = df[df["timestamp_utc"] >= one_week_ago.isoformat()]
+
+        if recent.empty:
+            print("[Orion Weekly] ℹ️ No entries from the past 7 days.")
+            return
+
+        recent.to_csv(summary_file, index=False)
+
+        channel = bot.get_channel(ETH_REPORT_CHANNEL_ID)
+        await channel.send(
+            content="📁 Weekly Scroll of Orion’s Watch – ETH Alerts",
+            file=discord.File(summary_file)
+        )
+        print("[Orion Weekly] ✅ Sent weekly summary.")
 
 
 @tasks.loop(minutes=1)
@@ -1029,6 +1078,7 @@ async def on_ready():
     orion_daily_report.start()
     daily_trade_log_upload.start()
     weekly_scroll_summary.start()
+    orion_weekly_summary.start()
 
 if TOKEN:
     bot.run(TOKEN)
