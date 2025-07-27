@@ -9,6 +9,7 @@ import csv
 import discord
 from flask import Flask
 from dotenv import load_dotenv
+from discord import app_commands
 from discord.ext import commands, tasks
 from ta.momentum import rsi, stochrsi, williams_r
 from ta.trend import ema_indicator, sma_indicator, adx, cci
@@ -619,15 +620,12 @@ async def scan_coins():
             cooldowns[symbol] = now_utc
 
 # === Slash-style Command Support ===
-@bot.command()
-async def ethreport(ctx):
-    """Manually triggers the ETH status report."""
+@bot.tree.command(name="ethreport", description="Manually triggers the ETH status report.")
+async def ethreport(interaction: discord.Interaction):
     now = datetime.datetime.now(CENTRAL_TZ)
-    channel = ctx.channel
-
     df = fetch_ohlc("ETH")
     if df is None:
-        await channel.send("❌ Could not fetch ETH data.")
+        await interaction.response.send_message("❌ Could not fetch ETH data.")
         return
 
     df = calculate_indicators(df)
@@ -636,22 +634,28 @@ async def ethreport(ctx):
     footer = fmt_utc(datetime.datetime.now(UTC_TZ))
 
     embed = format_eth_report(df, latest, header, footer)
-    await channel.send(embed=embed)
+    await interaction.response.send_message(embed=embed)
 
-@bot.command()
-async def ping(ctx):
-    await ctx.send("🏓 Pong!")
+@bot.tree.command(name="ping", description="Check if the bot is alive.")
+async def ping(interaction: discord.Interaction):
+    await interaction.response.send_message("🏓 Pong!")
 
-@bot.command()
-async def mode(ctx):
+@bot.tree.command(name="mode", description="Toggle the bot's detection mode.")
+async def mode(interaction: discord.Interaction):
     global bot_mode
     bot_mode = "strict" if bot_mode == "aggressive" else "aggressive"
-    await ctx.send(f"🧠 Bot mode set to: **{bot_mode.capitalize()}**")
+    await interaction.response.send_message(f"🧠 Bot mode set to: **{bot_mode.capitalize()}**")
 
 # === Bot Ready ===
 @bot.event
 async def on_ready():
-    print(f"\u2705 Bot is online as {bot.user}")
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ Synced {len(synced)} slash commands.")
+    except Exception as e:
+        print(f"⚠️ Slash command sync failed: {e}")
+
+    print(f"🟢 Bot is online as {bot.user}")
     scan_coins.start()
     eth_status_report.start()
     
