@@ -9,33 +9,36 @@ RUN apt-get update && apt-get install -y \
     curl \
     gcc \
     make \
+    libtool \
     libffi-dev \
     libbz2-dev \
     libssl-dev \
     zlib1g-dev \
-    libtool \
     automake \
     && rm -rf /var/lib/apt/lists/*
 
 # === Build and install TA-Lib C library ===
 RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
-    tar -xzf ta-lib-0.4.0-src.tar.gz && \
+    tar -xvzf ta-lib-0.4.0-src.tar.gz && \
     cd ta-lib && \
     ./configure --prefix=/usr/local && \
     make && \
     make install && \
-    ldconfig && \
     cd .. && rm -rf ta-lib ta-lib-0.4.0-src.tar.gz
 
-# Let linker find TA-Lib
-ENV LD_LIBRARY_PATH=/usr/local/lib
-ENV LIBRARY_PATH=/usr/local/lib
-ENV CPATH=/usr/local/include
+# === Manually register shared lib for linker ===
+RUN ldconfig
 
-# Copy your bot files
+# === Add TA-Lib paths to environment ===
+ENV LD_LIBRARY_PATH="/usr/local/lib"
+ENV LIBRARY_PATH="/usr/local/lib"
+ENV CPATH="/usr/local/include"
+ENV TA_LIBRARY_PATH="/usr/local/lib/libta_lib.so"
+
+# === Copy bot code ===
 COPY . .
 
-# Install Python dependencies (ta-lib will link to the now-available system lib)
+# === Install Python packages ===
 RUN pip install --no-cache-dir --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
