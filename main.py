@@ -285,8 +285,7 @@ def format_embed(symbol, trade, central_time, utc_time):
     color = discord.Color.red() if direction == "Short" else discord.Color.green()
 
     # Knight signal mapping
-        knight_signals = {
-        # Strategy Matches
+    knight_signals = {
         "Mean Reversion": "🌙 Orion Vellum",
         "Breakout": "⚔️ Sir Leonis Ironhart",
         "Breakdown": "⚔️ Sir Leonis Ironhart",
