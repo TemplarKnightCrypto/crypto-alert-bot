@@ -510,12 +510,11 @@ async def scan_coins():
         candle_high = latest["high"]
         candle_low = latest["low"]
 
-        # Check for open trade
+        # === Check for Open Trade ===
         if symbol in active_alerts:
             entry, tp1, tp2, stop, open_time_utc, trade_type = active_alerts[symbol]
             direction = "Short" if "Short" in trade_type else "Long"
 
-            # === Candle Debug Logging ===
             print(f"\n[DEBUG] ----- {symbol} Active Trade Check -----")
             print(f"[DEBUG] Direction: {direction}")
             print(f"[DEBUG] Entry: {entry:.2f}, Stop: {stop:.2f}, TP1: {tp1:.2f}, TP2: {tp2:.2f}")
@@ -552,41 +551,43 @@ async def scan_coins():
                 del active_alerts[symbol]
             continue
 
-        # Cooldown check
+        # === Cooldown Check ===
         last_time = cooldowns.get(symbol)
         if last_time and (now_utc - last_time).total_seconds() < 1800:
             continue
 
-
-        # ✅ Trade detection (indented properly)
+        # === Detect New Trade ===
         trade = detect_trade(df, mode=bot_mode)
-        if trade:
-            log_trade_to_csv({
-                "time": now_utc.isoformat(),
-                "symbol": symbol,
-                "type": trade["type"],
-                "entry": trade["entry"],
-                "stop": trade["stop"],
-                "tp1": trade["tp1"],
-                "tp2": trade["tp2"],
-                "confidence": trade["confidence"],
-                "strategies_matched": trade.get("strategies_matched", []),
-                "weak_signal": trade["type"] == "🟡 Weak Signal"
-            })
 
-            if symbol == "ETH":
-                central_time = fmt_central(now_utc.astimezone(CENTRAL_TZ))
-                utc_time = fmt_utc(now_utc)
-                embed = format_embed(symbol, trade, central_time, utc_time)
-                await channel.send(embed=embed)
+        if not trade or not isinstance(trade, dict):
+            continue  # Skip invalid or empty trades
 
-            active_alerts[symbol] = (
-    trade["entry"], trade["tp1"], trade["tp2"], trade["stop"], now_utc, trade["type"]
-)
+        log_trade_to_csv({
+            "time": now_utc.isoformat(),
+            "symbol": symbol,
+            "type": trade["type"],
+            "entry": trade["entry"],
+            "stop": trade["stop"],
+            "tp1": trade["tp1"],
+            "tp2": trade["tp2"],
+            "confidence": trade["confidence"],
+            "strategies_matched": trade.get("strategies_matched", []),
+            "weak_signal": trade["type"] == "🟡 Weak Signal"
+        })
 
-            print(f"[DEBUG] 🚨 New Trade Set: {symbol} | Entry: {trade['entry']:.2f}, TP2: {trade['tp2']:.2f}, Stop: {trade['stop']:.2f}")
+        if symbol == "ETH":
+            central_time = fmt_central(now_utc.astimezone(CENTRAL_TZ))
+            utc_time = fmt_utc(now_utc)
+            embed = format_embed(symbol, trade, central_time, utc_time)
+            await channel.send(embed=embed)
 
-            cooldowns[symbol] = now_utc
+        active_alerts[symbol] = (
+            trade["entry"], trade["tp1"], trade["tp2"], trade["stop"], now_utc, trade["type"]
+        )
+
+        print(f"[DEBUG] 🚨 New Trade Set: {symbol} | Entry: {trade['entry']:.2f}, TP2: {trade['tp2']:.2f}, Stop: {trade['stop']:.2f}")
+
+        cooldowns[symbol] = now_utc
 
 # === Bot Ready ===
 @bot.event
