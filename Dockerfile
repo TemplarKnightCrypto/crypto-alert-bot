@@ -1,7 +1,7 @@
 # Use a lightweight base Python image
 FROM python:3.12-slim
 
-# Install system dependencies (only what's needed)
+# Install system dependencies
 RUN apt-get update && \
     apt-get install -y gcc && \
     rm -rf /var/lib/apt/lists/*
@@ -21,6 +21,7 @@ EXPOSE 8000
 
 # Run your main script
 CMD ["python", "main.py"]
+
 
 
 
