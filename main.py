@@ -67,6 +67,7 @@ def fmt_utc(dt):
 # === Logic Placeholder ===
 # ========================
 def calculate_indicators(df):
+    # === Core Indicators ===
     df["ema50"] = ema_indicator(df["close"], window=50)
     df["rsi"] = rsi(df["close"], window=14)
     df["atr"] = average_true_range(df["high"], df["low"], df["close"], window=14)
@@ -82,10 +83,58 @@ def calculate_indicators(df):
     df["kc_upper"] = keltner_channel_hband(df["high"], df["low"], df["close"], window=20)
     df["kc_lower"] = keltner_channel_lband(df["high"], df["low"], df["close"], window=20)
     df["squeeze"] = (df["bb_lower"] > df["kc_lower"]) & (df["bb_upper"] < df["kc_upper"])
+
+    # === Chaikin Money Flow (CMF) ===
     mfv = ((df["close"] - df["low"]) - (df["high"] - df["close"])) / (df["high"] - df["low"] + 1e-9) * df["volume"]
     df["cmf"] = mfv.rolling(window=20).sum() / df["volume"].rolling(window=20).sum()
-    
+
+    # === Supertrend (Basic Implementation) ===
+    atr = df["atr"]
+    hl2 = (df["high"] + df["low"]) / 2
+    factor = 3  # Supertrend multiplier
+    df["upperband"] = hl2 + (factor * atr)
+    df["lowerband"] = hl2 - (factor * atr)
+    df["supertrend"] = True  # default True for bullish
+
+    in_uptrend = [True]
+    for i in range(1, len(df)):
+        if df["close"].iloc[i] > df["upperband"].iloc[i - 1]:
+            in_uptrend.append(True)
+        elif df["close"].iloc[i] < df["lowerband"].iloc[i - 1]:
+            in_uptrend.append(False)
+        else:
+            in_uptrend.append(in_uptrend[-1])
+
+    df["supertrend"] = in_uptrend
+
+    # === Alligator (Simple Teeth, Lips, Jaw)
+    df["jaw"] = ema_indicator(df["close"], window=13).shift(8)
+    df["teeth"] = ema_indicator(df["close"], window=8).shift(5)
+    df["lips"] = ema_indicator(df["close"], window=5).shift(3)
+    df["alligator"] = (df["lips"] > df["teeth"]) & (df["teeth"] > df["jaw"])
+
+    # === Ichimoku Cloud (Bullish if price above span A & B)
+    period9_high = df["high"].rolling(window=9).max()
+    period9_low = df["low"].rolling(window=9).min()
+    tenkan_sen = (period9_high + period9_low) / 2
+
+    period26_high = df["high"].rolling(window=26).max()
+    period26_low = df["low"].rolling(window=26).min()
+    kijun_sen = (period26_high + period26_low) / 2
+
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(26)
+    period52_high = df["high"].rolling(window=52).max()
+    period52_low = df["low"].rolling(window=52).min()
+    senkou_span_b = ((period52_high + period52_low) / 2).shift(26)
+
+    df["ichimoku_bull"] = (df["close"] > senkou_span_a) & (df["close"] > senkou_span_b)
+
+    # === Kumo Twist Alert (Span A crosses Span B)
+    twist = (senkou_span_a - senkou_span_b).diff().abs() < 1e-3
+    df["twist"] = twist.fillna(False)
+
     return df
+
 
 
 def detect_trade(df, mode="aggressive"):
@@ -93,6 +142,30 @@ def detect_trade(df, mode="aggressive"):
     atr_avg = df["atr"].rolling(window=50).mean().iloc[-1]
     matches = []
     confidence = 0
+
+    # === Knight Assignment ===
+    def assign_knight(trade_type, indicators):
+        if "Breakout" in trade_type or "Breakdown" in trade_type:
+            return "⚔️ Sir Leonis Ironhart"
+        elif "Mean Reversion" in trade_type:
+            return "🌙 Orion Vellum"
+        elif "Swing Trade" in trade_type:
+            return "⚔️ Sir Leonis Ironhart"
+        elif "Pullback" in trade_type:
+            return "🛡️ Sir Lucien Frostveil"
+        elif "Volatility Squeeze" in trade_type:
+            return "🌙 Orion Vellum"
+        elif "Weak Signal" in trade_type:
+            return "🌙 Orion Vellum"
+
+        if "supertrend" in indicators or "ema50" in indicators:
+            return "🛡️ Sir Lucien Frostveil"
+        if "alligator" in indicators:
+            return "⚔️ Sir Leonis Ironhart"
+        if "ichimoku_bull" in indicators or "twist" in indicators:
+            return "🌙 Orion Vellum"
+
+        return "🧙 Unknown"
 
     # === Long Trade Setups ===
     if latest["rsi"] < 30 and latest["williams_r"] < -80:
@@ -128,7 +201,8 @@ def detect_trade(df, mode="aggressive"):
                 "tp1": latest["close"] + latest["atr"] * 1.5,
                 "tp2": latest["close"] + latest["atr"] * 2.5,
                 "confidence": 1,
-                "strategies_matched": []
+                "strategies_matched": [],
+                "knight": assign_knight("🟡 Weak Signal", [])
             }]
         return []
 
@@ -145,6 +219,8 @@ def detect_trade(df, mode="aggressive"):
             tp1 = latest["close"] - latest["atr"] * 1.5
             tp2 = latest["close"] - latest["atr"] * 2.5
 
+        knight = assign_knight(match_text, ["rsi", "ema50", "supertrend", "alligator", "ichimoku_bull", "twist"])
+
         trades.append({
             "type": match_text,
             "entry": latest["close"],
@@ -152,38 +228,11 @@ def detect_trade(df, mode="aggressive"):
             "tp1": tp1,
             "tp2": tp2,
             "confidence": weight,
-            "strategies_matched": [match_text]
+            "strategies_matched": [match_text],
+            "knight": knight
         })
 
     return trades
-
-    # Pick highest scoring strategy
-    best = max(matches, key=lambda x: x[1])
-    strategy, confidence = best
-
-    # Bonus for trend strength, penalty for volatility
-    if latest["adx"] > 25:
-        confidence += 1
-    if latest["atr"] > 1.5 * atr_avg:
-        confidence -= 1
-    confidence = max(0, min(confidence, 6))
-
-    direction = "Short" if "📉" in strategy else "Long"
-    entry = latest["close"]
-    atr = latest["atr"]
-    stop = entry + atr * 1.5 if direction == "Short" else entry - atr * 1.5
-    tp1 = entry - atr * 1.5 if direction == "Short" else entry + atr * 1.5
-    tp2 = entry - atr * 2.5 if direction == "Short" else entry + atr * 2.5
-
-    return {
-        "type": strategy,
-        "entry": entry,
-        "stop": stop,
-        "tp1": tp1,
-        "tp2": tp2,
-        "confidence": confidence,
-        "strategies_matched": [s for s, _ in matches]
-    }
 
 def log_trade_to_csv(trade_data):
     filename = f"trade_log_{datetime.datetime.now(UTC_TZ).strftime('%Y-%m-%d')}.csv"
@@ -191,14 +240,17 @@ def log_trade_to_csv(trade_data):
     with open(filename, mode="a", newline="") as file:
         writer = csv.writer(file)
         if not file_exists:
-            writer.writerow(["Time", "Symbol", "Type", "Entry", "Stop", "TP1", "TP2", "Confidence", "Matched"])
+            writer.writerow(["Time", "Symbol", "Type", "Entry", "Stop", "TP1", "TP2", "Confidence", "Matched", "WeakSignal", "Knight"])
+
         writer.writerow([
-            trade_data["time"], trade_data["symbol"], trade_data["type"],
-            f"{trade_data['entry']:.2f}", f"{trade_data['stop']:.2f}",
-            f"{trade_data['tp1']:.2f}", f"{trade_data['tp2']:.2f}",
-            trade_data["confidence"],
-            ", ".join(trade_data.get("strategies_matched", []))
-        ])
+    trade_data["time"], trade_data["symbol"], trade_data["type"],
+    f"{trade_data['entry']:.2f}", f"{trade_data['stop']:.2f}",
+    f"{trade_data['tp1']:.2f}", f"{trade_data['tp2']:.2f}",
+    trade_data["confidence"],
+    ", ".join(trade_data.get("strategies_matched", [])),
+    trade_data["weak_signal"],
+    trade_data.get("knight", "🧙 Unknown")
+])
 
 
 def fetch_ohlc(symbol, interval="30"):
@@ -244,32 +296,7 @@ def format_embed(symbol, trade, central_time, utc_time):
     emoji = "📉" if direction == "Short" else "📈"
     color = discord.Color.red() if direction == "Short" else discord.Color.green()
 
-    # Knight signal mapping
-    knight_signals = {
-        "Mean Reversion": "🌙 Orion Vellum",
-        "Breakout": "⚔️ Sir Leonis Ironhart",
-        "Breakdown": "⚔️ Sir Leonis Ironhart",
-        "Volatility Squeeze": "🌘 Orion Vellum",
-        "Swing Trade": "⚔️ Sir Leonis Ironhart",
-        "Pullback Long": "🛡️ Sir Lucien Frostveil",
-        "Pullback Short": "🛡️ Sir Lucien Frostveil",
-
-        # Candlestick Patterns
-        "Bullish Engulfing": "⚔️ Sir Leonis Ironhart",
-        "Bearish Engulfing": "⚔️ Sir Leonis Ironhart",
-        "Hammer": "🛡️ Sir Lucien Frostveil",
-        "Shooting Star": "🌙 Orion Vellum",
-        "Morning Star": "🌙 Orion Vellum",
-        "Evening Star": "🌙 Orion Vellum",
-        "Piercing Line": "🛡️ Sir Lucien Frostveil",
-        "Dark Cloud Cover": "🛡️ Sir Lucien Frostveil"
-    }
-
-    knight = "🧙 Unknown"
-    for key, name in knight_signals.items():
-        if key in trade["type"]:
-            knight = name
-            break
+    knight = trade.get("knight", "🧙 Unknown")  # ✅ Proper indentation
 
     embed = discord.Embed(
         title=f"{emoji} {symbol} {trade['type']} – {central_time}",
@@ -302,6 +329,7 @@ def format_embed(symbol, trade, central_time, utc_time):
     )
     embed.set_footer(text=f"Generated {utc_time}")
     return embed
+
 
 
 def format_exit_embed(symbol, direction, entry, tp1, tp2, stop, exit_price, result,
@@ -545,9 +573,7 @@ async def scan_coins():
                     central_time, utc_time, central_open_time, elapsed_str
                 )
 
-                if symbol in ["ETH", "BTC", "SOL", "AVAX", "ADA", "HBAR"]:
-                    await channel.send(embed=embed)
-
+                await channel.send(embed=embed)
                 del active_alerts[symbol]
             continue
 
@@ -557,37 +583,70 @@ async def scan_coins():
             continue
 
         # === Detect New Trade ===
-        trade = detect_trade(df, mode=bot_mode)
+        trades = detect_trade(df, mode=bot_mode)
 
-        if not trade or not isinstance(trade, dict):
+        if not trades or not isinstance(trades, list):
             continue  # Skip invalid or empty trades
 
-        log_trade_to_csv({
-            "time": now_utc.isoformat(),
-            "symbol": symbol,
-            "type": trade["type"],
-            "entry": trade["entry"],
-            "stop": trade["stop"],
-            "tp1": trade["tp1"],
-            "tp2": trade["tp2"],
-            "confidence": trade["confidence"],
-            "strategies_matched": trade.get("strategies_matched", []),
-            "weak_signal": trade["type"] == "🟡 Weak Signal"
-        })
+        for trade in trades:
+            log_trade_to_csv({
+                "time": now_utc.isoformat(),
+                "symbol": symbol,
+                "type": trade["type"],
+                "entry": trade["entry"],
+                "stop": trade["stop"],
+                "tp1": trade["tp1"],
+                "tp2": trade["tp2"],
+                "confidence": trade["confidence"],
+                "strategies_matched": trade.get("strategies_matched", []),
+                "weak_signal": trade["type"] == "🟡 Weak Signal",
+                "knight": trade.get("knight", "🧙 Unknown")
+            })
 
-        if symbol == "ETH":
             central_time = fmt_central(now_utc.astimezone(CENTRAL_TZ))
             utc_time = fmt_utc(now_utc)
             embed = format_embed(symbol, trade, central_time, utc_time)
             await channel.send(embed=embed)
 
-        active_alerts[symbol] = (
-            trade["entry"], trade["tp1"], trade["tp2"], trade["stop"], now_utc, trade["type"]
-        )
+            # Store active alert
+            active_alerts[symbol] = (
+                trade["entry"], trade["tp1"], trade["tp2"],
+                trade["stop"], now_utc, trade["type"]
+            )
 
-        print(f"[DEBUG] 🚨 New Trade Set: {symbol} | Entry: {trade['entry']:.2f}, TP2: {trade['tp2']:.2f}, Stop: {trade['stop']:.2f}")
+            print(f"[DEBUG] 🚨 New Trade Set: {symbol} | Entry: {trade['entry']:.2f}, TP2: {trade['tp2']:.2f}, Stop: {trade['stop']:.2f}")
 
-        cooldowns[symbol] = now_utc
+            cooldowns[symbol] = now_utc
+
+# === Slash-style Command Support ===
+@bot.command()
+async def ethreport(ctx):
+    """Manually triggers the ETH status report."""
+    now = datetime.datetime.now(CENTRAL_TZ)
+    channel = ctx.channel
+
+    df = fetch_ohlc("ETH")
+    if df is None:
+        await channel.send("❌ Could not fetch ETH data.")
+        return
+
+    df = calculate_indicators(df)
+    latest = df.iloc[-2]  # Use closed candle
+    header = fmt_central(now)
+    footer = fmt_utc(datetime.datetime.now(UTC_TZ))
+
+    embed = format_eth_report(df, latest, header, footer)
+    await channel.send(embed=embed)
+
+@bot.command()
+async def ping(ctx):
+    await ctx.send("🏓 Pong!")
+
+@bot.command()
+async def mode(ctx):
+    global bot_mode
+    bot_mode = "strict" if bot_mode == "aggressive" else "aggressive"
+    await ctx.send(f"🧠 Bot mode set to: **{bot_mode.capitalize()}**")
 
 # === Bot Ready ===
 @bot.event
@@ -601,4 +660,3 @@ if TOKEN:
     bot.run(TOKEN)
 else:
    print("❌ TOKEN not found.")
-
