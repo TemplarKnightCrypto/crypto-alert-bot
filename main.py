@@ -332,7 +332,6 @@ def format_exit_embed(symbol, direction, entry, tp1, tp2, stop, exit_price, resu
     return embed
 
 @bot.command()
-@commands.has_role("The Founder")
 async def ethreport(ctx):
     now = datetime.datetime.now(CENTRAL_TZ)
     df = fetch_ohlc("ETH")
@@ -345,7 +344,6 @@ async def ethreport(ctx):
     header = fmt_central(now)
     footer = fmt_utc(datetime.datetime.now(UTC_TZ))
 
-    # Fallback formatting reused from main ETH report
     bias = calculate_market_bias(latest)
     embed = discord.Embed(title=f"📊 ETH 30-Min Status – {header}", color=discord.Color.blue())
     embed.add_field(name="💵 Price & Trend", value=(f"💰 Price: **${latest['close']:.2f}**\n"
@@ -354,8 +352,8 @@ async def ethreport(ctx):
     embed.set_footer(text=f"Updated {footer}")
     await ctx.send(embed=embed)
 
+
 @bot.command()
-@commands.has_role("The Founder")
 async def testtrade(ctx, symbol: str.upper = "ETH"):
     df = fetch_ohlc(symbol)
     if df is None:
@@ -373,21 +371,21 @@ async def testtrade(ctx, symbol: str.upper = "ETH"):
             embed = format_embed(symbol, trade, fmt_central(now_ct), fmt_utc(now_utc))
             await ctx.send(embed=embed)
 
+
 @bot.command()
-@commands.has_role("The Founder")
 async def mode(ctx):
     global bot_mode
     bot_mode = "strict" if bot_mode == "aggressive" else "aggressive"
     await ctx.send(f"🧠 Bot mode set to: **{bot_mode.capitalize()}**")
 
+
 @bot.command()
-@commands.has_role("The Founder")
 async def forcerescan(ctx):
     await ctx.send("🔁 Forcing rescan of all coins...")
     await scan_coins()
 
+
 @bot.command()
-@commands.has_role("The Founder")
 async def cooldownreset(ctx, symbol: str.upper):
     if symbol in cooldowns:
         del cooldowns[symbol]
@@ -395,13 +393,13 @@ async def cooldownreset(ctx, symbol: str.upper):
     else:
         await ctx.send(f"⚠️ No cooldown set for {symbol}")
 
+
 @bot.command()
-@commands.has_role("The Founder")
 async def ping(ctx):
     await ctx.send("🏓 Pong!")
 
+
 @bot.command()
-@commands.has_role("The Founder")
 async def logsummary(ctx):
     date_str = datetime.datetime.now(UTC_TZ).strftime("%Y-%m-%d")
     filename = f"logs/{date_str}_trades.csv"
@@ -423,8 +421,8 @@ async def logsummary(ctx):
     embed.set_footer(text=f"Updated {fmt_utc(datetime.datetime.now(UTC_TZ))}")
     await ctx.send(embed=embed)
 
+
 @bot.command()
-@commands.has_role("The Founder")
 async def leaderboard(ctx):
     embed = discord.Embed(title="🏆 Trade Alert Leaderboard", color=discord.Color.gold())
     sorted_stats = sorted(leaderboard_stats.items(), key=lambda x: x[1]["wins"], reverse=True)
@@ -439,6 +437,43 @@ async def leaderboard(ctx):
             inline=False
         )
     embed.set_footer(text=f"Updated {fmt_utc(datetime.datetime.now(UTC_TZ))}")
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def commands(ctx):
+    embed = discord.Embed(title="📜 Available Commands", color=discord.Color.teal())
+    
+    embed.add_field(
+        name="📊 Market & Trade Reports",
+        value=(
+            "`!ethreport` – Get ETH 30-minute status report\n"
+            "`!testtrade [SYMBOL]` – Run trade scan for a symbol (default: ETH)\n"
+            "`!logsummary` – Show today’s trade log summary\n"
+            "`!leaderboard` – View current trade alert performance"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="⚙️ Bot Settings & Tools",
+        value=(
+            "`!mode` – Toggle bot mode between `aggressive` and `strict`\n"
+            "`!forcerescan` – Force full scan of all tracked coins\n"
+            "`!cooldownreset SYMBOL` – Reset cooldown for a specific token"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🛠️ Utility",
+        value=(
+            "`!ping` – Test if the bot is online\n"
+            "`!commands` – Show this command list"
+        ),
+        inline=False
+    )
+
+    embed.set_footer(text="Templar Knight Crypto • Forge the Future")
     await ctx.send(embed=embed)
 
 @tasks.loop(minutes=1)
