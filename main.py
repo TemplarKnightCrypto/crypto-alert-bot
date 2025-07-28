@@ -19,7 +19,14 @@ from ta.volume import on_balance_volume
 # === Timezones ===
 CENTRAL_TZ = pytz.timezone("US/Central")
 UTC_TZ = datetime.timezone.utc
-LEONIS_LUCIEN_CHANNEL_ID = 1398691425347961016
+
+# === Channel Assignments (Founders’ Forge) ===
+BATTLE_SIGNALS_CHANNEL_ID = 1399532925279666278       # ⚔️・battle-signals
+EAGLE_SIGNAL_CHANNEL_ID = 1398690647417819198         # 🦅・eagle-signal
+SCRIBE_KEEP_CHANNEL_ID = 1398691425347961016          # 📜・scribe’s-keep
+ETH_BATTLEGROUND_CHANNEL_ID = 1399532442075005038     # 🏰・eth-battleground
+KNIGHTS_WATCH_CHANNEL_ID = 1399532102571135118        # ⏰・knights’-watch
+SCROLLS_OF_ORDER_CHANNEL_ID = 1399067396488302623     # 📖・scrolls-of-the-order
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
@@ -390,11 +397,14 @@ def detect_pullback_orion(df):
     else:
         return None
 
-def log_trade(symbol, trade, timestamp):
+def log_trade(symbol, trade, timestamp, thread_id=None):
     date_str = timestamp.strftime('%Y-%m-%d')
     daily_log_path = f"logs/{date_str}_trades.csv"
     master_log_path = "logs/trade_log.csv"
     os.makedirs("logs", exist_ok=True)
+
+    # === Construct Optional Thread URL ===
+    thread_url = f"https://discord.com/channels/{bot.guilds[0].id}/{thread_id}" if thread_id else "N/A"
 
     # === Build Shared Row ===
     base_row = [
@@ -409,17 +419,23 @@ def log_trade(symbol, trade, timestamp):
         trade["confidence"],
         trade.get("pattern", "N/A"),
         ", ".join(trade.get("strategies_matched", [])),
-        "Yes" if trade["type"] == "🟡 Weak Signal" else "No"
+        "Yes" if trade["type"] == "🟡 Weak Signal" else "No",
+        thread_id or "N/A",
+        thread_url
+    ]
+
+    # === Headers ===
+    headers = [
+        "Time", "Symbol", "Type", "Knight", "Entry", "TP1", "TP2", "Stop",
+        "Confidence", "Pattern", "Strategies Matched", "WeakSignal",
+        "ThreadID", "ThreadURL"
     ]
 
     # === Write Daily Log ===
     if not os.path.exists(daily_log_path):
         with open(daily_log_path, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow([
-                "Time", "Symbol", "Type", "Knight", "Entry", "TP1", "TP2", "Stop",
-                "Confidence", "Pattern", "Strategies Matched", "WeakSignal"
-            ])
+            writer.writerow(headers)
     with open(daily_log_path, "a", newline="") as f:
         csv.writer(f).writerow(base_row)
 
@@ -427,12 +443,10 @@ def log_trade(symbol, trade, timestamp):
     if not os.path.exists(master_log_path):
         with open(master_log_path, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow([
-                "Time", "Symbol", "Type", "Knight", "Entry", "TP1", "TP2", "Stop",
-                "Confidence", "Pattern", "Strategies Matched", "WeakSignal"
-            ])
+            writer.writerow(headers)
     with open(master_log_path, "a", newline="") as f:
         csv.writer(f).writerow(base_row)
+
 
 def fetch_ohlc(symbol, interval="30"):
     url = f"https://api.kraken.com/0/public/OHLC?pair={KRAKEN_PAIRS[symbol]}&interval={interval}"
@@ -533,7 +547,13 @@ async def send_trade_alert(channel, symbol, entry, tp1, tp2, stop, signal, confi
     embed.add_field(name="🕯️ Candle Pattern", value=pattern, inline=True)
     embed.add_field(name="🧙 Issued By", value=knight, inline=True)
     embed.set_footer(text=f"Generated {fmt_utc(now_utc)}")
-    await channel.send(embed=embed)
+
+    # Send embed and create thread
+    msg = await channel.send(embed=embed)
+    thread_name = f"🧵 {symbol} {direction} – ${entry:.2f} Entry"
+    thread = await msg.create_thread(name=thread_name, auto_archive_duration=1440)
+
+    return thread.id  # Return for logging and tracking
 
 def format_exit_embed(symbol, direction, entry, tp1, tp2, stop, exit_price, result,
                       close_time_ct, close_time_utc, open_time_ct, elapsed_str):
@@ -804,7 +824,7 @@ async def eth_status_report():
 
 @tasks.loop(minutes=1)
 async def scan_coins():
-    channel = bot.get_channel(CHANNEL_ID)
+    channel = bot.get_channel(BATTLE_SIGNALS_CHANNEL_ID)
     now_utc, now_central = now_times()
 
     for symbol in KRAKEN_PAIRS:
@@ -821,7 +841,7 @@ async def scan_coins():
 
         # === Check for Active Trade ===
         if symbol in active_alerts:
-            entry, tp1, tp2, stop, open_time_utc, trade_type = active_alerts[symbol]
+            entry, tp1, tp2, stop, open_time_utc, trade_type, thread_id = active_alerts[symbol]
             direction = "Short" if "Short" in trade_type else "Long"
 
             hit_tp2 = (
@@ -853,7 +873,13 @@ async def scan_coins():
                     central_time, utc_time, central_open_time, elapsed_str
                 )
 
-                await channel.send(embed=embed)
+                try:
+                    thread = await bot.fetch_channel(thread_id)
+                    await thread.send(embed=embed)
+                except Exception as e:
+                    print(f"[ERROR] Failed to post TP/SL to thread {thread_id}: {e}")
+                    await channel.send(embed=embed)
+
                 del active_alerts[symbol]
             continue
 
@@ -919,9 +945,18 @@ async def scan_coins():
             if symbol == "ETH" and now_utc.strftime("%m-%d") in ["10-25", "04-18"]:
                 confidence += 1
 
-            # === Log and Alert ===
-            active_alerts[symbol] = (entry, tp1, tp2, stop, now_utc, signal)
+            # === Send Alert + Create Thread ===
+            thread_id = await send_trade_alert(
+                channel, symbol, entry, tp1, tp2, stop, signal, confidence,
+                knight, now_central, now_utc, pattern
+            )
 
+            # === Store in Active Alerts with thread_id ===
+            active_alerts[symbol] = (
+                entry, tp1, tp2, stop, now_utc, signal, thread_id
+            )
+
+            # === Log Trade with thread_id ===
             trade = {
                 "entry": entry,
                 "tp1": tp1,
@@ -933,14 +968,9 @@ async def scan_coins():
                 "pattern": pattern,
                 "knight": knight
             }
-
-            log_trade(symbol, trade, now_utc)
+            log_trade(symbol, trade, now_utc, thread_id=thread_id)
             track_strategy_performance(symbol, signal, pattern, confidence, success=None)
 
-            await send_trade_alert(
-                channel, symbol, entry, tp1, tp2, stop, signal, confidence,
-                knight, now_central, now_utc, pattern
-            )
 
         # === Cooldown Check (30 min) ===
         last_time = cooldowns.get(symbol)
@@ -1124,6 +1154,57 @@ async def orion_daily_report():
 
     else:
         print("[Orion] No valid ETH signal detected at 11 AM.")
+
+@tasks.loop(minutes=1)
+async def thread_summary_daily_report():
+    now = datetime.datetime.now(UTC_TZ)
+    if now.hour != 23 or now.minute != 59:
+        return
+
+    channel = bot.get_channel(SCROLLS_OF_ORDER_CHANNEL_ID)
+    if not channel:
+        print("[ERROR] Summary channel not found.")
+        return
+
+    date_str = now.strftime("%Y-%m-%d")
+    filename = f"logs/{date_str}_trades.csv"
+
+    if not os.path.exists(filename):
+        await channel.send(f"📭 No trades recorded for {date_str}.")
+        return
+
+    df = pd.read_csv(filename)
+    if df.empty:
+        await channel.send(f"📭 No trades to summarize.")
+        return
+
+    embed = discord.Embed(
+        title=f"📜 Trade Summary – {date_str}",
+        color=discord.Color.dark_gold()
+    )
+
+    for idx, row in df.iterrows():
+        symbol = row["Symbol"]
+        trade_type = row["Type"]
+        entry = row["Entry"]
+        thread_url = row.get("ThreadURL", "N/A")
+
+        if thread_url != "N/A":
+            name = f"{symbol} – {trade_type}"
+            value = f"💰 Entry: `${entry}`\n🔗 [View Thread]({thread_url})"
+            embed.add_field(name=name, value=value, inline=False)
+
+    embed.set_footer(text="Templar Knight Crypto • Daily Report")
+    try:
+        await channel.send(
+            content="📊 **Daily Thread Summary**",
+            embed=embed,
+            file=File(filename)
+        )
+        print(f"[DEBUG] Sent thread-aware daily summary.")
+    except Exception as e:
+        print(f"[ERROR] Failed to send daily thread summary: {e}")
+
 
 @tasks.loop(minutes=1)
 async def orion_weekly_summary():
@@ -1320,6 +1401,7 @@ async def on_ready():
     hourly_knight_report.start()
     orion_daily_report.start()
     daily_trade_log_upload.start()
+    thread_summary_daily_report.start()
     weekly_scroll_summary.start()
     orion_weekly_summary.start()
 
