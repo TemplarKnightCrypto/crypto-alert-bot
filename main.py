@@ -37,53 +37,54 @@ KRAKEN_PAIRS = {
 def detect_candlestick_pattern(df):
     patterns = []
 
-    # Current and previous candles
     o = df["open"].iloc[-2]
     h = df["high"].iloc[-2]
     l = df["low"].iloc[-2]
     c = df["close"].iloc[-2]
-    prev_o = df["open"].iloc[-3]
-    prev_c = df["close"].iloc[-3]
-    prev_h = df["high"].iloc[-3]
-    prev_l = df["low"].iloc[-3]
-
     body = abs(c - o)
     candle_range = h - l
-    prev_body = abs(prev_c - prev_o)
 
-    # === 1-Candle Patterns ===
+    # Small body, long wicks → Doji
     if candle_range > 0 and body / candle_range < 0.1:
         patterns.append("Doji")
+
+    # Bullish Engulfing
+    prev_o = df["open"].iloc[-3]
+    prev_c = df["close"].iloc[-3]
+    if prev_c < prev_o and c > o and c > prev_o and o < prev_c:
+        patterns.append("Bullish Engulfing")
+
+    # Bearish Engulfing
+    if prev_c > prev_o and c < o and c < prev_o and o > prev_c:
+        patterns.append("Bearish Engulfing")
+
+    # Hammer
     if body > 0 and (min(c, o) - l) > body * 2 and (h - max(c, o)) < body:
         patterns.append("Hammer")
+
+    # Shooting Star
     if body > 0 and (h - max(c, o)) > body * 2 and (min(c, o) - l) < body:
         patterns.append("Shooting Star")
 
-    # === 2-Candle Patterns ===
-    if prev_c < prev_o and c > o and c > prev_o and o < prev_c:
-        patterns.append("Bullish Engulfing")
-    if prev_c > prev_o and c < o and c < prev_o and o > prev_c:
-        patterns.append("Bearish Engulfing")
-    if prev_c < prev_o and c > o and o > prev_c and c > prev_o and abs(c - prev_o) < body:
-        patterns.append("Piercing Line")
-    if prev_c > prev_o and c < o and o < prev_c and c < prev_o and abs(c - prev_o) < body:
-        patterns.append("Dark Cloud Cover")
+    # Morning Star (3 candles)
+    if len(df) >= 4:
+        c1 = df.iloc[-4]
+        c2 = df.iloc[-3]
+        c3 = df.iloc[-2]
+        if c1["close"] < c1["open"] and abs(c2["close"] - c2["open"]) < candle_range * 0.3 and c3["close"] > c3["open"] and c3["close"] > c1["open"]:
+            patterns.append("Morning Star")
 
-    # === 3-Candle Patterns ===
-    if (
-        prev_c < prev_o  # 2 candles ago = red
-        and o < c         # last candle = green
-        and c > (prev_o + prev_c) / 2
-        and df["close"].iloc[-4] < df["open"].iloc[-4]  # 3 candles ago = red
-    ):
-        patterns.append("Morning Star")
-    if (
-        prev_c > prev_o  # 2 candles ago = green
-        and o > c         # last candle = red
-        and c < (prev_o + prev_c) / 2
-        and df["close"].iloc[-4] > df["open"].iloc[-4]  # 3 candles ago = green
-    ):
-        patterns.append("Evening Star")
+        # Evening Star
+        if c1["close"] > c1["open"] and abs(c2["close"] - c2["open"]) < candle_range * 0.3 and c3["close"] < c3["open"] and c3["close"] < c1["open"]:
+            patterns.append("Evening Star")
+
+    # Piercing Line
+    if prev_c < prev_o and c > o and c > (prev_o + prev_c) / 2 and o < prev_c:
+        patterns.append("Piercing Line")
+
+    # Dark Cloud Cover
+    if prev_c > prev_o and c < o and c < (prev_o + prev_c) / 2 and o > prev_c:
+        patterns.append("Dark Cloud Cover")
 
     return ", ".join(patterns) if patterns else "None"
 
@@ -756,6 +757,9 @@ async def scan_coins():
             continue
 
         df = calculate_indicators(df)
+        df["previous_open"] = df["open"].shift(1)
+        df["previous_close"] = df["close"].shift(1)
+
         prev_candle = df.iloc[-2]
         curr_candle = df.iloc[-1]
 
@@ -763,13 +767,6 @@ async def scan_coins():
         if symbol in active_alerts:
             entry, tp1, tp2, stop, open_time_utc, trade_type = active_alerts[symbol]
             direction = "Short" if "Short" in trade_type else "Long"
-
-            print(f"\n[DEBUG] ----- {symbol} Active Trade Check -----")
-            print(f"[DEBUG] Direction: {direction}")
-            print(f"[DEBUG] Entry: {entry:.2f}, Stop: {stop:.2f}, TP1: {tp1:.2f}, TP2: {tp2:.2f}")
-            print(f"[DEBUG] Prev High: {prev_candle['high']:.2f}, Low: {prev_candle['low']:.2f}")
-            print(f"[DEBUG] Curr High: {curr_candle['high']:.2f}, Low: {curr_candle['low']:.2f}")
-            print(f"[DEBUG] Timestamp (UTC): {now_utc.isoformat()}")
 
             hit_tp2 = (
                 prev_candle["high"] >= tp2 or curr_candle["high"] >= tp2
@@ -781,9 +778,6 @@ async def scan_coins():
                 if direction == "Long" else
                 prev_candle["high"] >= stop or curr_candle["high"] >= stop
             )
-
-            print(f"[DEBUG] TP2 Condition: {hit_tp2}")
-            print(f"[DEBUG] SL Condition: {hit_sl}")
 
             if hit_tp2 or hit_sl:
                 result = "🎯 Take Profit 2 Hit!" if hit_tp2 else "💥 Stop Loss Hit!"
@@ -832,21 +826,31 @@ async def scan_coins():
 
             rr = (tp2 - entry) / (entry - stop) if "Long" in signal else (entry - tp2) / (stop - entry)
             if rr < 1.5:
-                print(f"[DEBUG] Skipping {symbol}: RR {rr:.2f} < 1.5")
                 continue
 
             body = abs(candle["close"] - candle["open"])
             range_ = candle["high"] - candle["low"]
             if range_ == 0 or (body / range_) < 0.2:
-                print(f"[DEBUG] Skipping {symbol}: Weak/indecisive candle structure")
                 continue
 
-            # Detect Candle Pattern with Fallback
-            try:
-                pattern = detect_candlestick_pattern(df)
-            except Exception as e:
-                print(f"[WARN] Pattern detection failed for {symbol}: {e}")
-                pattern = "N/A"
+            pattern = detect_candlestick_pattern(df)
+
+            # Multi-Timeframe Confluence (1h)
+            df_1h = fetch_ohlc(symbol, interval="60")
+            df_1h = calculate_indicators(df_1h)
+            tf_confluence = df_1h.iloc[-2]["macd_hist"] > 0 if "Long" in signal else df_1h.iloc[-2]["macd_hist"] < 0
+            if not tf_confluence:
+                continue
+
+            # Pattern + Indicator bonus confidence
+            if pattern in ["Bullish Engulfing", "Hammer"] and "Long" in signal:
+                confidence += 1
+            if pattern in ["Bearish Engulfing", "Shooting Star"] and "Short" in signal:
+                confidence += 1
+
+            # Seasonal/Lunar (mock signal)
+            if symbol == "ETH" and signal and now_utc.strftime("%m-%d") in ["10-25", "04-18"]:
+                confidence += 1
 
             active_alerts[symbol] = (entry, tp1, tp2, stop, now_utc, signal)
 
@@ -863,6 +867,7 @@ async def scan_coins():
             }
 
             log_trade(symbol, trade, now_utc)
+            track_strategy_performance(symbol, signal, pattern, confidence, success=None)
 
             await send_trade_alert(
                 channel, symbol, entry, tp1, tp2, stop, signal, confidence,
