@@ -802,8 +802,13 @@ async def scan_coins():
             continue
 
         # === New Trade Detection ===
-        prev_signal, prev_conf, prev_knight, prev_strats = detect_trade(df.iloc[:-1], symbol, bot_mode)
-        curr_signal, curr_conf, curr_knight, curr_strats = detect_trade(df, symbol, bot_mode)
+        try:
+            prev_df = df.iloc[:-1] if len(df) > 1 else df
+            prev_signal, prev_conf, prev_knight, prev_strats = detect_trade(prev_df, symbol, bot_mode)
+            curr_signal, curr_conf, curr_knight, curr_strats = detect_trade(df, symbol, bot_mode)
+        except Exception as e:
+            print(f"[ERROR] detect_trade failed for {symbol}: {e}")
+            continue
 
         signal = prev_signal or curr_signal
         confidence = prev_conf if prev_signal else curr_conf
@@ -815,6 +820,7 @@ async def scan_coins():
             entry = candle["close"]
             atr = candle["atr"]
 
+            # === Risk Levels ===
             if "Long" in signal:
                 stop = entry - atr * 1.5
                 tp1 = entry + atr * 1.5
@@ -824,34 +830,40 @@ async def scan_coins():
                 tp1 = entry - atr * 1.5
                 tp2 = entry - atr * 2.5
 
+            # === Risk-Reward Filter ===
             rr = (tp2 - entry) / (entry - stop) if "Long" in signal else (entry - tp2) / (stop - entry)
             if rr < 1.5:
                 continue
 
+            # === Candle Strength Filter ===
             body = abs(candle["close"] - candle["open"])
             range_ = candle["high"] - candle["low"]
             if range_ == 0 or (body / range_) < 0.2:
                 continue
 
+            # === Detect Candlestick Pattern ===
             pattern = detect_candlestick_pattern(df)
 
-            # Multi-Timeframe Confluence (1h)
+            # === Multi-Timeframe Confluence (1h MACD Histogram) ===
             df_1h = fetch_ohlc(symbol, interval="60")
+            if df_1h is None:
+                continue
             df_1h = calculate_indicators(df_1h)
             tf_confluence = df_1h.iloc[-2]["macd_hist"] > 0 if "Long" in signal else df_1h.iloc[-2]["macd_hist"] < 0
             if not tf_confluence:
                 continue
 
-            # Pattern + Indicator bonus confidence
-            if pattern in ["Bullish Engulfing", "Hammer"] and "Long" in signal:
+            # === Pattern + Indicator Confidence Boost ===
+            if pattern in ["Bullish Engulfing", "Hammer", "Morning Star", "Piercing Line"] and "Long" in signal:
                 confidence += 1
-            if pattern in ["Bearish Engulfing", "Shooting Star"] and "Short" in signal:
-                confidence += 1
-
-            # Seasonal/Lunar (mock signal)
-            if symbol == "ETH" and signal and now_utc.strftime("%m-%d") in ["10-25", "04-18"]:
+            if pattern in ["Bearish Engulfing", "Shooting Star", "Evening Star", "Dark Cloud Cover"] and "Short" in signal:
                 confidence += 1
 
+            # === Seasonal / Lunar Influence (mocked) ===
+            if symbol == "ETH" and now_utc.strftime("%m-%d") in ["10-25", "04-18"]:
+                confidence += 1
+
+            # === Log and Alert ===
             active_alerts[symbol] = (entry, tp1, tp2, stop, now_utc, signal)
 
             trade = {
@@ -873,7 +885,6 @@ async def scan_coins():
                 channel, symbol, entry, tp1, tp2, stop, signal, confidence,
                 knight, now_central, now_utc, pattern
             )
-
 
         # === Cooldown Check (30 min) ===
         last_time = cooldowns.get(symbol)
