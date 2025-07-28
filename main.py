@@ -62,6 +62,14 @@ def detect_candlestick_pattern(df):
     if body > 0 and (min(c, o) - l) > body * 2 and (h - max(c, o)) < body:
         patterns.append("Hammer")
 
+    # Inverted Hammer
+    if body > 0 and (h - max(c, o)) > body * 2 and (min(c, o) - l) < body:
+        patterns.append("Inverted Hammer")
+
+    # Hanging Man (like Hammer but after uptrend - trend context check needed separately)
+    if body > 0 and (min(c, o) - l) > body * 2 and (h - max(c, o)) < body:
+        patterns.append("Hanging Man")
+
     # Shooting Star
     if body > 0 and (h - max(c, o)) > body * 2 and (min(c, o) - l) < body:
         patterns.append("Shooting Star")
@@ -86,7 +94,55 @@ def detect_candlestick_pattern(df):
     if prev_c > prev_o and c < o and c < (prev_o + prev_c) / 2 and o > prev_c:
         patterns.append("Dark Cloud Cover")
 
-    return ", ".join(patterns) if patterns else "None"
+    # Marubozu
+    if body / candle_range > 0.9:
+        if c > o:
+            patterns.append("Bullish Marubozu")
+        elif c < o:
+            patterns.append("Bearish Marubozu")
+
+    # Spinning Top
+    if body / candle_range >= 0.1 and body / candle_range <= 0.4:
+        patterns.append("Spinning Top")
+
+    # === NEW PATTERNS ===
+    # Three White Soldiers
+    if len(df) >= 5:
+        p1 = df.iloc[-4]
+        p2 = df.iloc[-3]
+        p3 = df.iloc[-2]
+        if all(c["close"] > c["open"] for c in [p1, p2, p3]) and \
+           p2["open"] > p1["open"] and p2["close"] > p1["close"] and \
+           p3["open"] > p2["open"] and p3["close"] > p2["close"]:
+            patterns.append("Three White Soldiers")
+
+    # Three Black Crows
+    if len(df) >= 5:
+        p1 = df.iloc[-4]
+        p2 = df.iloc[-3]
+        p3 = df.iloc[-2]
+        if all(c["close"] < c["open"] for c in [p1, p2, p3]) and \
+           p2["open"] < p1["open"] and p2["close"] < p1["close"] and \
+           p3["open"] < p2["open"] and p3["close"] < p2["close"]:
+            patterns.append("Three Black Crows")
+
+    # Harami
+    if abs(c - o) < body and abs(prev_c - prev_o) > body:
+        if c > o and prev_c < prev_o and c < prev_o and o > prev_c:
+            patterns.append("Bullish Harami")
+        elif c < o and prev_c > prev_o and c > prev_o and o < prev_c:
+            patterns.append("Bearish Harami")
+
+    # Tweezer Bottom
+    if abs(l - df["low"].iloc[-3]) < candle_range * 0.05:
+        patterns.append("Tweezer Bottom")
+
+    # Tweezer Top
+    if abs(h - df["high"].iloc[-3]) < candle_range * 0.05:
+        patterns.append("Tweezer Top")
+
+    return ", ".join(set(patterns)) if patterns else "None"
+
 
 active_alerts = {}
 cooldowns = {}
