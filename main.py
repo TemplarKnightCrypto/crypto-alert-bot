@@ -34,6 +34,59 @@ KRAKEN_PAIRS = {
     "HBAR": "HBARUSD"
 }
 
+def detect_candlestick_pattern(df):
+    patterns = []
+
+    # Current and previous candles
+    o = df["open"].iloc[-2]
+    h = df["high"].iloc[-2]
+    l = df["low"].iloc[-2]
+    c = df["close"].iloc[-2]
+    prev_o = df["open"].iloc[-3]
+    prev_c = df["close"].iloc[-3]
+    prev_h = df["high"].iloc[-3]
+    prev_l = df["low"].iloc[-3]
+
+    body = abs(c - o)
+    candle_range = h - l
+    prev_body = abs(prev_c - prev_o)
+
+    # === 1-Candle Patterns ===
+    if candle_range > 0 and body / candle_range < 0.1:
+        patterns.append("Doji")
+    if body > 0 and (min(c, o) - l) > body * 2 and (h - max(c, o)) < body:
+        patterns.append("Hammer")
+    if body > 0 and (h - max(c, o)) > body * 2 and (min(c, o) - l) < body:
+        patterns.append("Shooting Star")
+
+    # === 2-Candle Patterns ===
+    if prev_c < prev_o and c > o and c > prev_o and o < prev_c:
+        patterns.append("Bullish Engulfing")
+    if prev_c > prev_o and c < o and c < prev_o and o > prev_c:
+        patterns.append("Bearish Engulfing")
+    if prev_c < prev_o and c > o and o > prev_c and c > prev_o and abs(c - prev_o) < body:
+        patterns.append("Piercing Line")
+    if prev_c > prev_o and c < o and o < prev_c and c < prev_o and abs(c - prev_o) < body:
+        patterns.append("Dark Cloud Cover")
+
+    # === 3-Candle Patterns ===
+    if (
+        prev_c < prev_o  # 2 candles ago = red
+        and o < c         # last candle = green
+        and c > (prev_o + prev_c) / 2
+        and df["close"].iloc[-4] < df["open"].iloc[-4]  # 3 candles ago = red
+    ):
+        patterns.append("Morning Star")
+    if (
+        prev_c > prev_o  # 2 candles ago = green
+        and o > c         # last candle = red
+        and c < (prev_o + prev_c) / 2
+        and df["close"].iloc[-4] > df["open"].iloc[-4]  # 3 candles ago = green
+    ):
+        patterns.append("Evening Star")
+
+    return ", ".join(patterns) if patterns else "None"
+
 active_alerts = {}
 cooldowns = {}
 leaderboard_stats = {sym: {"wins": 0, "losses": 0} for sym in KRAKEN_PAIRS}
@@ -280,26 +333,49 @@ def detect_pullback_orion(df):
     else:
         return None
 
-def log_trade_to_csv(trade_data):
-    date_str = datetime.datetime.now(UTC_TZ).strftime('%Y-%m-%d')
-    filename = f"logs/{date_str}_trades.csv"
+def log_trade(symbol, trade, timestamp):
+    date_str = timestamp.strftime('%Y-%m-%d')
+    daily_log_path = f"logs/{date_str}_trades.csv"
+    master_log_path = "logs/trade_log.csv"
     os.makedirs("logs", exist_ok=True)
-    file_exists = os.path.isfile(filename)
 
-    with open(filename, mode="a", newline="") as file:
-        writer = csv.writer(file)
-        if not file_exists:
-            writer.writerow(["Time", "Symbol", "Type", "Entry", "Stop", "TP1", "TP2", "Confidence", "Matched", "WeakSignal", "Knight"])
+    # === Build Shared Row ===
+    base_row = [
+        timestamp.strftime('%Y-%m-%d %H:%M:%S'),
+        symbol,
+        trade["type"],
+        trade.get("knight", "🧙 Unknown"),
+        round(trade["entry"], 2),
+        round(trade["tp1"], 2),
+        round(trade["tp2"], 2),
+        round(trade["stop"], 2),
+        trade["confidence"],
+        trade.get("pattern", "N/A"),
+        ", ".join(trade.get("strategies_matched", [])),
+        "Yes" if trade["type"] == "🟡 Weak Signal" else "No"
+    ]
 
-        writer.writerow([
-            trade_data["time"], trade_data["symbol"], trade_data["type"],
-            f"{trade_data['entry']:.2f}", f"{trade_data['stop']:.2f}",
-            f"{trade_data['tp1']:.2f}", f"{trade_data['tp2']:.2f}",
-            trade_data["confidence"],
-            ", ".join(trade_data.get("strategies_matched", [])),
-            "Yes" if trade_data["type"] == "🟡 Weak Signal" else "No",
-            trade_data.get("knight", "🧙 Unknown")
-        ])
+    # === Write Daily Log ===
+    if not os.path.exists(daily_log_path):
+        with open(daily_log_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "Time", "Symbol", "Type", "Knight", "Entry", "TP1", "TP2", "Stop",
+                "Confidence", "Pattern", "Strategies Matched", "WeakSignal"
+            ])
+    with open(daily_log_path, "a", newline="") as f:
+        csv.writer(f).writerow(base_row)
+
+    # === Write Master Log ===
+    if not os.path.exists(master_log_path):
+        with open(master_log_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "Time", "Symbol", "Type", "Knight", "Entry", "TP1", "TP2", "Stop",
+                "Confidence", "Pattern", "Strategies Matched", "WeakSignal"
+            ])
+    with open(master_log_path, "a", newline="") as f:
+        csv.writer(f).writerow(base_row)
 
 def fetch_ohlc(symbol, interval="30"):
     url = f"https://api.kraken.com/0/public/OHLC?pair={KRAKEN_PAIRS[symbol]}&interval={interval}"
@@ -342,6 +418,7 @@ def format_embed(symbol, trade, central_time, utc_time):
     color = discord.Color.red() if direction == "Short" else discord.Color.green()
 
     knight = trade.get("knight", "🧙 Unknown")
+    pattern = trade.get("pattern", "N/A")
 
     embed = discord.Embed(
         title=f"{emoji} {symbol} {trade['type']} – {central_time}",
@@ -368,12 +445,38 @@ def format_embed(symbol, trade, central_time, utc_time):
         inline=False
     )
     embed.add_field(
+        name="🕯️ Candle Pattern",
+        value=pattern,
+        inline=False
+    )
+    embed.add_field(
         name="🧙 Signal Issued By",
         value=knight,
         inline=False
     )
     embed.set_footer(text=f"Generated {utc_time}")
     return embed
+
+async def send_trade_alert(channel, symbol, entry, tp1, tp2, stop, signal, confidence, knight, now_central, now_utc, pattern):
+    direction = "Short" if "Short" in signal else "Long"
+    emoji = "📉" if direction == "Short" else "📈"
+    color = discord.Color.red() if direction == "Short" else discord.Color.green()
+    confidence_emoji = {
+        6: "🔥", 5: "✅", 4: "🟢", 3: "⚪", 2: "🔻", 1: "🟥", 0: "❌"
+    }.get(confidence, "❓")
+
+    embed = discord.Embed(
+        title=f"{emoji} {symbol} {signal} – {now_central}",
+        color=color
+    )
+    embed.add_field(name="💰 Entry", value=f"${entry:.2f}", inline=True)
+    embed.add_field(name="🎯 Target", value=f"${tp2:.2f}", inline=True)
+    embed.add_field(name="🛡️ Stop", value=f"${stop:.2f}", inline=True)
+    embed.add_field(name="🧠 Confidence", value=f"{confidence_emoji} {confidence}/6", inline=True)
+    embed.add_field(name="🕯️ Candle Pattern", value=pattern, inline=True)
+    embed.add_field(name="🧙 Issued By", value=knight, inline=True)
+    embed.set_footer(text=f"Generated {fmt_utc(now_utc)}")
+    await channel.send(embed=embed)
 
 def format_exit_embed(symbol, direction, entry, tp1, tp2, stop, exit_price, result,
                       close_time_ct, close_time_utc, open_time_ct, elapsed_str):
@@ -653,10 +756,8 @@ async def scan_coins():
             continue
 
         df = calculate_indicators(df)
-        latest = df.iloc[-2]  # Use most recent closed candle
-        price = latest["close"]
-        candle_high = latest["high"]
-        candle_low = latest["low"]
+        prev_candle = df.iloc[-2]
+        curr_candle = df.iloc[-1]
 
         # === Check for Active Trade ===
         if symbol in active_alerts:
@@ -666,38 +767,108 @@ async def scan_coins():
             print(f"\n[DEBUG] ----- {symbol} Active Trade Check -----")
             print(f"[DEBUG] Direction: {direction}")
             print(f"[DEBUG] Entry: {entry:.2f}, Stop: {stop:.2f}, TP1: {tp1:.2f}, TP2: {tp2:.2f}")
-            print(f"[DEBUG] Candle Close: {price:.2f}, High: {candle_high:.2f}, Low: {candle_low:.2f}")
-            print(f"[DEBUG] TP2 Condition: {candle_high >= tp2 if direction == 'Long' else candle_low <= tp2}")
-            print(f"[DEBUG] SL Condition: {candle_low <= stop if direction == 'Long' else candle_high >= stop}")
+            print(f"[DEBUG] Prev High: {prev_candle['high']:.2f}, Low: {prev_candle['low']:.2f}")
+            print(f"[DEBUG] Curr High: {curr_candle['high']:.2f}, Low: {curr_candle['low']:.2f}")
             print(f"[DEBUG] Timestamp (UTC): {now_utc.isoformat()}")
 
-            hit_tp2 = (candle_high >= tp2) if direction == "Long" else (candle_low <= tp2)
-            hit_sl = (candle_low <= stop) if direction == "Long" else (candle_high >= stop)
+            hit_tp2 = (
+                prev_candle["high"] >= tp2 or curr_candle["high"] >= tp2
+                if direction == "Long" else
+                prev_candle["low"] <= tp2 or curr_candle["low"] <= tp2
+            )
+            hit_sl = (
+                prev_candle["low"] <= stop or curr_candle["low"] <= stop
+                if direction == "Long" else
+                prev_candle["high"] >= stop or curr_candle["high"] >= stop
+            )
+
+            print(f"[DEBUG] TP2 Condition: {hit_tp2}")
+            print(f"[DEBUG] SL Condition: {hit_sl}")
 
             if hit_tp2 or hit_sl:
                 result = "🎯 Take Profit 2 Hit!" if hit_tp2 else "💥 Stop Loss Hit!"
                 leaderboard_stats[symbol]["wins" if hit_tp2 else "losses"] += 1
 
+                exit_price = curr_candle["close"]
                 central_time = fmt_central(now_utc.astimezone(CENTRAL_TZ))
                 utc_time = fmt_utc(now_utc)
-
                 elapsed = now_utc - open_time_utc
                 elapsed_minutes = int(elapsed.total_seconds() // 60)
                 hours, minutes = divmod(elapsed_minutes, 60)
                 elapsed_str = f"{hours}h {minutes}m" if hours else f"{minutes}m"
-
                 central_open_time = fmt_central(open_time_utc.astimezone(CENTRAL_TZ))
 
                 embed = format_exit_embed(
-                    symbol, direction, entry, tp1, tp2, stop, price, result,
+                    symbol, direction, entry, tp1, tp2, stop, exit_price, result,
                     central_time, utc_time, central_open_time, elapsed_str
                 )
 
-                if symbol == "ETH":
-                    await channel.send(embed=embed)
-
+                await channel.send(embed=embed)
                 del active_alerts[symbol]
             continue
+
+        # === New Trade Detection ===
+        prev_signal, prev_conf, prev_knight, prev_strats = detect_trade(df.iloc[:-1], symbol, bot_mode)
+        curr_signal, curr_conf, curr_knight, curr_strats = detect_trade(df, symbol, bot_mode)
+
+        signal = prev_signal or curr_signal
+        confidence = prev_conf if prev_signal else curr_conf
+        knight = prev_knight if prev_signal else curr_knight
+        strategies_matched = prev_strats if prev_signal else curr_strats
+
+        if signal:
+            candle = df.iloc[-2] if prev_signal else df.iloc[-1]
+            entry = candle["close"]
+            atr = candle["atr"]
+
+            if "Long" in signal:
+                stop = entry - atr * 1.5
+                tp1 = entry + atr * 1.5
+                tp2 = entry + atr * 2.5
+            else:
+                stop = entry + atr * 1.5
+                tp1 = entry - atr * 1.5
+                tp2 = entry - atr * 2.5
+
+            rr = (tp2 - entry) / (entry - stop) if "Long" in signal else (entry - tp2) / (stop - entry)
+            if rr < 1.5:
+                print(f"[DEBUG] Skipping {symbol}: RR {rr:.2f} < 1.5")
+                continue
+
+            body = abs(candle["close"] - candle["open"])
+            range_ = candle["high"] - candle["low"]
+            if range_ == 0 or (body / range_) < 0.2:
+                print(f"[DEBUG] Skipping {symbol}: Weak/indecisive candle structure")
+                continue
+
+            # Detect Candle Pattern with Fallback
+            try:
+                pattern = detect_candlestick_pattern(df)
+            except Exception as e:
+                print(f"[WARN] Pattern detection failed for {symbol}: {e}")
+                pattern = "N/A"
+
+            active_alerts[symbol] = (entry, tp1, tp2, stop, now_utc, signal)
+
+            trade = {
+                "entry": entry,
+                "tp1": tp1,
+                "tp2": tp2,
+                "stop": stop,
+                "type": signal,
+                "confidence": confidence,
+                "strategies_matched": strategies_matched,
+                "pattern": pattern,
+                "knight": knight
+            }
+
+            log_trade(symbol, trade, now_utc)
+
+            await send_trade_alert(
+                channel, symbol, entry, tp1, tp2, stop, signal, confidence,
+                knight, now_central, now_utc, pattern
+            )
+
 
         # === Cooldown Check (30 min) ===
         last_time = cooldowns.get(symbol)
