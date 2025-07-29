@@ -255,7 +255,6 @@ def calculate_indicators(df):
 
     return df
 
-# === Main Detection Logic ===
 def detect_trade(df, mode="aggressive"):
     latest = df.iloc[-1]
     matches = []
@@ -306,6 +305,27 @@ def detect_trade(df, mode="aggressive"):
     if latest["rsi"] < 50 and latest["close"] < latest["ema50"]:
         matches.append(("📉 📉 Pullback Short", 3))
 
+    # === Camarilla Structure Override Logic ===
+    h4, h3, pivot, l3, l4 = latest["h4"], latest["h3"], latest["pivot"], latest["l3"], latest["l4"]
+    price = latest["close"]
+
+    # Structural Short: H4 → H3 → Pivot
+    if h4 > price > h3 and latest["rsi"] < 60:
+        matches.append(("Short – Override Breakdown", 4))
+
+    # Structural Long: L4 → L3 → Pivot
+    if l4 < price < l3 and latest["rsi"] > 40:
+        matches.append(("Long – Override Pivot Bounce", 4))
+
+    # Near-term breakdown below Pivot toward L3
+    if price < pivot and latest["rsi"] < 50:
+        matches.append(("Short – Override Pivot Rejection", 3))
+
+    # Near-term reclaim above Pivot from below L3
+    if price > pivot and price < l3 and latest["rsi"] > 50:
+        matches.append(("Long – Override Pivot Reclaim", 3))
+
+    # === Fallback for Aggressive Mode ===
     if not matches:
         if mode == "aggressive":
             return [{
@@ -320,9 +340,10 @@ def detect_trade(df, mode="aggressive"):
             }]
         return []
 
+    # === Package Trade Objects ===
     trades = []
     for match_text, weight in matches:
-        direction = "short" if "📉" in match_text else "long"
+        direction = "short" if "📉" in match_text or "Short" in match_text else "long"
         if direction == "long":
             stop = latest["close"] - latest["atr"] * 1.5
             tp1 = latest["close"] + latest["atr"] * 1.5
@@ -532,9 +553,14 @@ async def send_trade_alert(channel, symbol, entry, tp1, tp2, stop, signal, confi
     direction = "Short" if "Short" in signal else "Long"
     emoji = "📉" if direction == "Short" else "📈"
     color = discord.Color.red() if direction == "Short" else discord.Color.green()
+
+    # Emoji-based confidence score
     confidence_emoji = {
         6: "🔥", 5: "✅", 4: "🟢", 3: "⚪", 2: "🔻", 1: "🟥", 0: "❌"
     }.get(confidence, "❓")
+
+    # Structural override detection
+    override_tag = "✅ Yes" if any(x in signal for x in ["Override", "Pivot", "Breakdown", "Bounce"]) else "—"
 
     embed = discord.Embed(
         title=f"{emoji} {symbol} {signal} – {now_central}",
@@ -544,19 +570,23 @@ async def send_trade_alert(channel, symbol, entry, tp1, tp2, stop, signal, confi
     embed.add_field(name="🎯 Target", value=f"${tp2:.2f}", inline=True)
     embed.add_field(name="🛡️ Stop", value=f"${stop:.2f}", inline=True)
     embed.add_field(name="🧠 Confidence", value=f"{confidence_emoji} {confidence}/6", inline=True)
-    embed.add_field(name="🕯️ Candle Pattern", value=pattern, inline=True)
+    embed.add_field(name="🕯️ Candle Pattern", value=pattern or "—", inline=True)
     embed.add_field(name="🧙 Issued By", value=knight, inline=True)
+    embed.add_field(name="⚔️ Structural Override", value=override_tag, inline=True)
     embed.set_footer(text=f"Generated {fmt_utc(now_utc)}")
 
-    # Send embed and create thread
     msg = await channel.send(embed=embed)
     thread_name = f"🧵 {symbol} {direction} – ${entry:.2f} Entry"
     thread = await msg.create_thread(name=thread_name, auto_archive_duration=1440)
 
-    return thread.id  # Return for logging and tracking
+    return thread.id  # Return thread ID for tracking
 
 def format_exit_embed(symbol, direction, entry, tp1, tp2, stop, exit_price, result,
-                      close_time_ct, close_time_utc, open_time_ct, elapsed_str):
+                      close_time_ct, close_time_utc, open_time_ct, elapsed_str, trade_type=""):
+    # ✅ Structural detection based on signal type keywords
+    is_structural = any(tag in trade_type for tag in ["Override", "Pivot", "Breakdown", "Bounce"])
+    override_value = "✅ Yes" if is_structural else "—"
+
     embed = discord.Embed(
         title=f"{symbol} Trade Exit – {result}",
         color=discord.Color.green() if "Take Profit" in result else discord.Color.red()
@@ -565,31 +595,10 @@ def format_exit_embed(symbol, direction, entry, tp1, tp2, stop, exit_price, resu
     embed.add_field(name="🎯 TP2", value=f"${tp2:.2f}", inline=True)
     embed.add_field(name="🛑 Stop", value=f"${stop:.2f}", inline=True)
     embed.add_field(name="💰 Exit Price", value=f"${exit_price:.2f}", inline=True)
+    embed.add_field(name="⚔️ Structural Override", value=override_value, inline=True)
     embed.add_field(name="⏰ Alert Sent", value=f"{open_time_ct} CT", inline=True)
     embed.add_field(name="⏳ Elapsed", value=f"{elapsed_str}", inline=True)
     embed.set_footer(text=f"Closed {close_time_utc} UTC")
-    return embed
-def format_orion_embed(strategy_type, entry, stop, tp1, tp2):
-    now_ct = datetime.datetime.now(CENTRAL_TZ).strftime('%b %d • %I:%M %p CT')
-    now_utc = datetime.datetime.now(UTC_TZ).strftime('%H:%M UTC')
-
-    # Orion’s poetic tone based on signal type
-    quotes = {
-        "Breakout Long": "🌘 Orion whispers: *From the depths we rise, unseen yet unstoppable.*",
-        "Pullback Long": "🌘 Orion murmurs: *The moon retreats, only to gather strength anew.*",
-        "Breakout Short": "🌘 Orion intones: *Foundations fracture. The silence begins to scream.*",
-        "Pullback Short": "🌘 Orion breathes: *The winds return. Shadows reclaim what was borrowed.*"
-    }
-    quote = quotes.get(strategy_type, "🌘 Orion watches silently...")
-
-    embed = discord.Embed(
-        title=f"🌘 Orion's Daily ETH Signal – {strategy_type}",
-        color=0x6f42c1  # Mystic purple
-    )
-    embed.add_field(name="🎯 Entry", value=f"`{entry}`", inline=True)
-    embed.add_field(name="🛡️ Stop Loss", value=f"`{stop}`", inline=True)
-    embed.add_field(name="🎯 Targets", value=f"`TP1: {tp1}` → `TP2: {tp2}`", inline=False)
-    embed.set_footer(text=f"{quote}  •  UTC Time: {now_utc}")
     return embed
 
 @bot.command()
@@ -823,8 +832,8 @@ async def eth_status_report():
         print(f"[ERROR] Failed to send ETH report: {e}")
 
 @tasks.loop(minutes=1)
+@tasks.loop(minutes=1)
 async def scan_coins():
-    channel = bot.get_channel(BATTLE_SIGNALS_CHANNEL_ID)
     now_utc, now_central = now_times()
 
     for symbol in KRAKEN_PAIRS:
@@ -839,7 +848,7 @@ async def scan_coins():
         prev_candle = df.iloc[-2]
         curr_candle = df.iloc[-1]
 
-        # === Check for Active Trade ===
+        # === Active Trade Monitoring ===
         if symbol in active_alerts:
             entry, tp1, tp2, stop, open_time_utc, trade_type, thread_id = active_alerts[symbol]
             direction = "Short" if "Short" in trade_type else "Long"
@@ -878,12 +887,13 @@ async def scan_coins():
                     await thread.send(embed=embed)
                 except Exception as e:
                     print(f"[ERROR] Failed to post TP/SL to thread {thread_id}: {e}")
-                    await channel.send(embed=embed)
+                    fallback = bot.get_channel(BATTLE_SIGNALS_CHANNEL_ID)
+                    await fallback.send(embed=embed)
 
                 del active_alerts[symbol]
             continue
 
-        # === New Trade Detection ===
+        # === Dual Candle Trade Detection ===
         try:
             prev_df = df.iloc[:-1] if len(df) > 1 else df
             prev_signal, prev_conf, prev_knight, prev_strats = detect_trade(prev_df, symbol, bot_mode)
@@ -902,31 +912,21 @@ async def scan_coins():
             entry = candle["close"]
             atr = candle["atr"]
 
-            # === Risk Levels ===
-            if "Long" in signal:
-                stop = entry - atr * 1.5
-                tp1 = entry + atr * 1.5
-                tp2 = entry + atr * 2.5
-            else:
-                stop = entry + atr * 1.5
-                tp1 = entry - atr * 1.5
-                tp2 = entry - atr * 2.5
+            stop = entry - atr * 1.5 if "Long" in signal else entry + atr * 1.5
+            tp1 = entry + atr * 1.5 if "Long" in signal else entry - atr * 1.5
+            tp2 = entry + atr * 2.5 if "Long" in signal else entry - atr * 2.5
 
-            # === Risk-Reward Filter ===
             rr = (tp2 - entry) / (entry - stop) if "Long" in signal else (entry - tp2) / (stop - entry)
             if rr < 1.5:
                 continue
 
-            # === Candle Strength Filter ===
             body = abs(candle["close"] - candle["open"])
             range_ = candle["high"] - candle["low"]
             if range_ == 0 or (body / range_) < 0.2:
                 continue
 
-            # === Detect Candlestick Pattern ===
             pattern = detect_candlestick_pattern(df)
 
-            # === Multi-Timeframe Confluence (1h MACD Histogram) ===
             df_1h = fetch_ohlc(symbol, interval="60")
             if df_1h is None:
                 continue
@@ -935,28 +935,29 @@ async def scan_coins():
             if not tf_confluence:
                 continue
 
-            # === Pattern + Indicator Confidence Boost ===
             if pattern in ["Bullish Engulfing", "Hammer", "Morning Star", "Piercing Line"] and "Long" in signal:
                 confidence += 1
             if pattern in ["Bearish Engulfing", "Shooting Star", "Evening Star", "Dark Cloud Cover"] and "Short" in signal:
                 confidence += 1
 
-            # === Seasonal / Lunar Influence (mocked) ===
             if symbol == "ETH" and now_utc.strftime("%m-%d") in ["10-25", "04-18"]:
                 confidence += 1
 
-            # === Send Alert + Create Thread ===
+            override = any(tag in signal for tag in ["Override", "Pivot", "Fade", "Breakdown", "Breakout"])
+            channel_id = BATTLE_SIGNALS_CHANNEL_ID if override else (EAGLE_SIGNAL_CHANNEL_ID if symbol == "ETH" else None)
+            if not channel_id:
+                continue
+            channel = bot.get_channel(channel_id)
+
             thread_id = await send_trade_alert(
                 channel, symbol, entry, tp1, tp2, stop, signal, confidence,
                 knight, now_central, now_utc, pattern
             )
 
-            # === Store in Active Alerts with thread_id ===
             active_alerts[symbol] = (
                 entry, tp1, tp2, stop, now_utc, signal, thread_id
             )
 
-            # === Log Trade with thread_id ===
             trade = {
                 "entry": entry,
                 "tp1": tp1,
@@ -971,13 +972,12 @@ async def scan_coins():
             log_trade(symbol, trade, now_utc, thread_id=thread_id)
             track_strategy_performance(symbol, signal, pattern, confidence, success=None)
 
-
-        # === Cooldown Check (30 min) ===
+        # === Cooldown Check (30 min)
         last_time = cooldowns.get(symbol)
         if last_time and (now_utc - last_time).total_seconds() < 1800:
             continue
 
-        # === Detect New Trades ===
+        # === Fallback: Additional Trade Detection
         trades = detect_trade(df, mode=bot_mode)
         if not trades or not isinstance(trades, list):
             continue
@@ -1002,15 +1002,15 @@ async def scan_coins():
             embed = format_embed(symbol, trade, central_time, utc_time)
 
             if symbol == "ETH":
-                await channel.send(embed=embed)
+                fallback = bot.get_channel(EAGLE_SIGNAL_CHANNEL_ID)
+                await fallback.send(embed=embed)
 
             active_alerts[symbol] = (
                 trade["entry"], trade["tp1"], trade["tp2"],
                 trade["stop"], now_utc, trade["type"]
             )
-
-            print(f"[DEBUG] 🚨 New Trade Set: {symbol} | Entry: {trade['entry']:.2f}, TP2: {trade['tp2']:.2f}, Stop: {trade['stop']:.2f}")
             cooldowns[symbol] = now_utc
+
 
 @tasks.loop(minutes=1)
 async def hourly_knight_report():
