@@ -99,7 +99,12 @@ def calculate_ichimoku(df):
     period52_low = df['low'].rolling(window=52).min()
 
     tenkan_sen = (nine_high + nine_low) / 2
-    kijun_sen = (per_
+    kijun_sen = (period26_high + period26_low) / 2
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(26)
+    senkou_span_b = ((period52_high + period52_low) / 2).shift(26)
+    chikou_span = df['close'].shift(-26)
+
+    return tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b, chikou_span
 
 # ========================================
 # Trade Detection Logic
