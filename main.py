@@ -1,1255 +1,203 @@
+
 # ============================================
-# The Control Tower - Templar Knight Crypto
-# ============================================
-# ============================================
-# 🔧 SECTION 1: Imports & Configuration
+# Camarilla Trade Alert Bot – Render Deployment
+# Scans ETHUSD from Kraken every 1 min
+# Detects breakouts, reversals, warning alerts
+# Sends results to Discord
 # ============================================
 
 import os
 import threading
-import requests
-import pandas as pd
-import numpy as np
 import datetime
 import pytz
-import csv
 import discord
+import pandas as pd
+import numpy as np
+import requests
 from flask import Flask
 from dotenv import load_dotenv
 from discord.ext import commands, tasks
-from discord import File
-from ta.momentum import rsi, stochrsi, williams_r
-from ta.trend import ema_indicator, sma_indicator, adx, cci
-from ta.volatility import average_true_range, bollinger_hband, bollinger_lband, keltner_channel_hband, keltner_channel_lband
-from ta.volume import on_balance_volume
 
-# === Load Environment Variables ===
+# === Load environment variables ===
 load_dotenv()
-TOKEN = os.getenv("TOKEN")
+TOKEN = os.getenv("DISCORD_TOKEN")
+CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", 1399532925279666278))  # Replace with real channel ID
 
 # === Timezones ===
 CENTRAL_TZ = pytz.timezone("US/Central")
 UTC_TZ = pytz.utc
 
-# === Kraken Symbol Mapping ===
-KRAKEN_PAIRS = {
-    "BTC": "XXBTZUSD",
-    "ETH": "XETHZUSD",
-    "SOL": "SOLUSD",
-    "AVAX": "AVAXUSD",
-    "ADA": "ADAUSD",
-    "HBAR": "HBARUSD"
-}
-
-# === Discord Channel Assignments (Founders’ Forge) ===
-BATTLE_SIGNALS_CHANNEL_ID = 1399532925279666278       # ⚔️・battle-signals
-EAGLE_SIGNAL_CHANNEL_ID = 1398690647417819198         # 🦅・eagle-signal
-SCRIBE_KEEP_CHANNEL_ID = 1398691425347961016          # 📜・scribe’s-keep
-ETH_BATTLEGROUND_CHANNEL_ID = 1399532442075005038     # 🏰・eth-battleground
-KNIGHTS_WATCH_CHANNEL_ID = 1399532102571135118        # ⏰・knights’-watch
-SCROLLS_OF_ORDER_CHANNEL_ID = 1399067396488302623     # 📖・scrolls-of-the-order
-
-# === Discord Bot Initialization ===
+# === Discord bot ===
 intents = discord.Intents.default()
-intents.messages = True
-intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# === Flask App for Uptime Pings ===
+# === Flask App for Render Uptime ===
 app = Flask(__name__)
 
-# ============================================
-# 🧰 SECTION 2: Utility Functions
-# ============================================
+@app.route('/')
+def index():
+    return "Bot is alive!"
 
-def now_times():
-    utc_dt = datetime.datetime.now(UTC_TZ)
-    central_dt = utc_dt.astimezone(CENTRAL_TZ)
-    return utc_dt, central_dt
+def run_flask():
+    app.run(host='0.0.0.0', port=10000)
 
-def fmt_central(dt):
-    return dt.strftime("%Y-%m-%d %I:%M %p %Z")
+threading.Thread(target=run_flask).start()
 
-def fmt_utc(dt):
-    return dt.strftime("%Y-%m-%d %H:%M UTC")
-
-def fetch_ohlc(symbol, interval="30"):
-    url = f"https://api.kraken.com/0/public/OHLC?pair={KRAKEN_PAIRS[symbol]}&interval={interval}"
-    try:
-        response = requests.get(url)
-        data = response.json()
-        key = list(data["result"].keys())[0]
-        df = pd.DataFrame(data["result"][key], columns=[
-            "time", "open", "high", "low", "close", "vwap", "volume", "count"
-        ])
-        df = df.astype({
-            "time": "int64", "open": "float", "high": "float",
-            "low": "float", "close": "float", "volume": "float"
-        })
-        df["time"] = pd.to_datetime(df["time"], unit="s")
-        df.set_index("time", inplace=True)
-        return df
-    except Exception as e:
-        print(f"OHLC fetch error: {e}")
+# === Kraken OHLC Fetch ===
+def fetch_ohlc_from_kraken(pair="ETHUSD", interval=5, candles=50):
+    url = f"https://api.kraken.com/0/public/OHLC"
+    response = requests.get(url, params={"pair": pair, "interval": interval})
+    if response.status_code != 200:
+        print("Kraken API error")
         return None
-
-# ============================================
-# 📈 SECTION 3: Indicator Calculations
-# ============================================
-
-def calculate_indicators(df):
-    # === Trend & Momentum Indicators ===
-    df["ema9"] = ema_indicator(df["close"], window=9)
-    df["ema21"] = ema_indicator(df["close"], window=21)
-    df["ema50"] = ema_indicator(df["close"], window=50)
-    df["rsi"] = rsi(df["close"], window=14)
-    df["adx"] = adx(df["high"], df["low"], df["close"], window=14)
-    df["cci"] = cci(df["high"], df["low"], df["close"], window=20)
-    df["williams_r"] = williams_r(df["high"], df["low"], df["close"], lbp=14)
-
-    # === Volume Indicators ===
-    df["obv"] = on_balance_volume(df["close"], df["volume"])
-
-    # === Volatility Indicators ===
-    df["atr"] = average_true_range(df["high"], df["low"], df["close"], window=14)
-    df["bb_upper"] = bollinger_hband(df["close"], window=20)
-    df["bb_lower"] = bollinger_lband(df["close"], window=20)
-    df["bb_width"] = (df["bb_upper"] - df["bb_lower"]) / df["bb_lower"]
-    df["donchian_high"] = df["high"].rolling(window=20).max()
-    df["donchian_low"] = df["low"].rolling(window=20).min()
-    df["kc_upper"] = keltner_channel_hband(df["high"], df["low"], df["close"], window=20)
-    df["kc_lower"] = keltner_channel_lband(df["high"], df["low"], df["close"], window=20)
-    df["squeeze"] = (df["bb_lower"] > df["kc_lower"]) & (df["bb_upper"] < df["kc_upper"])
-
-    # === Chaikin Money Flow (CMF) ===
-    mfv = ((df["close"] - df["low"]) - (df["high"] - df["close"])) / (df["high"] - df["low"] + 1e-9) * df["volume"]
-    df["cmf"] = mfv.rolling(window=20).sum() / df["volume"].rolling(window=20).sum()
-
-    # === MACD Histogram ===
-    df["macd"] = df["close"].ewm(span=12).mean() - df["close"].ewm(span=26).mean()
-    df["signal"] = df["macd"].ewm(span=9).mean()
-    df["macd_hist"] = df["macd"] - df["signal"]
-
-    # === Supertrend Indicator ===
-    atr = df["atr"]
-    hl2 = (df["high"] + df["low"]) / 2
-    factor = 3
-    df["upperband"] = hl2 + (factor * atr)
-    df["lowerband"] = hl2 - (factor * atr)
-
-    in_uptrend = [True]
-    for i in range(1, len(df)):
-        if df["close"].iloc[i] > df["upperband"].iloc[i - 1]:
-            in_uptrend.append(True)
-        elif df["close"].iloc[i] < df["lowerband"].iloc[i - 1]:
-            in_uptrend.append(False)
-        else:
-            in_uptrend.append(in_uptrend[-1])
-    df["supertrend"] = in_uptrend
-
-    # === Alligator Indicator ===
-    df["jaw"] = ema_indicator(df["close"], window=13).shift(8)
-    df["teeth"] = ema_indicator(df["close"], window=8).shift(5)
-    df["lips"] = ema_indicator(df["close"], window=5).shift(3)
-    df["alligator"] = (df["lips"] > df["teeth"]) & (df["teeth"] > df["jaw"])
-
-    # === Ichimoku Cloud ===
-    period9_high = df["high"].rolling(window=9).max()
-    period9_low = df["low"].rolling(window=9).min()
-    tenkan_sen = (period9_high + period9_low) / 2
-
-    period26_high = df["high"].rolling(window=26).max()
-    period26_low = df["low"].rolling(window=26).min()
-    kijun_sen = (period26_high + period26_low) / 2
-
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(26)
-    period52_high = df["high"].rolling(window=52).max()
-    period52_low = df["low"].rolling(window=52).min()
-    senkou_span_b = ((period52_high + period52_low) / 2).shift(26)
-
-    df["ichimoku_bull"] = (df["close"] > senkou_span_a) & (df["close"] > senkou_span_b)
-    df["ichimoku_bear"] = (df["close"] < senkou_span_a) & (df["close"] < senkou_span_b)
-    df["twist"] = (senkou_span_a - senkou_span_b).diff().abs() < 1e-3
-    df["kumo_breakout"] = df["ichimoku_bull"]
-    df["kumo_breakdown"] = df["ichimoku_bear"]
-    df["inside_kumo"] = ((df["close"] > senkou_span_b) & (df["close"] < senkou_span_a)) | \
-                         ((df["close"] > senkou_span_a) & (df["close"] < senkou_span_b))
-
+    data = response.json()["result"]
+    pair_key = list(data.keys())[0]
+    raw = data[pair_key][-candles:]
+    df = pd.DataFrame(raw, columns=[
+        'time', 'open', 'high', 'low', 'close',
+        'vwap', 'volume', 'count'
+    ])
+    df = df.astype({
+        'open': float,
+        'high': float,
+        'low': float,
+        'close': float,
+        'volume': float
+    })
     return df
-# ============================================
-# 🕯️ SECTION 4: Candlestick Pattern Detection
-# ============================================
 
-def detect_candlestick_pattern(df):
-    patterns = []
-
-    o = df["open"].iloc[-2]
-    h = df["high"].iloc[-2]
-    l = df["low"].iloc[-2]
-    c = df["close"].iloc[-2]
-    body = abs(c - o)
-    candle_range = h - l
-
-    # === Core Patterns ===
-    if candle_range > 0 and body / candle_range < 0.1:
-        patterns.append("Doji")
-
-    # Bullish Engulfing
-    prev_o = df["open"].iloc[-3]
-    prev_c = df["close"].iloc[-3]
-    if prev_c < prev_o and c > o and c > prev_o and o < prev_c:
-        patterns.append("Bullish Engulfing")
-
-    # Bearish Engulfing
-    if prev_c > prev_o and c < o and c < prev_o and o > prev_c:
-        patterns.append("Bearish Engulfing")
-
-    # Hammer
-    if body > 0 and (min(c, o) - l) > body * 2 and (h - max(c, o)) < body:
-        patterns.append("Hammer")
-
-    # Inverted Hammer
-    if body > 0 and (h - max(c, o)) > body * 2 and (min(c, o) - l) < body:
-        patterns.append("Inverted Hammer")
-
-    # Hanging Man
-    if body > 0 and (min(c, o) - l) > body * 2 and (h - max(c, o)) < body:
-        patterns.append("Hanging Man")
-
-    # Shooting Star
-    if body > 0 and (h - max(c, o)) > body * 2 and (min(c, o) - l) < body:
-        patterns.append("Shooting Star")
-
-    # Morning Star
-    if len(df) >= 4:
-        c1 = df.iloc[-4]
-        c2 = df.iloc[-3]
-        c3 = df.iloc[-2]
-        if c1["close"] < c1["open"] and abs(c2["close"] - c2["open"]) < candle_range * 0.3 and c3["close"] > c3["open"] and c3["close"] > c1["open"]:
-            patterns.append("Morning Star")
-
-        # Evening Star
-        if c1["close"] > c1["open"] and abs(c2["close"] - c2["open"]) < candle_range * 0.3 and c3["close"] < c3["open"] and c3["close"] < c1["open"]:
-            patterns.append("Evening Star")
-
-    # Piercing Line
-    if prev_c < prev_o and c > o and c > (prev_o + prev_c) / 2 and o < prev_c:
-        patterns.append("Piercing Line")
-
-    # Dark Cloud Cover
-    if prev_c > prev_o and c < o and c < (prev_o + prev_c) / 2 and o > prev_c:
-        patterns.append("Dark Cloud Cover")
-
-    # Marubozu
-    if body / candle_range > 0.9:
-        if c > o:
-            patterns.append("Bullish Marubozu")
-        elif c < o:
-            patterns.append("Bearish Marubozu")
-
-    # Spinning Top
-    if 0.1 <= body / candle_range <= 0.4:
-        patterns.append("Spinning Top")
-
-    # === Multi-Candle Patterns ===
-    if len(df) >= 5:
-        p1 = df.iloc[-4]
-        p2 = df.iloc[-3]
-        p3 = df.iloc[-2]
-        if all(candle["close"] > candle["open"] for candle in [p1, p2, p3]) and \
-           p2["open"] > p1["open"] and p2["close"] > p1["close"] and \
-           p3["open"] > p2["open"] and p3["close"] > p2["close"]:
-            patterns.append("Three White Soldiers")
-
-        if all(candle["close"] < candle["open"] for candle in [p1, p2, p3]) and \
-           p2["open"] < p1["open"] and p2["close"] < p1["close"] and \
-           p3["open"] < p2["open"] and p3["close"] < p2["close"]:
-            patterns.append("Three Black Crows")
-
-    # Harami
-    if abs(c - o) < body and abs(prev_c - prev_o) > body:
-        if c > o and prev_c < prev_o and c < prev_o and o > prev_c:
-            patterns.append("Bullish Harami")
-        elif c < o and prev_c > prev_o and c > prev_o and o < prev_c:
-            patterns.append("Bearish Harami")
-
-    # Tweezer Bottom
-    if abs(l - df["low"].iloc[-3]) < candle_range * 0.05:
-        patterns.append("Tweezer Bottom")
-
-    # Tweezer Top
-    if abs(h - df["high"].iloc[-3]) < candle_range * 0.05:
-        patterns.append("Tweezer Top")
-
-    return ", ".join(set(patterns)) if patterns else "None"
-
-# ============================================
-# 🧠 SECTION 5: Trade Logic & Strategy Detection
-# ============================================
-
-def assign_knight(trade_type, indicators):
-    if "Breakout" in trade_type or "Breakdown" in trade_type:
-        return "⚔️ Sir Leonis Ironhart"
-    elif "Mean Reversion" in trade_type:
-        return "🌙 Orion Vellum"
-    elif "Swing Trade" in trade_type:
-        return "⚔️ Sir Leonis Ironhart"
-    elif "Pullback" in trade_type:
-        return "🛡️ Sir Lucien Frostveil"
-    elif "Volatility Squeeze" in trade_type:
-        return "🌙 Orion Vellum"
-    elif "Weak Signal" in trade_type:
-        return "🌙 Orion Vellum"
-    if "supertrend" in indicators or "ema50" in indicators:
-        return "🛡️ Sir Lucien Frostveil"
-    if "alligator" in indicators:
-        return "⚔️ Sir Leonis Ironhart"
-    if "ichimoku_bull" in indicators or "twist" in indicators:
-        return "🌙 Orion Vellum"
-    return "🧙 Unknown"
-
-def detect_trade(df, mode="aggressive"):
-    latest = df.iloc[-1]
-    matches = []
-
-    # === Long Trade Setups ===
-    if latest["rsi"] < 30 and latest["williams_r"] < -80:
-        matches.append(("📈 🔁 Mean Reversion Long", 4))
-    if latest["close"] > latest["donchian_high"] and latest["cmf"] > 0:
-        matches.append(("📈 🚀 Breakout Anticipation", 5))
-    if latest["squeeze"] and latest["bb_width"] > 0.05:
-        matches.append(("📈 📊 Volatility Squeeze Long", 3))
-    if latest["cci"] > 100 and latest["cmf"] > 0:
-        matches.append(("📈 🌀 Swing Trade Long", 4))
-    if latest["rsi"] > 50 and latest["close"] > latest["ema50"]:
-        matches.append(("📈 📈 Pullback Long", 3))
-
-    # === Short Trade Setups ===
-    if latest["rsi"] > 70 and latest["williams_r"] > -20:
-        matches.append(("📉 🔁 Mean Reversion Short", 4))
-    if latest["close"] < latest["donchian_low"] and latest["cmf"] < 0:
-        matches.append(("📉 🔻 Breakdown Anticipation", 5))
-    if latest["squeeze"] and latest["bb_width"] > 0.05 and latest["cmf"] < 0:
-        matches.append(("📉 📊 Volatility Squeeze Short", 3))
-    if latest["cci"] < -100 and latest["cmf"] < 0:
-        matches.append(("📉 🌀 Swing Trade Short", 4))
-    if latest["rsi"] < 50 and latest["close"] < latest["ema50"]:
-        matches.append(("📉 📉 Pullback Short", 3))
-
-    if not matches:
-        if mode == "aggressive":
-            return [{
-                "type": "🟡 Weak Signal",
-                "entry": latest["close"],
-                "stop": latest["close"] - latest["atr"] * 1.5,
-                "tp1": latest["close"] + latest["atr"] * 1.5,
-                "tp2": latest["close"] + latest["atr"] * 2.5,
-                "confidence": 1,
-                "strategies_matched": [],
-                "knight": assign_knight("Weak Signal", [])
-            }]
-        return []
-
-    trades = []
-    for match_text, weight in matches:
-        direction = "short" if "📉" in match_text else "long"
-        if direction == "long":
-            stop = latest["close"] - latest["atr"] * 1.5
-            tp1 = latest["close"] + latest["atr"] * 1.5
-            tp2 = latest["close"] + latest["atr"] * 2.5
-        else:
-            stop = latest["close"] + latest["atr"] * 1.5
-            tp1 = latest["close"] - latest["atr"] * 1.5
-            tp2 = latest["close"] - latest["atr"] * 2.5
-
-        knight = assign_knight(match_text, [
-            "rsi", "ema50", "supertrend", "alligator", "ichimoku_bull", "twist"
-        ])
-        trades.append({
-            "type": match_text,
-            "entry": latest["close"],
-            "stop": stop,
-            "tp1": tp1,
-            "tp2": tp2,
-            "confidence": weight,
-            "strategies_matched": [match_text],
-            "knight": knight
-        })
-
-    return trades
-
-def detect_breakout_orion(df):
-    candle = df.iloc[-2]
-    long_breakout = (
-        candle["close"] > 2920 and
-        candle["ema9"] > candle["ema21"] > candle["ema50"] and
-        candle["close"] > candle["ema9"] and
-        candle.get("kumo_breakout", False)
-    )
-    short_breakout = (
-        candle["close"] < 2920 and
-        candle["ema9"] < candle["ema21"] < candle["ema50"] and
-        candle["close"] < candle["ema9"] and
-        candle.get("kumo_breakdown", False)
-    )
-
-    if long_breakout:
-        return "Breakout Long"
-    elif short_breakout:
-        return "Breakout Short"
-    return None
-
-def detect_pullback_orion(df):
-    candle = df.iloc[-2]
-    long_pullback = (
-        2880 <= candle["close"] <= 2900 and
-        candle["rsi"] < 40 and
-        candle["close"] > candle["ema21"] and
-        candle.get("inside_kumo", True)
-    )
-    short_pullback = (
-        2940 <= candle["close"] <= 2960 and
-        candle["rsi"] > 60 and
-        candle["close"] < candle["ema21"] and
-        candle.get("inside_kumo", True)
-    )
-
-    if long_pullback:
-        return "Pullback Long"
-    elif short_pullback:
-        return "Pullback Short"
-    return None
-
-def calculate_market_bias(latest):
-    if latest["rsi"] > 60 and latest["cmf"] > 0:
-        return "🟢 Bullish Bias"
-    elif latest["rsi"] < 40 and latest["cmf"] < 0:
-        return "🔴 Bearish Bias"
-    return "⚠️ Neutral Bias"
-
-# ============================================
-# 📜 SECTION 6: Logging Functions
-# ============================================
-
-def log_trade(symbol, trade, timestamp, thread_id=None):
-    date_str = timestamp.strftime('%Y-%m-%d')
-    daily_log_path = f"logs/{date_str}_trades.csv"
-    master_log_path = "logs/trade_log.csv"
-    os.makedirs("logs", exist_ok=True)
-
-    # Optional thread URL (for Discord thread linking)
-    thread_url = f"https://discord.com/channels/{bot.guilds[0].id}/{thread_id}" if thread_id else "N/A"
-
-    # Core row structure
-    base_row = [
-        timestamp.strftime('%Y-%m-%d %H:%M:%S'),
-        symbol,
-        trade["type"],
-        trade.get("knight", "🧙 Unknown"),
-        round(trade["entry"], 2),
-        round(trade["tp1"], 2),
-        round(trade["tp2"], 2),
-        round(trade["stop"], 2),
-        trade["confidence"],
-        trade.get("pattern", "N/A"),
-        ", ".join(trade.get("strategies_matched", [])),
-        "Yes" if trade["type"] == "🟡 Weak Signal" else "No",
-        thread_id or "N/A",
-        thread_url
-    ]
-
-    headers = [
-        "Time", "Symbol", "Type", "Knight", "Entry", "TP1", "TP2", "Stop",
-        "Confidence", "Pattern", "Strategies Matched", "WeakSignal",
-        "ThreadID", "ThreadURL"
-    ]
-
-    # Write to daily log file
-    if not os.path.exists(daily_log_path):
-        with open(daily_log_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(headers)
-    with open(daily_log_path, "a", newline="") as f:
-        csv.writer(f).writerow(base_row)
-
-    # Write to master log file
-    if not os.path.exists(master_log_path):
-        with open(master_log_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(headers)
-    with open(master_log_path, "a", newline="") as f:
-        csv.writer(f).writerow(base_row)
-
-def log_trade_to_csv(trade_dict):
-    """
-    Alternate generic logger (used for simplified or internal-only logging).
-    Assumes structure includes 'time', 'symbol', 'type', 'entry', etc.
-    """
-    date_str = datetime.datetime.now(UTC_TZ).strftime('%Y-%m-%d')
-    filename = f"logs/{date_str}_trades.csv"
-    os.makedirs("logs", exist_ok=True)
-
-    headers = list(trade_dict.keys())
-    write_header = not os.path.exists(filename)
-
-    with open(filename, mode="a", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=headers)
-        if write_header:
-            writer.writeheader()
-        writer.writerow(trade_dict)
-
-# ============================================
-# 🎨 SECTION 7: Discord Embed Formatters
-# ============================================
-
-def format_trade_embed(symbol, signal, entry, tp1, tp2, stop, confidence,
-                       knight, now_central, now_utc, pattern=None, strategy=None):
-    confidence_emoji = {
-        6: "🔥", 5: "✅", 4: "🟢", 3: "⚪", 2: "🔻", 1: "🟥", 0: "❌"
-    }.get(int(confidence), "❓")
-
-    direction = "Short" if "Short" in signal else "Long"
-    emoji = "📉" if direction == "Short" else "📈"
-    color = discord.Color.red() if direction == "Short" else discord.Color.green()
-
-    embed = discord.Embed(
-        title=f"{emoji} {symbol} {signal} – {now_central}",
-        color=color
-    )
-    embed.add_field(
-        name="📊 Trade Setup",
-        value=f"{emoji} Entry: **${entry:.2f}**\n🛑 Stop: `${stop:.2f}`",
-        inline=False
-    )
-    embed.add_field(
-        name="🎯 Targets",
-        value=f"TP1: ${tp1:.2f}\nTP2: ${tp2:.2f}",
-        inline=False
-    )
-    embed.add_field(
-        name="🧠 Confidence",
-        value=f"{confidence_emoji} {confidence}/6",
-        inline=False
-    )
-    if strategy:
-        embed.add_field(
-            name="🧪 Strategy",
-            value=str(strategy),
-            inline=False
-        )
-    if pattern:
-        embed.add_field(
-            name="🕯️ Candle Pattern",
-            value=pattern,
-            inline=False
-        )
-    embed.add_field(
-        name="🧙 Signal Issued By",
-        value=knight,
-        inline=False
-    )
-    embed.set_footer(text=f"Generated {now_utc}")
-    return embed
-
-
-def format_exit_embed(symbol, direction, entry, tp1, tp2, stop, exit_price,
-                      result, close_time_ct, close_time_utc, open_time_ct, elapsed_str):
-    embed = discord.Embed(
-        title=f"{symbol} Trade Exit – {result}",
-        color=discord.Color.green() if "Take Profit" in result else discord.Color.red()
-    )
-    embed.add_field(name="📈 Entry", value=f"${entry:.2f}", inline=True)
-    embed.add_field(name="🎯 TP2", value=f"${tp2:.2f}", inline=True)
-    embed.add_field(name="🛑 Stop", value=f"${stop:.2f}", inline=True)
-    embed.add_field(name="💰 Exit Price", value=f"${exit_price:.2f}", inline=True)
-    embed.add_field(name="⏰ Alert Sent", value=f"{open_time_ct} CT", inline=True)
-    embed.add_field(name="⏳ Elapsed", value=f"{elapsed_str}", inline=True)
-    embed.set_footer(text=f"Closed {close_time_utc} UTC")
-    return embed
-
-
-def format_orion_embed(strategy_type, entry, stop, tp1, tp2):
-    now_ct = datetime.datetime.now(CENTRAL_TZ).strftime('%b %d • %I:%M %p CT')
-    now_utc = datetime.datetime.now(UTC_TZ).strftime('%H:%M UTC')
-
-    quotes = {
-        "Breakout Long": "🌘 Orion whispers: *From the depths we rise, unseen yet unstoppable.*",
-        "Pullback Long": "🌘 Orion murmurs: *The moon retreats, only to gather strength anew.*",
-        "Breakout Short": "🌘 Orion intones: *Foundations fracture. The silence begins to scream.*",
-        "Pullback Short": "🌘 Orion breathes: *The winds return. Shadows reclaim what was borrowed.*"
-    }
-    quote = quotes.get(strategy_type, "🌘 Orion watches silently...")
-
-    embed = discord.Embed(
-        title=f"🌘 Orion's Daily ETH Signal – {strategy_type}",
-        color=0x6f42c1  # Mystic purple
-    )
-    embed.add_field(name="🎯 Entry", value=f"`{entry}`", inline=True)
-    embed.add_field(name="🛡️ Stop Loss", value=f"`{stop}`", inline=True)
-    embed.add_field(name="🎯 Targets", value=f"`TP1: {tp1}` → `TP2: {tp2}`", inline=False)
-    embed.set_footer(text=f"{quote}  •  UTC Time: {now_utc}")
-    return embed
-
-# ============================================
-# 🚨 SECTION 8: Alert Sending & Thread Creation
-# ============================================
-
-async def send_trade_alert(channel, symbol, entry, tp1, tp2, stop, signal, confidence, knight, now_central, now_utc, pattern):
-    direction = "Short" if "Short" in signal else "Long"
-    emoji = "📉" if direction == "Short" else "📈"
-    color = discord.Color.red() if direction == "Short" else discord.Color.green()
-    
-    confidence_emoji = {
-        6: "🔥", 5: "✅", 4: "🟢", 3: "⚪", 2: "🔻", 1: "🟥", 0: "❌"
-    }.get(confidence, "❓")
-
-    embed = discord.Embed(
-        title=f"{emoji} {symbol} {signal} – {now_central}",
-        color=color
-    )
-    embed.add_field(name="💰 Entry", value=f"${entry:.2f}", inline=True)
-    embed.add_field(name="🎯 Target", value=f"${tp2:.2f}", inline=True)
-    embed.add_field(name="🛡️ Stop", value=f"${stop:.2f}", inline=True)
-    embed.add_field(name="🧠 Confidence", value=f"{confidence_emoji} {confidence}/6", inline=True)
-    embed.add_field(name="🕯️ Candle Pattern", value=pattern, inline=True)
-    embed.add_field(name="🧙 Issued By", value=knight, inline=True)
-    embed.set_footer(text=f"Generated {fmt_utc(now_utc)}")
-
-    # Send message and create thread
-    msg = await channel.send(embed=embed)
-    thread_name = f"🧵 {symbol} {direction} – ${entry:.2f} Entry"
-    thread = await msg.create_thread(name=thread_name, auto_archive_duration=1440)
-
-    return thread.id  # Return for logging and exit updates
-
-# ============================================
-# ⏰ SECTION 9A: ETH 30-Min Status Report
-# ============================================
-
-@tasks.loop(minutes=1)
-async def eth_status_report():
-    now = datetime.datetime.now(CENTRAL_TZ)
-    if now.minute not in (0, 30):
-        return
-
-    channel = bot.get_channel(ETH_BATTLEGROUND_CHANNEL_ID)
-    if channel is None:
-        print(f"[ERROR] Status channel {SCRIBE_KEEP_CHANNEL_ID} not found.")
-        return
-
-    df = fetch_ohlc("ETH")
-    if df is None:
-        await channel.send("❌ Could not fetch ETH data.")
-        return
-
-    df = calculate_indicators(df)
-    latest = df.iloc[-2]
-    header = fmt_central(now)
-    footer = fmt_utc(datetime.datetime.now(UTC_TZ))
-
-    def icon(state): return "🟢" if state == "bullish" else "🔴" if state == "bearish" else "⚪"
-    def assess_rsi(): return "bullish" if latest["rsi"] > 55 else "bearish" if latest["rsi"] < 45 else "neutral"
-    def assess_macd(): return "bullish" if latest["macd_hist"] > 0 else "bearish" if latest["macd_hist"] < 0 else "neutral"
-    def assess_supertrend(): return "bullish" if latest["supertrend"] else "bearish"
-    def assess_alligator():
-        if latest["lips"] > latest["teeth"] > latest["jaw"]: return "bullish"
-        elif latest["lips"] < latest["teeth"] < latest["jaw"]: return "bearish"
-        return "neutral"
-    def assess_ichimoku():
-        return "bullish" if latest["ichimoku_bull"] else "bearish" if latest["ichimoku_bear"] else "neutral"
-    def assess_twist():
-        if latest["twist"] and latest["ichimoku_bull"]: return "bullish"
-        if latest["twist"] and latest["ichimoku_bear"]: return "bearish"
-        return "neutral"
-
-    groups = {
-        "🛡️ Defense": [
-            (icon(assess_supertrend()), "Supertrend", assess_supertrend()),
-            (icon(assess_alligator()), "Alligator", assess_alligator())
-        ],
-        "⚔️ Momentum": [
-            (icon(assess_rsi()), f"RSI {latest['rsi']:.1f}", assess_rsi()),
-            (icon(assess_macd()), f"MACD Hist {latest['macd_hist']:.3f}", assess_macd())
-        ],
-        "🌘 Reversal": [
-            (icon(assess_ichimoku()), "Ichimoku Cloud", assess_ichimoku()),
-            (icon(assess_twist()), "Kumo Twist", assess_twist())
-        ]
+def calculate_camarilla_levels(df):
+    high = df['high'].iloc[-2]
+    low = df['low'].iloc[-2]
+    close = df['close'].iloc[-2]
+    range_ = high - low
+    return {
+        'R4': close + (range_ * 1.1 / 2),
+        'R3': close + (range_ * 1.1 / 4),
+        'R2': close + (range_ * 1.1 / 6),
+        'R1': close + (range_ * 1.1 / 12),
+        'S1': close - (range_ * 1.1 / 12),
+        'S2': close - (range_ * 1.1 / 6),
+        'S3': close - (range_ * 1.1 / 4),
+        'S4': close - (range_ * 1.1 / 2),
+        'Pivot': (high + low + close) / 3
     }
 
-    bullish = sum(1 for g in groups.values() for _, _, s in g if s == "bullish")
-    bearish = sum(1 for g in groups.values() for _, _, s in g if s == "bearish")
-    total = sum(len(g) for g in groups.values())
-    bias = "🟢 Bullish" if bullish > bearish else "🔴 Bearish" if bearish > bullish else "⚪ Neutral"
+def detect_trade_signal(df):
+    levels = calculate_camarilla_levels(df)
+    close = df['close'].iloc[-1]
+    open_ = df['open'].iloc[-1]
+    high = df['high'].iloc[-2]
+    low = df['low'].iloc[-2]
+    volume = df['volume'].iloc[-1]
+    avg_volume = df['volume'].rolling(20).mean().iloc[-1]
+    atr = df['high'].rolling(14).max() - df['low'].rolling(14).min()
+    rsi = df['close'].rolling(14).apply(lambda x: 100 - (100 / (1 + (x.pct_change().mean() / x.pct_change().std()))), raw=False).iloc[-1]
 
-    embed = discord.Embed(
-        title=f"📊 ETH 30-Min Status – {header}",
-        color=discord.Color.green() if bullish > bearish else discord.Color.red() if bearish > bullish else discord.Color.light_grey()
-    )
+    signal = None
+    entry = close
+    tp1 = tp2 = stop = level_price = None
+    level_name = None
 
-    for group, indicators in groups.items():
-        value = "\n".join(f"{emoji} {label}" for emoji, label, _ in indicators)
-        embed.add_field(name=group, value=value, inline=False)
+    for i, level in enumerate(['R1', 'R2', 'R3', 'R4']):
+        if close > levels[level] and rsi > 55 and volume > 1.2 * avg_volume:
+            signal = f"🟢 Breakout Long: Broke above {level} ({round(levels[level], 2)})"
+            tp1 = levels.get(['R2', 'R3', 'R4', 'R4'][i], entry + atr.iloc[-1])
+            tp2 = entry + 2 * atr.iloc[-1]
+            stop = levels.get(['S1', 'S2', 'S3', 'S4'][i], entry - atr.iloc[-1])
+            level_name = level
+            level_price = levels[level]
+            break
 
-    embed.add_field(
-        name="🧠 Market Bias",
-        value=f"{bias}\n({bullish} Bullish / {bearish} Bearish of {total})",
-        inline=False
-    )
-
-    quote = {
-        "🟢": "⚔️ *Momentum stirs. Ready the charge.*\n– Sir Leonis Ironhart",
-        "🔴": "🌘 *Shadows lengthen. Caution… or be claimed.*\n– Orion Vellum",
-        "⚪": "🛡️ *Patience steadies the hand when the winds are unclear.*\n– Sir Lucien Frostveil"
-    }.get(bias[:2], "🧙")
-
-    embed.add_field(name="📜 Knight's Insight", value=quote, inline=False)
-    embed.set_footer(text=f"Updated {footer}")
-
-    try:
-        await channel.send(embed=embed)
-    except Exception as e:
-        print(f"[ERROR] Failed to send ETH report: {e}")
-
-# ============================================
-# ⏰ SECTION 9B: Hourly Knight Watch Report
-# ============================================
-
-@tasks.loop(minutes=1)
-async def hourly_knight_report():
-    now = datetime.datetime.now(CENTRAL_TZ)
-    if now.minute != 45:
-        return
-
-    channel = bot.get_channel(KNIGHTS_WATCH_CHANNEL_ID)
-    if channel is None:
-        print(f"[ERROR] Report channel not found.")
-        return
-
-    now_utc, now_central = now_times()
-    header = fmt_central(now_central)
-    footer = fmt_utc(now_utc)
-
-    embed = discord.Embed(
-        title=f"📈 Knight Watch: Crypto Market Overview – {header}",
-        color=discord.Color.gold()
-    )
-
-    for symbol in KRAKEN_PAIRS:
-        df = fetch_ohlc(symbol)
-        if df is None:
-            continue
-
-        df = calculate_indicators(df)
-        latest = df.iloc[-2]
-        price = latest["close"]
-        ema = latest["ema50"]
-        rsi = latest["rsi"]
-        donchian_high = latest["donchian_high"]
-        donchian_low = latest["donchian_low"]
-
-        # If there’s an active trade, display ongoing alert
-        if symbol in active_alerts:
-            _, tp1, tp2, stop, open_time_utc, trade_type, *_ = active_alerts[symbol]
-            direction = "Short" if "Short" in trade_type else "Long"
-            status = f"🟢 Active {direction} trade in progress. Targeting **${tp2:.2f}**."
-        else:
-            # Sir Leonis: Breakout/Breakdown zones
-            if price > donchian_high * 0.98:
-                status = f"⚔️ Leonis eyes breakout above **${donchian_high:.2f}**."
-            elif price < donchian_low * 1.02:
-                status = f"⚔️ Leonis watches for breakdown below **${donchian_low:.2f}**."
-            # Sir Lucien: Pullback zones
-            elif price > ema and rsi < 40:
-                status = f"🛡️ Lucien monitors dip near **${ema:.2f}** for long re-entry."
-            elif price < ema and rsi > 60:
-                status = f"🛡️ Lucien tracking potential short from **${ema:.2f}**."
-            else:
-                status = f"🔎 No active setup. Awaiting clean structure."
-
-        embed.add_field(name=f"{symbol} – ${price:.2f}", value=status, inline=False)
-
-    embed.set_footer(text=f"Report updated {footer}")
-    try:
-        await channel.send(embed=embed)
-        print(f"[DEBUG] Knight report sent at {footer}")
-    except Exception as e:
-        print(f"[ERROR] Failed to send Knight report: {e}")
-
-# ============================================
-# 🌘 SECTION 9C: Orion’s Daily ETH Signal – 11:00 AM CT
-# ============================================
-
-@tasks.loop(minutes=1)
-async def orion_daily_report():
-    now = datetime.datetime.now(CENTRAL_TZ)
-    if now.hour != 11 or now.minute != 0:
-        return
-
-    channel = bot.get_channel(ETH_BATTLEGROUND_CHANNEL_ID)
-    if not channel:
-        print("[Orion] ❌ ETH report channel not found.")
-        return
-
-    df = fetch_ohlc("ETH")
-    if df is None:
-        print("[Orion] ❌ Failed to fetch ETH data.")
-        return
-
-    df = calculate_indicators(df)
-    breakout_signal = detect_breakout_orion(df)
-    pullback_signal = detect_pullback_orion(df)
-    signal = breakout_signal or pullback_signal
+    for i, level in enumerate(['S1', 'S2', 'S3', 'S4']):
+        if close < levels[level] and rsi < 45 and volume > 1.2 * avg_volume:
+            signal = f"🔴 Breakout Short: Broke below {level} ({round(levels[level], 2)})"
+            tp1 = levels.get(['S2', 'S3', 'S4', 'S4'][i], entry - atr.iloc[-1])
+            tp2 = entry - 2 * atr.iloc[-1]
+            stop = levels.get(['R1', 'R2', 'R3', 'R4'][i], entry + atr.iloc[-1])
+            level_name = level
+            level_price = levels[level]
+            break
 
     if signal:
-        candle = df.iloc[-2]
-        entry = candle["close"]
-        atr = candle["atr"]
-
-        if "Long" in signal:
-            stop = entry - atr * 1.5
-            tp1 = entry + atr * 1.5
-            tp2 = entry + atr * 2.5
-        else:
-            stop = entry + atr * 1.5
-            tp1 = entry - atr * 1.5
-            tp2 = entry - atr * 2.5
-
-        # Dynamic poetic quote
-        quote = {
-            "Breakout Long": "📜 Orion whispers: *Momentum surges. The skies stir.*",
-            "Breakout Short": "🌘 Orion murmurs: *The moon retreats. Shadows grow where greed once stood.*",
-            "Pullback Long": "🕊️ Orion intones: *A soft step back, then the rise begins.*",
-            "Pullback Short": "☁️ Orion speaks low: *A breath before descent. Even titans exhale.*"
-        }.get(signal, "🌓 Orion observes: *All patterns return… in time.*")
-
-        embed = discord.Embed(
-            title=f"🌙 Orion Vellum – ETH {signal}",
-            description=(
-                f"**Entry**: `{entry:.2f}`\n"
-                f"**Stop Loss**: `{stop:.2f}`\n"
-                f"**TP1**: `{tp1:.2f}`\n"
-                f"**TP2**: `{tp2:.2f}`\n\n"
-                f"{quote}"
-            ),
-            color=discord.Color.purple()
-        )
-        embed.set_footer(text="Templar Knight Crypto • UTC " + fmt_utc(datetime.datetime.utcnow()))
-
-        await channel.send(embed=embed)
-        print(f"[Orion] ✅ Sent {signal} alert.")
-
-        # CSV log for Orion’s signal
-        log_data = {
-            "timestamp_utc": datetime.datetime.utcnow().isoformat(),
-            "symbol": "ETH",
-            "trade_type": signal,
+        return {
+            "signal": signal,
             "entry": round(entry, 2),
             "tp1": round(tp1, 2),
             "tp2": round(tp2, 2),
             "stop": round(stop, 2),
-            "confidence": 4,
-            "knight": "🌙 Orion Vellum"
+            "level": level_name,
+            "level_price": round(level_price, 2)
         }
+    return None
 
-        orion_log_path = "orion_log.csv"
-        file_exists = os.path.isfile(orion_log_path)
-        with open(orion_log_path, mode="a", newline="") as file:
-            writer = csv.DictWriter(file, fieldnames=log_data.keys())
-            if not file_exists:
-                writer.writeheader()
-            writer.writerow(log_data)
+def generate_warning_alerts(df):
+    levels = calculate_camarilla_levels(df)
+    close = df['close'].iloc[-1]
+    volume = df['volume'].iloc[-1]
+    avg_volume = df['volume'].rolling(20).mean().iloc[-1]
+    trend = df['close'].diff().tail(5)
+    rsi = df['close'].rolling(14).apply(lambda x: 100 - (100 / (1 + (x.pct_change().mean() / x.pct_change().std()))), raw=False).iloc[-1]
 
-    else:
-        print("[Orion] No valid ETH signal detected at 11 AM.")
+    alerts = []
+    for name, level in levels.items():
+        if name not in ['R3', 'R4', 'S3', 'S4', 'Pivot']:
+            continue
+        direction = "⬆️" if close < level else "⬇️"
+        distance = abs(close - level)
+        if distance > 0.002 * close:
+            continue
 
-# ============================================
-# 🌘 SECTION 9D: Orion’s Whisper Summary – 23:59 UTC
-# ============================================
+        score = 2
+        if volume > 1.1 * avg_volume:
+            score += 1
+        if (direction == "⬆️" and rsi > 55) or (direction == "⬇️" and rsi < 45):
+            score += 1
+        if (direction == "⬆️" and trend.mean() > 0) or (direction == "⬇️" and trend.mean() < 0):
+            score += 1
 
-@tasks.loop(minutes=1)
-async def orion_whisper_summary():
-    now_utc = datetime.datetime.now(UTC_TZ)
-    if now_utc.hour != 23 or now_utc.minute != 59:
-        return
+        bias = "Unclear"
+        if direction == "⬆️" and rsi > 60:
+            bias = "Break"
+        elif direction == "⬆️" and rsi < 50:
+            bias = "Reversal"
+        elif direction == "⬇️" and rsi < 40:
+            bias = "Break"
+        elif direction == "⬇️" and rsi > 50:
+            bias = "Reversal"
 
-    channel = bot.get_channel(SCRIBE_KEEP_CHANNEL_ID)
-    if not channel:
-        print("[ERROR] Orion daily report channel not found.")
-        return
-
-    report_date = now_utc.date()
-    alerts_today = {sym: 0 for sym in KRAKEN_PAIRS}
-    results_today = {sym: {"wins": 0, "losses": 0} for sym in KRAKEN_PAIRS}
-
-    try:
-        filepath = f"logs/{report_date}_trades.csv"
-        if os.path.exists(filepath):
-            with open(filepath, "r") as file:
-                reader = csv.DictReader(file)
-                for row in reader:
-                    symbol = row["Symbol"]
-                    if symbol not in KRAKEN_PAIRS:
-                        continue
-                    alerts_today[symbol] += 1
-                    if "Take Profit" in row["Type"]:
-                        results_today[symbol]["wins"] += 1
-                    elif "Stop Loss" in row["Type"]:
-                        results_today[symbol]["losses"] += 1
-    except Exception as e:
-        await channel.send("❌ Failed to load trade logs.")
-        print(f"[ERROR] Failed to load logs: {e}")
-        return
-
-    def orion_expectation(symbol, wins, losses):
-        if wins > losses:
-            return f"🌕 Orion sees light on the path for **{symbol}**."
-        elif losses > wins:
-            return f"🌑 Orion warns: shadows deepen around **{symbol}**."
-        else:
-            return f"🌗 Orion waits… the signs for **{symbol}** remain unclear."
-
-    embed = discord.Embed(
-        title=f"🌘 Orion’s Whisper – {report_date.strftime('%Y-%m-%d')}",
-        color=discord.Color.dark_purple()
-    )
-
-    for symbol in KRAKEN_PAIRS:
-        total = alerts_today[symbol]
-        wins = results_today[symbol]["wins"]
-        losses = results_today[symbol]["losses"]
-
-        field_text = (
-            f"📣 Alerts: `{total}`\n"
-            f"✅ Wins: `{wins}` | ❌ Losses: `{losses}`\n"
-            f"{orion_expectation(symbol, wins, losses)}"
-        )
-        embed.add_field(name=symbol, value=field_text, inline=False)
-
-    embed.set_footer(text=f"Sent at {now_utc.strftime('%Y-%m-%d %H:%M UTC')}")
-    await channel.send(embed=embed)
-    print(f"[DEBUG] Orion daily summary sent at {now_utc.isoformat()}")
-
-# ============================================
-# 📜 SECTION 9E: Thread Summary Report – 23:59 UTC
-# ============================================
+        alerts.append(f"⚠️ Approaching {name} ({round(level, 2)}): {direction} | Bias: {bias} | Score: {score}")
+    return alerts
 
 @tasks.loop(minutes=1)
-async def thread_summary_daily_report():
-    now = datetime.datetime.now(UTC_TZ)
-    if now.hour != 23 or now.minute != 59:
+async def scheduled_scan():
+    await bot.wait_until_ready()
+    channel = bot.get_channel(CHANNEL_ID)
+    df = fetch_ohlc_from_kraken("ETHUSD", interval=5)
+
+    if df is None:
+        await channel.send("⚠️ Failed to fetch Kraken data.")
         return
 
-    channel = bot.get_channel(SCROLLS_OF_ORDER_CHANNEL_ID)
-    if not channel:
-        print("[ERROR] Summary channel not found.")
-        return
+    trade = detect_trade_signal(df)
+    warnings = generate_warning_alerts(df)
 
-    date_str = now.strftime("%Y-%m-%d")
-    filename = f"logs/{date_str}_trades.csv"
+    if trade:
+        embed = discord.Embed(title=trade['signal'], color=0x00ff00 if "Long" in trade['signal'] else 0xff0000)
+        embed.add_field(name="Entry", value=f"${trade['entry']}", inline=True)
+        embed.add_field(name="TP1", value=f"${trade['tp1']}", inline=True)
+        embed.add_field(name="TP2", value=f"${trade['tp2']}", inline=True)
+        embed.add_field(name="Stop", value=f"${trade['stop']}", inline=True)
+        embed.add_field(name="Level", value=f"{trade['level']} ({trade['level_price']})", inline=False)
+        embed.set_footer(text="Templar Knight Crypto – Camarilla Strategy")
+        await channel.send(embed=embed)
 
-    if not os.path.exists(filename):
-        await channel.send(f"📭 No trades recorded for {date_str}.")
-        return
-
-    df = pd.read_csv(filename)
-    if df.empty:
-        await channel.send(f"📭 No trades to summarize.")
-        return
-
-    embed = discord.Embed(
-        title=f"📜 Trade Summary – {date_str}",
-        color=discord.Color.dark_gold()
-    )
-
-    for _, row in df.iterrows():
-        symbol = row["Symbol"]
-        trade_type = row["Type"]
-        entry = row["Entry"]
-        thread_url = row.get("ThreadURL", "N/A")
-
-        if thread_url != "N/A":
-            name = f"{symbol} – {trade_type}"
-            value = f"💰 Entry: `${entry}`\n🔗 [View Thread]({thread_url})"
-            embed.add_field(name=name, value=value, inline=False)
-
-    embed.set_footer(text="Templar Knight Crypto • Daily Report")
-    try:
-        await channel.send(
-            content="📊 **Daily Thread Summary**",
-            embed=embed,
-            file=File(filename)
-        )
-        print(f"[DEBUG] Sent thread-aware daily summary.")
-    except Exception as e:
-        print(f"[ERROR] Failed to send daily thread summary: {e}")
-
-# ============================================
-# 📦 SECTION 9F: Daily Log Upload – 23:58 UTC
-# ============================================
-
-@tasks.loop(minutes=1)
-async def daily_log_upload():
-    now = datetime.datetime.now(UTC_TZ)
-    if now.hour != 23 or now.minute != 58:
-        return
-
-    channel = bot.get_channel(SCROLLS_OF_ORDER_CHANNEL_ID)
-    if not channel:
-        print("[ERROR] Daily log channel not found.")
-        return
-
-    date_str = now.strftime("%Y-%m-%d")
-    filename = f"logs/{date_str}_trades.csv"
-
-    if not os.path.exists(filename):
-        await channel.send(f"📭 No log file for {date_str}.")
-        return
-
-    try:
-        await channel.send(
-            content=f"📦 **Daily Log Archive – {date_str}**",
-            file=File(filename)
-        )
-        print(f"[DEBUG] Daily log uploaded for {date_str}.")
-    except Exception as e:
-        print(f"[ERROR] Failed to upload daily log: {e}")
-
-# ============================================
-# 🔁 SECTION 10: Real-Time Scanning Loop
-# ============================================
-
-@tasks.loop(seconds=60)
-async def scan_coins():
-    now_utc, now_ct = now_times()
-    print(f"[{now_ct.strftime('%H:%M:%S')}] Scanning coins...")
-
-    for symbol in KRAKEN_PAIRS:
-        try:
-            df = fetch_ohlc(symbol)
-            if df is None:
-                continue
-
-            df = calculate_indicators(df)
-            pattern = detect_candlestick_pattern(df)
-            trade = detect_trade(df, pattern=pattern)
-
-            if trade and symbol not in cooldowns:
-                trade["entry"] = df["close"].iloc[-2]
-                trade["confidence"] = trade.get("confidence", 3)
-                trade["pattern"] = pattern
-                trade["timestamp"] = now_utc
-
-                if "Short" in trade["type"]:
-                    trade["tp1"] = trade["entry"] - (trade["tp1"] - trade["entry"])
-                    trade["tp2"] = trade["entry"] - (trade["tp2"] - trade["entry"])
-                    trade["stop"] = trade["entry"] + (trade["entry"] - trade["stop"])
-
-                if symbol == "ETH":
-                    alert_channel = bot.get_channel(ETH_BATTLEGROUND_CHANNEL_ID)
-                    thread_id = await send_trade_alert(
-                        channel=alert_channel,
-                        symbol=symbol,
-                        entry=trade["entry"],
-                        tp1=trade["tp1"],
-                        tp2=trade["tp2"],
-                        stop=trade["stop"],
-                        signal=trade["type"],
-                        confidence=trade["confidence"],
-                        knight=trade.get("knight", "🧙"),
-                        now_central=fmt_central(now_ct),
-                        now_utc=now_utc.strftime("%H:%M UTC"),
-                        pattern=pattern
-                    )
-                else:
-                    thread_id = None
-
-                log_trade(symbol, trade, now_utc, thread_id)
-                active_alerts[symbol] = (
-                    trade["entry"], trade["tp1"], trade["tp2"], trade["stop"],
-                    now_utc, trade["type"], thread_id
-                )
-                cooldowns[symbol] = now_utc
-                print(f"[ALERT] {symbol}: {trade['type']} – {trade['entry']}")
-
-            # === 1 A Day Trade Strategy (Intraday ETH Momentum Capture) ===
-            if symbol == "ETH":
-                one_a_day = detect_1_a_day_trade(df, symbol)
-                if one_a_day:
-                    battle_channel = bot.get_channel(1399532925279666278)
-                    one_a_day_embed = format_trade_embed(
-                        symbol=symbol,
-                        signal=one_a_day["signal"],
-                        entry=one_a_day["entry"],
-                        tp1=one_a_day["tp1"],
-                        tp2=one_a_day["tp2"],
-                        stop=one_a_day["stop"],
-                        confidence=one_a_day["confidence"],
-                        knight=one_a_day["knight"],
-                        now_central=fmt_central(now_ct),
-                        now_utc=now_utc.strftime("%H:%M UTC"),
-                        pattern=None,
-                        strategy=one_a_day["strategy"]
-                    )
-                    try:
-                        msg = await battle_channel.send(embed=one_a_day_embed)
-                        thread = await msg.create_thread(
-                            name=f"1AD – {symbol} – {one_a_day['signal'].split()[-1]}",
-                            auto_archive_duration=60
-                        )
-                        log_trade(symbol, one_a_day, now_utc, msg.id)
-                        active_alerts[symbol + "_1AD"] = (
-                            one_a_day["entry"], one_a_day["tp1"], one_a_day["tp2"], one_a_day["stop"],
-                            now_utc, one_a_day["signal"], msg.id
-                        )
-                        print(f"[1AD] {symbol}: {one_a_day['signal']} @ {one_a_day['entry']:.2f}")
-                    except Exception as e:
-                        print(f"[ERROR] Failed to send 1AD alert: {e}")
-
-            # === EXIT CHECK ===
-            for key in [symbol, symbol + "_1AD"]:
-                if key in active_alerts:
-                    entry, tp1, tp2, stop, alert_time, trade_type, thread_id = active_alerts[key]
-                    last_price = df["close"].iloc[-1]
-
-                    hit_tp = last_price >= tp2 if "Long" in trade_type else last_price <= tp2
-                    hit_sl = last_price <= stop if "Long" in trade_type else last_price >= stop
-
-                    if hit_tp or hit_sl:
-                        direction = "Short" if "Short" in trade_type else "Long"
-                        result = "🎯 Take Profit Hit (TP2)" if hit_tp else "🛑 Stop Loss Hit"
-                        elapsed = datetime.datetime.now(UTC_TZ) - alert_time
-                        elapsed_str = str(elapsed).split(".")[0]
-                        open_time_ct = fmt_central(alert_time.astimezone(CENTRAL_TZ))
-                        close_time_utc = fmt_utc(datetime.datetime.utcnow())
-
-                        embed = format_exit_embed(
-                            symbol, direction, entry, tp1, tp2, stop,
-                            last_price, result, close_time_ct, close_time_utc, open_time_ct, elapsed_str
-                        )
-
-                        if key.endswith("_1AD"):
-                            alert_channel = bot.get_channel(1399532925279666278)
-                        else:
-                            alert_channel = bot.get_channel(ETH_BATTLEGROUND_CHANNEL_ID)
-
-                        if thread_id:
-                            thread = await alert_channel.fetch_message(thread_id)
-                            await thread.reply(embed=embed)
-                        else:
-                            await alert_channel.send(embed=embed)
-
-                        print(f"[EXIT] {symbol} ({trade_type}): {result} at {last_price:.2f}")
-                        del active_alerts[key]
-
-            # === COOLDOWN CLEAR ===
-            if symbol in cooldowns:
-                delta = datetime.datetime.utcnow() - cooldowns[symbol]
-                if delta.total_seconds() > 1800:
-                    del cooldowns[symbol]
-
-        except Exception as e:
-            print(f"[ERROR] Failed on {symbol}: {e}")
-
-
-
-# ============================================
-# ⚙️ SECTION 11: Bot Initialization & Commands
-# ============================================
+    for warn in warnings:
+        await channel.send(warn)
 
 @bot.event
 async def on_ready():
-    print(f"🛡️ Logged in as {bot.user.name}")
-    eth_status_report.start()
-    hourly_knight_report.start()
-    orion_daily_report.start()
-    orion_whisper_summary.start()
-    thread_summary_daily_report.start()
-    daily_log_upload.start()
-    scan_coins.start()
+    print(f"✅ Bot connected as {bot.user.name}")
+    scheduled_scan.start()
 
-@bot.command(name="ethreport")
-async def ethreport(ctx):
-    df = fetch_ohlc("ETH")
-    if df is None:
-        await ctx.send("❌ Could not fetch ETH data.")
-        return
-
-    df = calculate_indicators(df)
-    now = datetime.datetime.now(CENTRAL_TZ)
-    header = fmt_central(now)
-    footer = fmt_utc(datetime.datetime.now(UTC_TZ))
-
-    latest = df.iloc[-2]
-
-    def icon(state): return "🟢" if state == "bullish" else "🔴" if state == "bearish" else "⚪"
-    def assess_rsi(): return "bullish" if latest["rsi"] > 55 else "bearish" if latest["rsi"] < 45 else "neutral"
-    def assess_macd(): return "bullish" if latest["macd_hist"] > 0 else "bearish" if latest["macd_hist"] < 0 else "neutral"
-    def assess_supertrend(): return "bullish" if latest["supertrend"] else "bearish"
-    def assess_alligator():
-        if latest["lips"] > latest["teeth"] > latest["jaw"]: return "bullish"
-        elif latest["lips"] < latest["teeth"] < latest["jaw"]: return "bearish"
-        return "neutral"
-    def assess_ichimoku():
-        return "bullish" if latest["ichimoku_bull"] else "bearish" if latest["ichimoku_bear"] else "neutral"
-    def assess_twist():
-        if latest["twist"] and latest["ichimoku_bull"]: return "bullish"
-        if latest["twist"] and latest["ichimoku_bear"]: return "bearish"
-        return "neutral"
-
-    groups = {
-        "🛡️ Defense": [
-            (icon(assess_supertrend()), "Supertrend", assess_supertrend()),
-            (icon(assess_alligator()), "Alligator", assess_alligator())
-        ],
-        "⚔️ Momentum": [
-            (icon(assess_rsi()), f"RSI {latest['rsi']:.1f}", assess_rsi()),
-            (icon(assess_macd()), f"MACD Hist {latest['macd_hist']:.3f}", assess_macd())
-        ],
-        "🌘 Reversal": [
-            (icon(assess_ichimoku()), "Ichimoku Cloud", assess_ichimoku()),
-            (icon(assess_twist()), "Kumo Twist", assess_twist())
-        ]
-    }
-
-    bullish = sum(1 for g in groups.values() for _, _, s in g if s == "bullish")
-    bearish = sum(1 for g in groups.values() for _, _, s in g if s == "bearish")
-    total = sum(len(g) for g in groups.values())
-    bias = "🟢 Bullish" if bullish > bearish else "🔴 Bearish" if bearish > bullish else "⚪ Neutral"
-
-    embed = discord.Embed(
-        title=f"📊 ETH 30-Min Status – {header}",
-        color=discord.Color.green() if bullish > bearish else discord.Color.red() if bearish > bullish else discord.Color.light_grey()
-    )
-
-    for group, indicators in groups.items():
-        value = "\n".join(f"{emoji} {label}" for emoji, label, _ in indicators)
-        embed.add_field(name=group, value=value, inline=False)
-
-    embed.add_field(
-        name="🧠 Market Bias",
-        value=f"{bias}\n({bullish} Bullish / {bearish} Bearish of {total})",
-        inline=False
-    )
-
-    quote = {
-        "🟢": "⚔️ *Momentum stirs. Ready the charge.*\n– Sir Leonis Ironhart",
-        "🔴": "🌘 *Shadows lengthen. Caution… or be claimed.*\n– Orion Vellum",
-        "⚪": "🛡️ *Patience steadies the hand when the winds are unclear.*\n– Sir Lucien Frostveil"
-    }.get(bias[:2], "🧙")
-
-    embed.add_field(name="📜 Knight's Insight", value=quote, inline=False)
-    embed.set_footer(text=f"Generated {footer}")
-
-    await ctx.send(embed=embed)
-
-# Start Flask app in background for uptime
-def run_flask():
-    app.run(host="0.0.0.0", port=10000)
-
-if __name__ == "__main__":
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.start()
-    bot.run(TOKEN)
-
-
+bot.run(TOKEN)
