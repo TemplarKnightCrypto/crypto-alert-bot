@@ -8,6 +8,8 @@ import datetime
 import pytz
 import pandas as pd
 import numpy as np
+from flask import Flask
+import threading
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from ta.momentum import RSIIndicator
@@ -20,7 +22,17 @@ CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 # === Timezones ===
 UTC = pytz.utc
 
-# === Initialize Bot ===
+# === Flask Web Server for Render ===
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "ETH Camarilla Alert Bot is running!"
+
+def run_flask():
+    app.run(host="0.0.0.0", port=10000)
+
+# === Initialize Discord Bot ===
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -88,9 +100,14 @@ def build_warning_embed(level_name, level_price, price, bias, score, probability
         color=discord.Color.orange(),
         timestamp=datetime.datetime.now(UTC),
     )
-    embed.add_field(name="🎯 Outcome", value=outcome)
+    embed.add_field(name="🎯 Outcome", value=outcome, inline=False)
+    embed.add_field(name="📈 Current Price", value=f"${price:.2f}", inline=True)
+    embed.add_field(name="📉 Level Price", value=f"${level_price:.2f}", inline=True)
     embed.set_footer(text="UTC " + embed.timestamp.strftime("%Y-%m-%d %H:%M:%S"))
     return embed
+
+# === Cooldown Tracking ===
+last_alert_time = {}
 
 # === Main Camarilla Scanner ===
 @tasks.loop(minutes=1)
@@ -108,11 +125,19 @@ async def scan_camarilla_levels():
     avg_volume = recent["volume"].mean()
     volume = latest["volume"]
 
+    # Use daily high/low for Camarilla
     levels = calculate_camarilla(df["high"].max(), df["low"].min(), df["close"].iloc[-1])
     closest_level = min(levels.items(), key=lambda x: abs(x[1] - price))
     level_name, level_price = closest_level
 
-    # Bias checks
+    # Check cooldown
+    now = datetime.datetime.now(UTC)
+    if level_name in last_alert_time:
+        delta = now - last_alert_time[level_name]
+        if delta.total_seconds() < 600:
+            return  # 10 minute cooldown
+
+    # Bias logic
     is_upper = "H" in level_name
     direction_match = (price_trend and is_upper) or (not price_trend and "L" in level_name)
     rsi_match = (rsi_trend == "up" and is_upper) or (rsi_trend == "down" and "L" in level_name)
@@ -128,11 +153,15 @@ async def scan_camarilla_levels():
     channel = bot.get_channel(CHANNEL_ID)
     embed = build_warning_embed(level_name, level_price, price, bias, score, prob_label, outcome)
     await channel.send(embed=embed)
+    last_alert_time[level_name] = now
 
-# === Bot Ready ===
+# === Bot Ready Event ===
 @bot.event
 async def on_ready():
     print(f"🟢 Logged in as {bot.user}")
     scan_camarilla_levels.start()
 
-bot.run(TOKEN)
+# === Start Bot and Flask ===
+if __name__ == "__main__":
+    threading.Thread(target=run_flask).start()
+    bot.run(TOKEN)
