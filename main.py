@@ -21,6 +21,7 @@ CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 
 # === Timezones ===
 UTC = pytz.utc
+CENTRAL = pytz.timezone("US/Central")
 
 # === Flask Web Server for Render ===
 app = Flask(__name__)
@@ -36,7 +37,7 @@ def run_flask():
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# === Camarilla Calculation ===
+# === Pine Script-style Camarilla Calculation ===
 def calculate_camarilla(high, low, close):
     D4 = 0.55
     D3 = 0.275
@@ -48,43 +49,67 @@ def calculate_camarilla(high, low, close):
     L4 = close - ((high - low) * D4)
     L5 = close - (H5 - close)
     return {
-        "H5": H5,
-        "H4": H4,
-        "H3": H3,
-        "L3": L3,
-        "L4": L4,
-        "L5": L5,
-        "Pivot": P,
+        "H5": H5, "H4": H4, "H3": H3,
+        "L3": L3, "L4": L4, "L5": L5,
+        "Pivot": P
     }
 
-# === Fetch 1-minute OHLC from Kraken for indicators ===
+# === Fetch OHLC from Kraken ===
 def fetch_ohlc():
     url = "https://api.kraken.com/0/public/OHLC"
     params = {"pair": "XETHZUSD", "interval": 1}
-    response = requests.get(url, params=params)
-    raw = response.json()["result"]["XETHZUSD"]
-    df = pd.DataFrame(raw, columns=[
-        "time", "open", "high", "low", "close", "vwap", "volume", "count"
-    ])
-    df = df.astype({
-        "time": int, "open": float, "high": float, "low": float,
-        "close": float, "volume": float
-    })
+    raw = requests.get(url, params=params).json()["result"]["XETHZUSD"]
+    df = pd.DataFrame(raw, columns=["time", "open", "high", "low", "close", "vwap", "volume", "count"])
+    df = df.astype({"time": int, "open": float, "high": float, "low": float, "close": float, "volume": float})
     df["datetime"] = pd.to_datetime(df["time"], unit="s", utc=True)
     df.set_index("datetime", inplace=True)
     return df
 
-# === Fetch Daily OHLC for Camarilla ===
+# === Fetch Daily Candle ===
 def fetch_daily_ohlc():
     url = "https://api.kraken.com/0/public/OHLC"
-    params = {"pair": "XETHZUSD", "interval": 1440}  # Daily
-    response = requests.get(url, params=params)
-    raw = response.json()["result"]["XETHZUSD"]
-    latest_day = raw[-2]  # Use yesterday's candle
-    high = float(latest_day[2])
-    low = float(latest_day[3])
-    close = float(latest_day[4])
-    return high, low, close
+    params = {"pair": "XETHZUSD", "interval": 1440}
+    raw = requests.get(url, params=params).json()["result"]["XETHZUSD"]
+    day = raw[-2]  # yesterday’s candle
+    return float(day[2]), float(day[3]), float(day[4])  # high, low, close
+
+# === Build Support/Resistance Map ===
+def build_s_r_map(levels, price):
+    rows = [
+        f"L5  {levels['L5']:.2f}",
+        f"L4  {levels['L4']:.2f}",
+        f"L3  {levels['L3']:.2f}",
+        f"P   {levels['Pivot']:.2f}",
+        f"H3  {levels['H3']:.2f}",
+        f"{'➡️  Price':<6} {price:.2f}",
+        f"H4  {levels['H4']:.2f}",
+        f"H5  {levels['H5']:.2f}",
+    ]
+    return "```\n" + "\n".join(rows) + "\n```"
+
+# === Build Alert Embed ===
+def build_warning_embed(level_name, level_price, price, bias, score, probability, outcome, levels):
+    direction_emoji = "⬆️" if price < level_price else "⬇️"
+    utc_time = datetime.datetime.now(UTC)
+    central_time = utc_time.astimezone(CENTRAL)
+    footer = f"🕒 UTC: {utc_time.strftime('%Y-%m-%d %H:%M:%S')} | CT: {central_time.strftime('%I:%M %p')}"
+
+    embed = discord.Embed(
+        title=f"⚠️ ETH Approaching {level_name} (${level_price:.2f})",
+        description=(
+            f"🎯 **Bias:** `{bias}`\n"
+            f"📊 **Confidence:** {probability}\n"
+            f"🧮 **Score:** `{score}/6`\n"
+            f"{outcome}"
+        ),
+        color=discord.Color.orange(),
+        timestamp=utc_time,
+    )
+
+    embed.add_field(name=f"{direction_emoji} Current Price", value=f"`$ {price:.2f}`", inline=True)
+    embed.add_field(name="📍 Support/Resistance Map", value=build_s_r_map(levels, price), inline=False)
+    embed.set_footer(text=f"Camarilla Alert • {footer}")
+    return embed
 
 # === Scoring Logic ===
 def score_probability(price, level_price, rsi, rsi_trend, price_trend, volume, avg_volume):
@@ -99,33 +124,15 @@ def score_probability(price, level_price, rsi, rsi_trend, price_trend, volume, a
     elif score == 4: return score, "🟡 60–70% – Possible Move"
     else: return score, "⚪ 40–60% – Neutral Watch"
 
-# === Bias Outcome Logic ===
 def determine_outcome(agreement):
-    if agreement >= 3:
-        return "🔴 Likely Break"
-    elif agreement <= 1:
-        return "🟢 Likely Reversal"
-    else:
-        return "⚪ Unclear / 50/50"
+    if agreement >= 3: return "🔴 Likely Break"
+    elif agreement <= 1: return "🟢 Likely Reversal"
+    else: return "⚪ Unclear / 50/50"
 
-# === Embed Builder ===
-def build_warning_embed(level_name, level_price, price, bias, score, probability, outcome):
-    embed = discord.Embed(
-        title=f"⚠️ Approaching {level_name} (${level_price:.2f})",
-        description=f"**Bias:** {bias} | **{probability}** | **Score:** {score}",
-        color=discord.Color.orange(),
-        timestamp=datetime.datetime.now(UTC),
-    )
-    embed.add_field(name="🎯 Outcome", value=outcome, inline=False)
-    embed.add_field(name="📈 Current Price", value=f"${price:.2f}", inline=True)
-    embed.add_field(name="📉 Level Price", value=f"${level_price:.2f}", inline=True)
-    embed.set_footer(text="UTC " + embed.timestamp.strftime("%Y-%m-%d %H:%M:%S"))
-    return embed
-
-# === Cooldown Tracking ===
+# === Cooldown Tracker ===
 last_alert_time = {}
 
-# === Main Camarilla Scanner ===
+# === Main Camarilla Alert Scanner ===
 @tasks.loop(minutes=1)
 async def scan_camarilla_levels():
     df = fetch_ohlc()
@@ -141,91 +148,59 @@ async def scan_camarilla_levels():
     avg_volume = recent["volume"].mean()
     volume = latest["volume"]
 
-    # Use daily OHLC for Camarilla pivots
     daily_high, daily_low, daily_close = fetch_daily_ohlc()
     levels = calculate_camarilla(daily_high, daily_low, daily_close)
-
     closest_level = min(levels.items(), key=lambda x: abs(x[1] - price))
     level_name, level_price = closest_level
 
     now = datetime.datetime.now(UTC)
-    if level_name in last_alert_time:
-        delta = now - last_alert_time[level_name]
-        if delta.total_seconds() < 600:
-            return  # 10-minute cooldown
+    if level_name in last_alert_time and (now - last_alert_time[level_name]).total_seconds() < 600:
+        return  # 10-minute cooldown
 
-    # Bias logic
-    is_upper = "H" in level_name
-    direction_match = (price_trend and is_upper) or (not price_trend and "L" in level_name)
-    rsi_match = (rsi_trend == "up" and is_upper) or (rsi_trend == "down" and "L" in level_name)
-    candle_match = price > df["open"].iloc[-1] if is_upper else price < df["open"].iloc[-1]
+    direction_match = (price_trend and "H" in level_name) or (not price_trend and "L" in level_name)
+    rsi_match = (rsi_trend == "up" and "H" in level_name) or (rsi_trend == "down" and "L" in level_name)
+    candle_match = price > df["open"].iloc[-1] if "H" in level_name else price < df["open"].iloc[-1]
     volume_match = volume > avg_volume
     agreement = sum([direction_match, rsi_match, candle_match, volume_match])
 
-    # === Override Filters ===
+    # Override Filters
     proximity = abs(price - level_price) / level_price
-    if 45 <= rsi <= 55:
-        print("⚠️ Override: RSI neutral")
-        return
-    if volume < avg_volume * 0.9:
-        print("⚠️ Override: Low volume")
-        return
-    if proximity > 0.005:  # 0.5%
-        print("⚠️ Override: Price too far from level")
+    if 45 <= rsi <= 55 or volume < avg_volume * 0.9 or proximity > 0.005:
         return
 
-    # === Proceed with Alert ===
     outcome = determine_outcome(agreement)
     score, prob_label = score_probability(price, level_price, rsi, rsi_trend, direction_match, volume, avg_volume)
     bias = "Break" if agreement >= 3 else "Reversal"
 
+    embed = build_warning_embed(level_name, level_price, price, bias, score, prob_label, outcome, levels)
     channel = bot.get_channel(CHANNEL_ID)
-    embed = build_warning_embed(level_name, level_price, price, bias, score, prob_label, outcome)
     await channel.send(embed=embed)
     last_alert_time[level_name] = now
 
+# === Command: Show Daily Levels ===
 @bot.command(name="levels")
 async def show_camarilla_levels(ctx):
-    try:
-        high, low, close = fetch_daily_ohlc()
-        levels = calculate_camarilla(high, low, close)
+    high, low, close = fetch_daily_ohlc()
+    levels = calculate_camarilla(high, low, close)
+    embed = discord.Embed(
+        title="📊 ETH Camarilla Levels (Daily)",
+        description=f"Based on yesterday’s candle\nHigh: **${high:.2f}**, Low: **${low:.2f}**, Close: **${close:.2f}**",
+        color=discord.Color.blue(),
+        timestamp=datetime.datetime.now(UTC)
+    )
+    embed.add_field(name="📈 Resistance", value=f"**H5:** ${levels['H5']:.2f}\n**H4:** ${levels['H4']:.2f}\n**H3:** ${levels['H3']:.2f}", inline=True)
+    embed.add_field(name="📉 Support", value=f"**L3:** ${levels['L3']:.2f}\n**L4:** ${levels['L4']:.2f}\n**L5:** ${levels['L5']:.2f}", inline=True)
+    embed.add_field(name="🎯 Pivot", value=f"**Pivot:** ${levels['Pivot']:.2f}", inline=False)
+    embed.set_footer(text="Camarilla Levels • UTC " + embed.timestamp.strftime("%Y-%m-%d %H:%M:%S"))
+    await ctx.send(embed=embed)
 
-        embed = discord.Embed(
-            title="📊 ETH Camarilla Levels (Daily)",
-            description=f"Based on **yesterday's daily candle**:\nHigh: **${high:.2f}**, Low: **${low:.2f}**, Close: **${close:.2f}**",
-            color=discord.Color.blue(),
-            timestamp=datetime.datetime.now(UTC),
-        )
-
-        embed.add_field(
-            name="📈 Resistance",
-            value=f"**H5:** ${levels['H5']:.2f}\n**H4:** ${levels['H4']:.2f}\n**H3:** ${levels['H3']:.2f}",
-            inline=True,
-        )
-        embed.add_field(
-            name="📉 Support",
-            value=f"**L3:** ${levels['L3']:.2f}\n**L4:** ${levels['L4']:.2f}\n**L5:** ${levels['L5']:.2f}",
-            inline=True,
-        )
-        embed.add_field(
-            name="🎯 Pivot",
-            value=f"**Pivot:** ${levels['Pivot']:.2f}",
-            inline=False,
-        )
-
-        embed.set_footer(text="UTC " + embed.timestamp.strftime("%Y-%m-%d %H:%M:%S"))
-        await ctx.send(embed=embed)
-
-    except Exception as e:
-        await ctx.send(f"⚠️ Error fetching Camarilla levels: {str(e)}")
-
-# === Bot Ready Event ===
+# === On Ready ===
 @bot.event
 async def on_ready():
     print(f"🟢 Logged in as {bot.user}")
     scan_camarilla_levels.start()
 
-# === Start Bot and Flask ===
+# === Start Flask + Bot ===
 if __name__ == "__main__":
     threading.Thread(target=run_flask).start()
     bot.run(TOKEN)
