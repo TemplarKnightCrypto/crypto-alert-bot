@@ -1,4 +1,4 @@
-# === Templar Control Tower: ETH Camarilla Alert Bot ===
+# === ETH Camarilla Trade Alert Bot ===
 
 import os
 import discord
@@ -17,275 +17,174 @@ from ta.momentum import RSIIndicator
 # === Load environment variables ===
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
+BATTLE_SIGNALS_CHANNEL_ID = int(os.getenv("BATTLE_SIGNALS_CHANNEL_ID"))
 
 # === Timezones ===
 UTC = pytz.utc
-CENTRAL = pytz.timezone("US/Central")
+CENTRAL_TZ = pytz.timezone("US/Central")
 
 # === Flask Web Server for Render ===
 app = Flask(__name__)
-
 @app.route("/")
 def home():
     return "ETH Camarilla Alert Bot is running!"
-
 def run_flask():
     app.run(host="0.0.0.0", port=10000)
 
-# === Initialize Discord Bot ===
+# === Discord Bot ===
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# === Pine Script-style Camarilla Calculation ===
+# === Fetch Kraken OHLC ===
+def fetch_ohlc(interval=1):
+    url = "https://api.kraken.com/0/public/OHLC"
+    params = {"pair": "XETHZUSD", "interval": interval}
+    response = requests.get(url, params=params)
+    raw = response.json()["result"]["XETHZUSD"]
+    df = pd.DataFrame(raw, columns=[
+        "time", "open", "high", "low", "close", "vwap", "volume", "count"
+    ])
+    df = df.astype({
+        "time": int, "open": float, "high": float, "low": float,
+        "close": float, "volume": float
+    })
+    df["datetime"] = pd.to_datetime(df["time"], unit="s", utc=True)
+    df.set_index("datetime", inplace=True)
+    return df
+
+# === Fetch Daily OHLC for Camarilla ===
+def fetch_daily_ohlc():
+    df = fetch_ohlc(interval=1440)
+    latest = df.iloc[-2]  # Use previous full day
+    return latest["high"], latest["low"], latest["close"]
+
+# === Camarilla Levels ===
 def calculate_camarilla(high, low, close):
     D4 = 0.55
     D3 = 0.275
-    P = (high + low + close) / 3
     H5 = (high / low) * close
     H4 = ((high - low) * D4) + close
     H3 = ((high - low) * D3) + close
     L3 = close - ((high - low) * D3)
     L4 = close - ((high - low) * D4)
     L5 = close - (H5 - close)
-    return {
-        "H5": H5, "H4": H4, "H3": H3,
-        "L3": L3, "L4": L4, "L5": L5,
-        "Pivot": P
-    }
+    P = (high + low + close) / 3
+    return {"H5": H5, "H4": H4, "H3": H3, "L3": L3, "L4": L4, "L5": L5, "Pivot": P}
 
-# === Fetch OHLC from Kraken ===
-def fetch_ohlc():
-    url = "https://api.kraken.com/0/public/OHLC"
-    params = {"pair": "XETHZUSD", "interval": 1}
-    raw = requests.get(url, params=params).json()["result"]["XETHZUSD"]
-    df = pd.DataFrame(raw, columns=["time", "open", "high", "low", "close", "vwap", "volume", "count"])
-    df = df.astype({"time": int, "open": float, "high": float, "low": float, "close": float, "volume": float})
-    df["datetime"] = pd.to_datetime(df["time"], unit="s", utc=True)
-    df.set_index("datetime", inplace=True)
-    return df
-
-# === Fetch Daily Candle ===
-def fetch_daily_ohlc():
-    url = "https://api.kraken.com/0/public/OHLC"
-    params = {"pair": "XETHZUSD", "interval": 1440}
-    raw = requests.get(url, params=params).json()["result"]["XETHZUSD"]
-    day = raw[-2]
-    return float(day[2]), float(day[3]), float(day[4])
-
-# === Support/Resistance Map ===
-def build_s_r_map(levels, price):
-    rows = [
-        f"H5  {levels['H5']:.2f}",
-        f"H4  {levels['H4']:.2f}",
-        f"H3  {levels['H3']:.2f}",
-        f"P   {levels['Pivot']:.2f}",
-        f"L3  {levels['L3']:.2f}",
-        f"L4  {levels['L4']:.2f}",
-        f"L5  {levels['L5']:.2f}",
-    ]
-    price_line = f"➡️  Price {price:.2f}"
-    inserted = False
-    for i in range(len(rows) - 1):
-        above = float(rows[i].split()[1])
-        below = float(rows[i + 1].split()[1])
-        if above >= price >= below:
-            rows.insert(i + 1, price_line)
-            inserted = True
-            break
-    if not inserted:
-        rows.insert(0, price_line) if price > levels['H5'] else rows.append(price_line)
-    return "```\n" + "\n".join(rows) + "\n```"
+# === Determine Knight ===
+def assign_knight(direction):
+    return "Sir Leonis Ironhart" if direction == "Long" else "Sir Lucien Frostveil"
 
 # === Confidence Score ===
-def score_probability(price, level_price, rsi, rsi_trend, price_trend, volume, avg_volume):
-    proximity = abs(price - level_price) / level_price
-    proximity_score = 3 if proximity < 0.001 else 2 if proximity < 0.002 else 1
-    volume_spike = 1 if volume > avg_volume * 1.1 else 0
-    rsi_momentum = 1 if (rsi > 55 or rsi < 45) else 0
-    trend_score = 1 if price_trend else 0
-    score = proximity_score + volume_spike + rsi_momentum + trend_score
-    if score >= 6: return score, "🔴 80%+ – Imminent Move"
-    elif score == 5: return score, "🟠 75% – Likely Move"
-    elif score == 4: return score, "🟡 60–70% – Possible Move"
-    else: return score, "⚪ 40–60% – Neutral Watch"
+def score_trade(rsi, rsi_trend, direction, price, level_price, volume, avg_volume, price_trend):
+    direction_match = (price_trend and direction == "Long") or (not price_trend and direction == "Short")
+    rsi_match = (rsi_trend == "up" and direction == "Long") or (rsi_trend == "down" and direction == "Short")
+    rsi_score = (rsi > 55 if direction == "Long" else rsi < 45)
+    proximity = abs(price - level_price) / level_price < 0.003
+    volume_confirm = volume > avg_volume * 1.2
+    return sum([direction_match, rsi_match, rsi_score, proximity, volume_confirm])
 
-def determine_outcome(agreement):
-    if agreement >= 3: return "🔴 Likely Break"
-    elif agreement <= 1: return "🟢 Likely Reversal"
-    else: return "⚪ Unclear / 50/50"
-
-# === Cooldown for Warning Alerts ===
-last_alert_time = {}
-
-# === Warning Alert Loop ===
-@tasks.loop(minutes=1)
-async def scan_camarilla_levels():
-    df = fetch_ohlc()
-    df["rsi"] = RSIIndicator(close=df["close"], window=14).rsi()
-    df = df.dropna()
-    latest = df.iloc[-1]
-    recent = df[-5:]
-
-    price = latest["close"]
-    rsi = latest["rsi"]
-    rsi_trend = "up" if df["rsi"].iloc[-1] > df["rsi"].iloc[-3] else "down"
-    price_trend = df["close"].iloc[-1] > df["close"].iloc[-3]
-    avg_volume = recent["volume"].mean()
-    volume = latest["volume"]
-
-    daily_high, daily_low, daily_close = fetch_daily_ohlc()
-    levels = calculate_camarilla(daily_high, daily_low, daily_close)
-    closest_level = min(levels.items(), key=lambda x: abs(x[1] - price))
-    level_name, level_price = closest_level
-
-    now = datetime.datetime.now(UTC)
-    if level_name in last_alert_time and (now - last_alert_time[level_name]).total_seconds() < 600:
-        return
-
-    direction_match = (price_trend and "H" in level_name) or (not price_trend and "L" in level_name)
-    rsi_match = (rsi_trend == "up" and "H" in level_name) or (rsi_trend == "down" and "L" in level_name)
-    candle_match = price > df["open"].iloc[-1] if "H" in level_name else price < df["open"].iloc[-1]
-    volume_match = volume > avg_volume
-    agreement = sum([direction_match, rsi_match, candle_match, volume_match])
-
-    proximity = abs(price - level_price) / level_price
-    if 45 <= rsi <= 55 or volume < avg_volume * 0.9 or proximity > 0.005:
-        return
-
-    outcome = determine_outcome(agreement)
-    score, prob_label = score_probability(price, level_price, rsi, rsi_trend, price_trend, volume, avg_volume)
-    bias = "Break" if agreement >= 3 else "Reversal"
-
-    utc_time = datetime.datetime.now(UTC)
-    central_time = utc_time.astimezone(CENTRAL)
-    footer = f"🕒 UTC: {utc_time.strftime('%Y-%m-%d %H:%M:%S')} | CT: {central_time.strftime('%I:%M %p')}"
-
-    embed = discord.Embed(
-        title=f"⚠️ ETH Approaching {level_name} (${level_price:.2f})",
-        description=(
-            f"🎯 **Bias:** `{bias}`\n"
-            f"📊 **Confidence:** {prob_label}\n"
-            f"🧮 **Score:** `{score}/6`\n"
-            f"{outcome}"
-        ),
-        color=discord.Color.orange(),
-        timestamp=utc_time,
-    )
-
-    direction_emoji = "⬆️" if price < level_price else "⬇️"
-    embed.add_field(name=f"{direction_emoji} Current Price", value=f"`$ {price:.2f}`", inline=True)
-    embed.add_field(name="📍 Support/Resistance Map", value=build_s_r_map(levels, price), inline=False)
-    embed.set_footer(text=f"Camarilla Alert • {footer}")
-
-    channel = bot.get_channel(CHANNEL_ID)
-    await channel.send(embed=embed)
-    last_alert_time[level_name] = now
-
-# === Trade Alert Loop ===
+# === Trade Alert Scanner with 5m Confirmation ===
 @tasks.loop(minutes=1)
 async def scan_trade_alerts():
-    df = fetch_ohlc()
+    df = fetch_ohlc(interval=1)
     df["rsi"] = RSIIndicator(close=df["close"], window=14).rsi()
     df = df.dropna()
     latest = df.iloc[-1]
     recent = df[-5:]
 
     price = latest["close"]
-    open_price = latest["open"]
-    close_price = latest["close"]
     rsi = latest["rsi"]
-    rsi_trend = "up" if df["rsi"].iloc[-1] > df["rsi"].iloc[-3] else "down"
-    price_trend = df["close"].iloc[-1] > df["close"].iloc[-3]
-    avg_volume = recent["volume"].mean()
     volume = latest["volume"]
+    avg_volume = recent["volume"].mean()
+    price_trend = df["close"].iloc[-1] > df["close"].iloc[-3]
+    rsi_trend = "up" if df["rsi"].iloc[-1] > df["rsi"].iloc[-3] else "down"
 
-    high, low, close = fetch_daily_ohlc()
-    levels = calculate_camarilla(high, low, close)
+    # === Daily Camarilla Levels ===
+    daily_high, daily_low, daily_close = fetch_daily_ohlc()
+    levels = calculate_camarilla(daily_high, daily_low, daily_close)
 
-    trade_signal = None
-    level_hit = None
-    direction = None
-    knight = None
+    # === Fetch 5m Candle for Confirmation ===
+    df5 = fetch_ohlc(interval=5)
+    confirm = df5.iloc[-1]
+    confirm_open = confirm["open"]
+    confirm_close = confirm["close"]
+    confirm_high = confirm["high"]
+    confirm_low = confirm["low"]
+    confirm_volume = confirm["volume"]
+    confirm_body = abs(confirm_close - confirm_open)
+    confirm_wick = confirm_high - confirm_low
+    body_ratio = confirm_body / confirm_wick if confirm_wick else 0
+    strong_body = body_ratio > 0.5
+    volume_valid = confirm_volume > df5["volume"].iloc[-5:].mean() * 1.2
 
-    if close_price > levels["H4"]:
-        trade_signal = "Breakout Long"
-        level_hit = "H4"
-        direction = "Long"
-        knight = "Sir Leonis Ironhart"
-    elif close_price < levels["L4"]:
-        trade_signal = "Breakout Short"
-        level_hit = "L4"
-        direction = "Short"
-        knight = "Sir Leonis Ironhart"
-    elif abs(price - levels["L3"]) / levels["L3"] < 0.002 and close_price > open_price and rsi_trend == "up":
-        trade_signal = "Reversal Long"
-        level_hit = "L3"
-        direction = "Long"
-        knight = "Sir Lucien Frostveil"
-    elif abs(price - levels["H3"]) / levels["H3"] < 0.002 and close_price < open_price and rsi_trend == "down":
-        trade_signal = "Reversal Short"
-        level_hit = "H3"
-        direction = "Short"
-        knight = "Sir Lucien Frostveil"
+    for level_name, level_price in levels.items():
+        is_upper = "H" in level_name
+        broken = False
+        direction = None
 
-    if trade_signal:
-        score, prob_label = score_probability(price, levels[level_hit], rsi, rsi_trend, price_trend, volume, avg_volume)
-        entry = price
-        tp1 = entry * 1.015 if direction == "Long" else entry * 0.985
-        tp2 = entry * 1.03 if direction == "Long" else entry * 0.97
-        sl = entry * 0.99 if direction == "Long" else entry * 1.01
+        if is_upper:
+            if confirm_close > level_price and confirm_open < level_price:
+                broken = True
+                direction = "Long"
+        else:
+            if confirm_close < level_price and confirm_open > level_price:
+                broken = True
+                direction = "Short"
 
-        utc_time = datetime.datetime.now(UTC)
-        central_time = utc_time.astimezone(CENTRAL)
-        timestamp_str = f"🕒 UTC: {utc_time.strftime('%Y-%m-%d %H:%M:%S')} | CT: {central_time.strftime('%I:%M %p')}"
+        if not broken or not strong_body or not volume_valid:
+            continue
+
+        confidence = score_trade(rsi, rsi_trend, direction, price, level_price, volume, avg_volume, price_trend)
+        if confidence < 3:
+            continue
+
+        entry = round(price, 2)
+        risk = entry * 0.01
+        if direction == "Long":
+            stop = round(entry - risk, 2)
+            tp1 = round(entry + risk * 1.5, 2)
+            tp2 = round(entry + risk * 3.0, 2)
+        else:
+            stop = round(entry + risk, 2)
+            tp1 = round(entry - risk * 1.5, 2)
+            tp2 = round(entry - risk * 3.0, 2)
+
+        knight = assign_knight(direction)
+        emoji = "🟩" if direction == "Long" else "🟥"
+        conf_label = "🟢 80%+ – Strong Move" if confidence >= 5 else "🟠 75% – Likely Move" if confidence == 4 else "🟡 60% – Possible Move"
 
         embed = discord.Embed(
-            title=f"✅ ETH {trade_signal} at {level_hit} (${levels[level_hit]:.2f})",
-            description=(
-                f"🧭 **Knight:** {knight}\n"
-                f"🎯 **Direction:** `{direction}`\n"
-                f"📊 **Confidence:** {prob_label}\n"
-                f"🧮 **Score:** `{score}/6`\n"
-                f"{'🟢' if direction == 'Long' else '🔴'} **Entry:** `${entry:.2f}`\n"
-                f"🎯 **TP1:** `${tp1:.2f}` | **TP2:** `${tp2:.2f}`\n"
-                f"🛡 **Stop Loss:** `${sl:.2f}`"
-            ),
+            title=f"{emoji} ETH {direction} at {level_name} (${level_price:.2f})",
             color=discord.Color.green() if direction == "Long" else discord.Color.red(),
-            timestamp=utc_time,
+            timestamp=datetime.datetime.now(UTC)
         )
+        embed.add_field(name="🛡 Knight", value=knight, inline=True)
+        embed.add_field(name="🎯 Direction", value=direction, inline=True)
+        embed.add_field(name="📊 Confidence", value=f"{conf_label}", inline=True)
+        embed.add_field(name="📟 Score", value=f"{confidence}/6", inline=True)
+        embed.add_field(name="🎯 Entry", value=f"${entry}", inline=True)
+        embed.add_field(name="🎯 TP1 | TP2", value=f"${tp1} | ${tp2}", inline=True)
+        embed.add_field(name="🛑 Stop Loss", value=f"${stop}", inline=True)
 
-        embed.add_field(name="📍 Support/Resistance Map", value=build_s_r_map(levels, price), inline=False)
-        embed.set_footer(text=f"Trade Alert • {timestamp_str}")
+        levels_sorted = dict(sorted(levels.items(), key=lambda x: x[1], reverse=True))
+        map_str = ""
+        for name, lvl in levels_sorted.items():
+            marker = "➡️" if abs(price - lvl) < 0.5 else ""
+            map_str += f"{name:<3} {lvl:.2f} {marker}\n"
+        embed.add_field(name="📍 Support/Resistance Map", value=f"```{map_str}```", inline=False)
+        embed.set_footer(text=f"🕒 UTC: {embed.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | CT: {embed.timestamp.astimezone(CENTRAL_TZ).strftime('%I:%M %p')}")
 
-        channel = bot.get_channel(CHANNEL_ID)
+        channel = bot.get_channel(BATTLE_SIGNALS_CHANNEL_ID)
         await channel.send(embed=embed)
 
-# === Show Camarilla Levels (Command) ===
-@bot.command(name="levels")
-async def show_camarilla_levels(ctx):
-    high, low, close = fetch_daily_ohlc()
-    levels = calculate_camarilla(high, low, close)
-    embed = discord.Embed(
-        title="📊 ETH Camarilla Levels (Daily)",
-        description=f"Based on yesterday’s candle\nHigh: **${high:.2f}**, Low: **${low:.2f}**, Close: **${close:.2f}**",
-        color=discord.Color.blue(),
-        timestamp=datetime.datetime.now(UTC)
-    )
-    embed.add_field(name="📈 Resistance", value=f"**H5:** ${levels['H5']:.2f}\n**H4:** ${levels['H4']:.2f}\n**H3:** ${levels['H3']:.2f}", inline=True)
-    embed.add_field(name="📉 Support", value=f"**L3:** ${levels['L3']:.2f}\n**L4:** ${levels['L4']:.2f}\n**L5:** ${levels['L5']:.2f}", inline=True)
-    embed.add_field(name="🎯 Pivot", value=f"**Pivot:** ${levels['Pivot']:.2f}", inline=False)
-    embed.set_footer(text="Camarilla Levels • UTC " + embed.timestamp.strftime("%Y-%m-%d %H:%M:%S"))
-    await ctx.send(embed=embed)
-
-# === On Ready Start Tasks ===
+# === On Ready ===
 @bot.event
 async def on_ready():
     print(f"🟢 Logged in as {bot.user}")
-    scan_camarilla_levels.start()
     scan_trade_alerts.start()
 
-# === Run Flask + Discord Bot ===
+# === Start Bot and Flask ===
 if __name__ == "__main__":
     threading.Thread(target=run_flask).start()
     bot.run(TOKEN)
