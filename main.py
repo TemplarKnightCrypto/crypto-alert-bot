@@ -1,181 +1,138 @@
 # === Templar Control Tower: ETH Camarilla Alert Bot ===
 
 import os
-import requests
-import pandas as pd
-import numpy as np
-import datetime
-import pytz
 import discord
 import asyncio
+import requests
+import datetime
+import pytz
+import pandas as pd
+import numpy as np
 from discord.ext import commands, tasks
-from flask import Flask
 from dotenv import load_dotenv
-from ta.momentum import rsi
+from ta.momentum import RSIIndicator
 
-# === Load .env ===
+# === Load environment variables ===
 load_dotenv()
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", 0))
+TOKEN = os.getenv("TOKEN")
+CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 
-# === Init Bot ===
+# === Timezones ===
+UTC = pytz.utc
+
+# === Initialize Bot ===
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
-app = Flask(__name__)
-CENTRAL_TZ = pytz.timezone("US/Central")
 
 # === Camarilla Calculation ===
-def calculate_camarilla_levels(df):
-    high = df['high'].iloc[-2]
-    low = df['low'].iloc[-2]
-    close = df['close'].iloc[-2]
-    diff = high - low
-
-    levels = {
-        'H5': close + 1.1 * diff * 1.168,
-        'H4': close + 1.1 * diff * 0.55,
-        'H3': close + 1.1 * diff * 0.275,
-        'H2': close + 1.1 * diff * 0.183,
-        'H1': close + 1.1 * diff * 0.0916,
-        'L1': close - 1.1 * diff * 0.0916,
-        'L2': close - 1.1 * diff * 0.183,
-        'L3': close - 1.1 * diff * 0.275,
-        'L4': close - 1.1 * diff * 0.55,
-        'L5': close - 1.1 * diff * 1.168,
-        'Pivot': (high + low + close) / 3
+def calculate_camarilla(high, low, close):
+    range_ = high - low
+    return {
+        "H5": close + (range_ * 1.5000),
+        "H4": close + (range_ * 1.2500),
+        "H3": close + (range_ * 1.1666),
+        "H2": close + (range_ * 1.0833),
+        "H1": close + (range_ * 1.0000),
+        "L1": close - (range_ * 1.0000),
+        "L2": close - (range_ * 1.0833),
+        "L3": close - (range_ * 1.1666),
+        "L4": close - (range_ * 1.2500),
+        "L5": close - (range_ * 1.5000),
+        "Pivot": (high + low + close) / 3,
     }
-    return levels
 
-# === Kraken Data Fetch ===
-def fetch_ohlc(symbol="ETHUSD", interval=1):
-    url = f'https://api.kraken.com/0/public/OHLC?pair={symbol}&interval={interval}'
-    data = requests.get(url).json()
-    key = list(data['result'].keys())[0]
-    df = pd.DataFrame(data['result'][key], columns=[
-        'time', 'open', 'high', 'low', 'close', 'vwap', 'volume', 'count'
+# === Fetch Kraken ETH OHLC ===
+def fetch_ohlc():
+    url = "https://api.kraken.com/0/public/OHLC"
+    params = {"pair": "XETHZUSD", "interval": 1}
+    response = requests.get(url, params=params)
+    raw = response.json()["result"]["XETHZUSD"]
+    df = pd.DataFrame(raw, columns=[
+        "time", "open", "high", "low", "close", "vwap", "volume", "count"
     ])
-    df = df.astype({'close': 'float', 'high': 'float', 'low': 'float', 'volume': 'float'})
+    df = df.astype({
+        "time": int, "open": float, "high": float, "low": float,
+        "close": float, "volume": float
+    })
+    df["datetime"] = pd.to_datetime(df["time"], unit="s", utc=True)
+    df.set_index("datetime", inplace=True)
     return df
 
-# === Probability Scoring ===
-def get_probability_label(score):
-    if score >= 6:
-        return "🔴 85% – Imminent Move"
-    elif score == 5:
-        return "🟠 75% – Likely Move"
-    elif score == 4:
-        return "🟡 65% – Possible Move"
-    elif score in [2, 3]:
-        return "⚪ 50% – Neutral Watch"
+# === Scoring Logic ===
+def score_probability(price, level_price, rsi, rsi_trend, price_trend, volume, avg_volume):
+    proximity = abs(price - level_price) / level_price
+    proximity_score = 3 if proximity < 0.001 else 2 if proximity < 0.002 else 1
+    volume_spike = 1 if volume > avg_volume * 1.1 else 0
+    rsi_momentum = 1 if (rsi > 55 or rsi < 45) else 0
+    trend_score = 1 if price_trend else 0
+    score = proximity_score + volume_spike + rsi_momentum + trend_score
+    if score >= 6: return score, "🔴 80%+ – Imminent Move"
+    elif score == 5: return score, "🟠 75% – Likely Move"
+    elif score == 4: return score, "🟡 60–70% – Possible Move"
+    else: return score, "⚪ 40–60% – Neutral Watch"
+
+# === Bias Outcome Logic ===
+def determine_outcome(agreement):
+    if agreement >= 3:
+        return "🔴 Likely Break"
+    elif agreement <= 1:
+        return "🟢 Likely Reversal"
     else:
-        return "⚪ 30% – Low Probability"
+        return "⚪ Unclear / 50/50"
 
-def calculate_score(df, level_name, level_val, close):
-    score = 0
-    diff = abs(close - level_val)
-    pct = diff / close
+# === Embed Builder ===
+def build_warning_embed(level_name, level_price, price, bias, score, probability, outcome):
+    embed = discord.Embed(
+        title=f"⚠️ Approaching {level_name} (${level_price:.2f})",
+        description=f"**Bias:** {bias} | **{probability}** | **Score:** {score}",
+        color=discord.Color.orange(),
+        timestamp=datetime.datetime.now(UTC),
+    )
+    embed.add_field(name="🎯 Outcome", value=outcome)
+    embed.set_footer(text="UTC " + embed.timestamp.strftime("%Y-%m-%d %H:%M:%S"))
+    return embed
 
-    # Proximity
-    if pct < 0.0015: score += 3
-    elif pct < 0.003: score += 2
-    elif pct < 0.005: score += 1
-
-    # Volume Spike
-    vol = df['volume'].iloc[-1]
-    avg_vol = df['volume'].iloc[-6:-1].mean()
-    if vol > 1.2 * avg_vol:
-        score += 1
-
-    # RSI
-    rsi_val = rsi(df['close']).iloc[-1]
-    if level_name.startswith("H") and rsi_val > 55:
-        score += 1
-    if level_name.startswith("L") and rsi_val < 45:
-        score += 1
-
-    # Trend Direction
-    trend = df['close'].iloc[-1] - df['close'].iloc[-4]
-    if (level_val > close and trend > 0) or (level_val < close and trend < 0):
-        score += 1
-
-    return score
-
-# === Bias Classifier ===
-def classify_bias(df, level_name, level_val, close):
-    agree = 0
-
-    # Price moving toward level
-    trend = df['close'].iloc[-1] - df['close'].iloc[-4]
-    toward = (level_val > close and trend > 0) or (level_val < close and trend < 0)
-    if toward: agree += 1
-
-    # RSI trend
-    rsi_series = rsi(df['close'])
-    if level_name.startswith("H") and rsi_series.iloc[-1] > rsi_series.iloc[-4]: agree += 1
-    if level_name.startswith("L") and rsi_series.iloc[-1] < rsi_series.iloc[-4]: agree += 1
-
-    # Candle pattern
-    candles = df['close'].iloc[-3:]
-    if level_val > close and all(candles.diff().dropna() > 0): agree += 1
-    if level_val < close and all(candles.diff().dropna() < 0): agree += 1
-
-    # Volume trend
-    vol = df['volume'].iloc[-1]
-    avg_vol = df['volume'].iloc[-6:-1].mean()
-    if vol > avg_vol: agree += 1
-
-    # Classification
-    if agree >= 3: return "🔴 Likely Break"
-    elif agree <= 1: return "🟢 Likely Reversal"
-    else: return "⚪ Unclear / 50/50"
-
-# === Warning Cooldown ===
-last_warnings = {}
-
-# === Scheduler Task ===
+# === Main Camarilla Scanner ===
 @tasks.loop(minutes=1)
-async def scan_price():
+async def scan_camarilla_levels():
     df = fetch_ohlc()
-    levels = calculate_camarilla_levels(df)
-    close = df['close'].iloc[-1]
+    df["rsi"] = RSIIndicator(close=df["close"], window=14).rsi()
+    df = df.dropna()
+    latest = df.iloc[-1]
+    recent = df[-5:]
+
+    price = latest["close"]
+    rsi = latest["rsi"]
+    rsi_trend = "up" if df["rsi"].iloc[-1] > df["rsi"].iloc[-3] else "down"
+    price_trend = df["close"].iloc[-1] > df["close"].iloc[-3]
+    avg_volume = recent["volume"].mean()
+    volume = latest["volume"]
+
+    levels = calculate_camarilla(df["high"].max(), df["low"].min(), df["close"].iloc[-1])
+    closest_level = min(levels.items(), key=lambda x: abs(x[1] - price))
+    level_name, level_price = closest_level
+
+    # Bias checks
+    is_upper = "H" in level_name
+    direction_match = (price_trend and is_upper) or (not price_trend and "L" in level_name)
+    rsi_match = (rsi_trend == "up" and is_upper) or (rsi_trend == "down" and "L" in level_name)
+    candle_match = price > df["open"].iloc[-1] if is_upper else price < df["open"].iloc[-1]
+    volume_match = volume > avg_volume
+    agreement = sum([direction_match, rsi_match, candle_match, volume_match])
+
+    outcome = determine_outcome(agreement)
+    score, prob_label = score_probability(price, level_price, rsi, rsi_trend, direction_match, volume, avg_volume)
+    bias = "Break" if agreement >= 3 else "Reversal"
+
+    # Send embed
     channel = bot.get_channel(CHANNEL_ID)
-    now = datetime.datetime.now(datetime.timezone.utc)
+    embed = build_warning_embed(level_name, level_price, price, bias, score, prob_label, outcome)
+    await channel.send(embed=embed)
 
-    for name in ['H5', 'H4', 'H3', 'L3', 'L4', 'L5', 'Pivot']:
-        level_val = levels[name]
-        score = calculate_score(df, name, level_val, close)
-        if score < 2:
-            continue  # skip weak warnings
-
-        probability = get_probability_label(score)
-        classification = classify_bias(df, name, level_val, close)
-        bias = "Break" if "Break" in classification else "Reversal"
-        emoji = "🔼" if level_val > close else "🔽"
-
-        key = f"{name}-{bias}"
-        if key in last_warnings and (now - last_warnings[key]).total_seconds() < 180:
-            continue  # cooldown 3 min
-
-        msg = (
-            f"⚠️ Approaching **{name}** (${level_val:.2f})\n"
-            f"{emoji} Bias: {bias} | {probability} | Score: {score}\n"
-            f"🎯 Outcome: {classification}"
-        )
-        await channel.send(msg)
-        last_warnings[key] = now
-
-# === Flask App for Render Keepalive ===
+# === Bot Ready ===
 @bot.event
 async def on_ready():
-    print(f"[{datetime.datetime.now()}] Logged in as {bot.user}")
-    scan_price.start()
+    print(f"🟢 Logged in as {bot.user}")
+    scan_camarilla_levels.start()
 
-def run_flask():
-    app.run(host="0.0.0.0", port=10000)
-
-# === Entry Point ===
-if __name__ == "__main__":
-    import threading
-    threading.Thread(target=run_flask).start()
-    bot.run(DISCORD_TOKEN)
-
+bot.run(TOKEN)
