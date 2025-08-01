@@ -49,6 +49,12 @@ ETH_BATTLEGROUND_CHANNEL_ID = 1399532442075005038     # 🏰・eth-battleground
 KNIGHTS_WATCH_CHANNEL_ID = 1399532102571135118        # ⏰・knights’-watch
 SCROLLS_OF_ORDER_CHANNEL_ID = 1399067396488302623     # 📖・scrolls-of-the-order
 
+# === Discord Bot Initialization ===
+intents = discord.Intents.default()
+intents.messages = True
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
 # ============================================
 # 🧰 SECTION 2: Utility Functions
 # ============================================
