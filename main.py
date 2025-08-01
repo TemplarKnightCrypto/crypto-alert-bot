@@ -55,6 +55,9 @@ intents.messages = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# === Flask App for Uptime Pings ===
+app = Flask(__name__)
+
 # ============================================
 # 🧰 SECTION 2: Utility Functions
 # ============================================
