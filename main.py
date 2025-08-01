@@ -75,16 +75,31 @@ def fetch_daily_ohlc():
 
 # === Build Support/Resistance Map ===
 def build_s_r_map(levels, price):
+    # Build the ordered structure
     rows = [
-        f"L5  {levels['L5']:.2f}",
-        f"L4  {levels['L4']:.2f}",
-        f"L3  {levels['L3']:.2f}",
-        f"P   {levels['Pivot']:.2f}",
-        f"H3  {levels['H3']:.2f}",
-        f"{'➡️  Price':<6} {price:.2f}",
-        f"H4  {levels['H4']:.2f}",
         f"H5  {levels['H5']:.2f}",
+        f"H4  {levels['H4']:.2f}",
+        f"H3  {levels['H3']:.2f}",
+        f"P   {levels['Pivot']:.2f}",
+        f"L3  {levels['L3']:.2f}",
+        f"L4  {levels['L4']:.2f}",
+        f"L5  {levels['L5']:.2f}",
     ]
+
+    # Insert the price line in the correct position
+    price_line = f"➡️  Price {price:.2f}"
+    inserted = False
+    for i in range(len(rows) - 1):
+        level_above = float(rows[i].split()[1])
+        level_below = float(rows[i + 1].split()[1])
+        if level_above >= price >= level_below:
+            rows.insert(i + 1, price_line)
+            inserted = True
+            break
+    if not inserted:
+        # If above H5 or below L5
+        rows.insert(0, price_line) if price > levels['H5'] else rows.append(price_line)
+
     return "```\n" + "\n".join(rows) + "\n```"
 
 # === Build Alert Embed ===
