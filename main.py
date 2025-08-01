@@ -184,6 +184,40 @@ async def scan_camarilla_levels():
     await channel.send(embed=embed)
     last_alert_time[level_name] = now
 
+@bot.command(name="levels")
+async def show_camarilla_levels(ctx):
+    try:
+        high, low, close = fetch_daily_ohlc()
+        levels = calculate_camarilla(high, low, close)
+
+        embed = discord.Embed(
+            title="📊 ETH Camarilla Levels (Daily)",
+            description=f"Based on **yesterday's daily candle**:\nHigh: **${high:.2f}**, Low: **${low:.2f}**, Close: **${close:.2f}**",
+            color=discord.Color.blue(),
+            timestamp=datetime.datetime.now(UTC),
+        )
+
+        embed.add_field(
+            name="📈 Resistance",
+            value=f"**H5:** ${levels['H5']:.2f}\n**H4:** ${levels['H4']:.2f}\n**H3:** ${levels['H3']:.2f}",
+            inline=True,
+        )
+        embed.add_field(
+            name="📉 Support",
+            value=f"**L3:** ${levels['L3']:.2f}\n**L4:** ${levels['L4']:.2f}\n**L5:** ${levels['L5']:.2f}",
+            inline=True,
+        )
+        embed.add_field(
+            name="🎯 Pivot",
+            value=f"**Pivot:** ${levels['Pivot']:.2f}",
+            inline=False,
+        )
+
+        embed.set_footer(text="UTC " + embed.timestamp.strftime("%Y-%m-%d %H:%M:%S"))
+        await ctx.send(embed=embed)
+
+    except Exception as e:
+        await ctx.send(f"⚠️ Error fetching Camarilla levels: {str(e)}")
 
 # === Bot Ready Event ===
 @bot.event
