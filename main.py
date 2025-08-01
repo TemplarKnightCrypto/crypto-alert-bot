@@ -164,7 +164,7 @@ def detect_100x_trade(df, cam):
     prev_10 = df.iloc[-11:-1]
 
     score, reasons, level = evaluate_scorecard(df, cam)
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc)
 
     if score < 5:
         return None
@@ -247,7 +247,7 @@ async def scan_trade_alerts():
         embed = discord.Embed(
             title=f"{emoji} ETH {direction} at {name} (${lvl:.2f})",
             color=discord.Color.green() if direction == "Long" else discord.Color.red(),
-            timestamp=datetime.datetime.now(UTC)
+            timestamp=datetime.datetime.now(datetime.timezone.utc)
         )
         embed.add_field(name="🛡 Knight", value=knight, inline=True)
         embed.add_field(name="🎯 Direction", value=direction, inline=True)
@@ -277,7 +277,7 @@ async def scorecard_check():
     cam = calculate_camarilla_levels(high, low, close)
     score, reasons, level = evaluate_scorecard(df, cam)
 
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc)
     if last_scorecard_sent and (now - last_scorecard_sent).seconds < 300:
         return
     last_scorecard_sent = now
@@ -334,4 +334,3 @@ async def on_ready():
 if __name__ == "__main__":
     threading.Thread(target=run_flask).start()
     bot.run(TOKEN)
-
