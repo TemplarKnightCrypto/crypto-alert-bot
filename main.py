@@ -38,22 +38,26 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # === Camarilla Calculation ===
 def calculate_camarilla(high, low, close):
-    range_ = high - low
+    D4 = 0.55
+    D3 = 0.275
+    P = (high + low + close) / 3
+    H5 = (high / low) * close
+    H4 = ((high - low) * D4) + close
+    H3 = ((high - low) * D3) + close
+    L3 = close - ((high - low) * D3)
+    L4 = close - ((high - low) * D4)
+    L5 = close - (H5 - close)
     return {
-        "H5": close + (range_ * 1.5000),
-        "H4": close + (range_ * 1.2500),
-        "H3": close + (range_ * 1.1666),
-        "H2": close + (range_ * 1.0833),
-        "H1": close + (range_ * 1.0000),
-        "L1": close - (range_ * 1.0000),
-        "L2": close - (range_ * 1.0833),
-        "L3": close - (range_ * 1.1666),
-        "L4": close - (range_ * 1.2500),
-        "L5": close - (range_ * 1.5000),
-        "Pivot": (high + low + close) / 3,
+        "H5": H5,
+        "H4": H4,
+        "H3": H3,
+        "L3": L3,
+        "L4": L4,
+        "L5": L5,
+        "Pivot": P,
     }
 
-# === Fetch Kraken ETH OHLC ===
+# === Fetch 1-minute OHLC from Kraken for indicators ===
 def fetch_ohlc():
     url = "https://api.kraken.com/0/public/OHLC"
     params = {"pair": "XETHZUSD", "interval": 1}
@@ -69,6 +73,18 @@ def fetch_ohlc():
     df["datetime"] = pd.to_datetime(df["time"], unit="s", utc=True)
     df.set_index("datetime", inplace=True)
     return df
+
+# === Fetch Daily OHLC for Camarilla ===
+def fetch_daily_ohlc():
+    url = "https://api.kraken.com/0/public/OHLC"
+    params = {"pair": "XETHZUSD", "interval": 1440}  # Daily
+    response = requests.get(url, params=params)
+    raw = response.json()["result"]["XETHZUSD"]
+    latest_day = raw[-2]  # Use yesterday's candle
+    high = float(latest_day[2])
+    low = float(latest_day[3])
+    close = float(latest_day[4])
+    return high, low, close
 
 # === Scoring Logic ===
 def score_probability(price, level_price, rsi, rsi_trend, price_trend, volume, avg_volume):
@@ -125,17 +141,18 @@ async def scan_camarilla_levels():
     avg_volume = recent["volume"].mean()
     volume = latest["volume"]
 
-    # Use daily high/low for Camarilla
-    levels = calculate_camarilla(df["high"].max(), df["low"].min(), df["close"].iloc[-1])
+    # Use daily OHLC for Camarilla pivots
+    daily_high, daily_low, daily_close = fetch_daily_ohlc()
+    levels = calculate_camarilla(daily_high, daily_low, daily_close)
+
     closest_level = min(levels.items(), key=lambda x: abs(x[1] - price))
     level_name, level_price = closest_level
 
-    # Check cooldown
     now = datetime.datetime.now(UTC)
     if level_name in last_alert_time:
         delta = now - last_alert_time[level_name]
         if delta.total_seconds() < 600:
-            return  # 10 minute cooldown
+            return  # 10-minute cooldown
 
     # Bias logic
     is_upper = "H" in level_name
@@ -145,15 +162,28 @@ async def scan_camarilla_levels():
     volume_match = volume > avg_volume
     agreement = sum([direction_match, rsi_match, candle_match, volume_match])
 
+    # === Override Filters ===
+    proximity = abs(price - level_price) / level_price
+    if 45 <= rsi <= 55:
+        print("⚠️ Override: RSI neutral")
+        return
+    if volume < avg_volume * 0.9:
+        print("⚠️ Override: Low volume")
+        return
+    if proximity > 0.005:  # 0.5%
+        print("⚠️ Override: Price too far from level")
+        return
+
+    # === Proceed with Alert ===
     outcome = determine_outcome(agreement)
     score, prob_label = score_probability(price, level_price, rsi, rsi_trend, direction_match, volume, avg_volume)
     bias = "Break" if agreement >= 3 else "Reversal"
 
-    # Send embed
     channel = bot.get_channel(CHANNEL_ID)
     embed = build_warning_embed(level_name, level_price, price, bias, score, prob_label, outcome)
     await channel.send(embed=embed)
     last_alert_time[level_name] = now
+
 
 # === Bot Ready Event ===
 @bot.event
