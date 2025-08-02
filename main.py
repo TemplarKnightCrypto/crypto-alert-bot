@@ -608,9 +608,9 @@ async def send_battle_signal(direction, level_name, level_price, entry, stop_los
     except Exception as e:
         logger.error(f"Error sending battle signal: {e}")
 
-@tasks.loop(minutes=5)
+@tasks.loop(minutes=15)
 async def send_market_chronicle():
-    """Send enhanced scorecard to scribes-keep every 5 minutes."""
+    """Send enhanced scorecard to scribes-keep every 15 minutes."""
     await send_enhanced_scorecard()
 
 @tasks.loop(minutes=1)
