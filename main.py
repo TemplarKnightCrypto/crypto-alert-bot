@@ -868,7 +868,7 @@ async def check_camarilla_warning():
 
 @tasks.loop(minutes=15)
 async def battleground_update():
-    """Send quick market updates to eth-battleground."""
+    """Send quick market updates to eth-battleground as an embed, including Camarilla proximity."""
     try:
         df = fetch_ohlc("ETH", interval=1)
         if df is None:
@@ -885,40 +885,89 @@ async def battleground_update():
         avg_volume = df["volume"].tail(10).mean()
         volume_ratio = volume / avg_volume
 
-        # Quick market pulse
-        if volume_ratio > 2.0:  # High volume spike
+        # Determine market condition status
+        if volume_ratio > 2.0:
             emoji = "🌋"
             status = "HIGH VOLATILITY"
+            color = discord.Color.orange()
         elif rsi > 70:
             emoji = "🔥"
             status = "OVERBOUGHT TERRITORY"
+            color = discord.Color.red()
         elif rsi < 30:
             emoji = "❄️"
             status = "OVERSOLD BOUNCE ZONE"
+            color = discord.Color.blue()
         elif volume_ratio > 1.5:
             emoji = "⚡"
             status = "INCREASED ACTIVITY"
+            color = discord.Color.gold()
         else:
             emoji = "🌊"
             status = "NORMAL CONDITIONS"
+            color = discord.Color.teal()
 
-        message = (
-            f"{emoji} **ETH BATTLEGROUND UPDATE**\n"
-            f"💰 **Price:** ${price:.2f}\n"
-            f"📊 **RSI:** {rsi:.1f}\n"
-            f"🔊 **Volume:** {volume_ratio:.1f}x average\n"
-            f"🎯 **Status:** {status}"
+        # === Camarilla Proximity ===
+        high, low, close = fetch_daily_ohlc()
+        if any(x is None for x in [high, low, close]):
+            return
+
+        cam = calculate_camarilla(high, low, close)
+        if not cam:
+            return
+
+        closest_level = min(cam.items(), key=lambda x: abs(x[1] - price))
+        level_name, level_price = closest_level
+        distance = price - level_price
+        distance_pct = (distance / price) * 100
+
+        # Determine directional label
+        if abs(distance_pct) < 0.1:
+            direction = "⚖️ At Level"
+        elif distance > 0:
+            direction = "🔼 Above"
+        else:
+            direction = "🔽 Below"
+
+        # Format timestamps
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        local_time = datetime.datetime.now().strftime('%I:%M %p')
+        utc_time = now_utc.strftime('%H:%M UTC')
+
+        # === Build Embed ===
+        embed = discord.Embed(
+            title=f"{emoji} ETH Battleground Update",
+            description="*Real-time field report from the frontline*",
+            color=color,
+            timestamp=now_utc
         )
+
+        embed.add_field(name="💰 Price", value=f"${price:.2f}", inline=True)
+        embed.add_field(name="📊 RSI", value=f"{rsi:.1f}", inline=True)
+        embed.add_field(name="🔊 Volume", value=f"{volume_ratio:.1f}x", inline=True)
+        embed.add_field(name="🎯 Status", value=status, inline=False)
+
+        embed.add_field(
+            name="🛡️ Camarilla Level Nearby",
+            value=(
+                f"**{level_name}**: ${level_price:.2f}\n"
+                f"{direction} • Δ {distance:+.2f} ({distance_pct:+.2f}%)"
+            ),
+            inline=False
+        )
+
+        embed.set_footer(text=f"🕒 Local: {local_time} | UTC: {utc_time}")
 
         channel = bot.get_channel(ETH_BATTLEGROUND_ID)
         if channel:
-            await channel.send(message)
+            await channel.send(embed=embed)
             logger.info("Battleground update sent")
 
     except Exception as e:
         logger.error(f"Error in battleground_update: {e}")
 
-@tasks.loop(hours=1)
+
+@tasks.loop(hours=5)
 async def heartbeat():
     """Send heartbeat to confirm bot is operational."""
     try:
