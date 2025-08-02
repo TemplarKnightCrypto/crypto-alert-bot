@@ -10,6 +10,7 @@ from flask import Flask
 import threading
 import logging
 import time
+import random
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from ta.momentum import RSIIndicator
@@ -345,7 +346,7 @@ async def send_enhanced_scorecard():
         df = fetch_ohlc("ETH", interval=1)
         if df is None:
             return
-            
+
         df = calculate_indicators(df)
         if df is None or len(df) < 5:
             return
@@ -356,36 +357,37 @@ async def send_enhanced_scorecard():
         macd_hist = latest["macd_hist"]
         volume = latest["volume"]
         avg_volume = df["volume"].tail(10).mean()
-        
+
         # Get Camarilla levels
         high, low, close = fetch_daily_ohlc()
         if any(x is None for x in [high, low, close]):
             return
-            
+
         levels = calculate_camarilla(high, low, close)
         if not levels:
             return
 
-        # Find closest level and key levels
+        # Find closest level
         closest_level = min(levels.items(), key=lambda x: abs(price - x[1]))
         level_name, level_price = closest_level
         distance = level_price - price
         distance_pct = (distance / price) * 100
 
+        direction = (
+            "Above" if price > level_price else
+            "Below" if price < level_price else
+            "At Level"
+        )
+
         # Calculate comprehensive score
         score, reasons, _ = evaluate_scorecard(df, levels)
-        
-        # Get next levels above and below
-        sorted_levels = sorted(levels.items(), key=lambda x: x[1])
-        above_levels = [l for l in sorted_levels if l[1] > price][:2]
-        below_levels = [l for l in reversed(sorted_levels) if l[1] < price][:2]
 
         # Determine market bias
         if score >= 5:
             bias = "🟢 Strong Bullish"
             bias_color = discord.Color.green()
         elif score >= 4:
-            bias = "🟡 Moderate Bullish" 
+            bias = "🟡 Moderate Bullish"
             bias_color = discord.Color.gold()
         elif score >= 3:
             bias = "⚪ Neutral"
@@ -404,7 +406,7 @@ async def send_enhanced_scorecard():
 
         embed = discord.Embed(
             title="📜 ETH Market Chronicle",
-            description=f"*The scribes record the current state of the battlefield*",
+            description="*The scribes record the current state of the battlefield*",
             color=bias_color,
             timestamp=datetime.datetime.now(datetime.timezone.utc)
         )
@@ -421,7 +423,7 @@ async def send_enhanced_scorecard():
         distance_emoji = "🎯" if abs(distance_pct) < 0.5 else "📍"
         embed.add_field(
             name=f"{distance_emoji} Level in Focus",
-            value=f"**{level_name}: ${level_price:.2f}**\n{distance_pct:+.2f}% (${distance:+.2f})",
+            value=f"**{level_name}: ${level_price:.2f}**\n{direction} • {distance_pct:+.2f}% (${distance:+.2f})",
             inline=True
         )
 
@@ -432,7 +434,7 @@ async def send_enhanced_scorecard():
             inline=True
         )
 
-        # Technical indicators with actual values
+        # Technical indicators
         rsi_emoji = "🟢" if rsi > 55 else "🔴" if rsi < 45 else "⚪"
         macd_emoji = "🟢" if macd_hist > 0 else "🔴"
         volume_ratio = volume / avg_volume
@@ -446,22 +448,29 @@ async def send_enhanced_scorecard():
             f"{volume_emoji} **Volume:** {volume_ratio:.1f}x avg ({volume:.0f})\n"
             f"{vwap_emoji} **VWAP:** ${vwap_diff:+.2f} ({'Above' if vwap_diff > 0 else 'Below'})"
         )
-        
+
         embed.add_field(
             name="📊 Technical Indicators",
             value=indicators_text,
             inline=False
         )
 
-        # Level map
+        # Battlefield map
+        level_order = ["H5", "H4", "H3", "Pivot", "L3", "L4", "L5"]
+        ordered_levels = [(name, levels[name]) for name in level_order if name in levels]
+
         level_map = "```\n"
-        for name, val in above_levels:
-            level_map += f"{name:<6} ${val:>8.2f} (+${val-price:>6.2f})\n"
+        for name, val in ordered_levels:
+            if val > price:
+                level_map += f"{name:<6} ${val:>8.2f} (+${val - price:>6.2f})\n"
+
         level_map += f"{'═'*25}\n"
-        level_map += f"NOW    ${price:>8.2f} ═══════\n"
+        level_map += f"YOU ➤  ${price:>8.2f}\n"
         level_map += f"{'═'*25}\n"
-        for name, val in below_levels:
-            level_map += f"{name:<6} ${val:>8.2f} (-${price-val:>6.2f})\n"
+
+        for name, val in reversed(ordered_levels):
+            if val < price:
+                level_map += f"{name:<6} ${val:>8.2f} (-${price - val:>6.2f})\n"
         level_map += "```"
 
         embed.add_field(
@@ -470,18 +479,34 @@ async def send_enhanced_scorecard():
             inline=False
         )
 
-        # Confluence reasons
+        # Confluence
         if reasons:
-            confluence_text = "\n".join(reasons[:6])  # Limit to 6 reasons
+            confluence_text = "\n".join(reasons[:6])
             embed.add_field(
                 name="⚖️ Confluence Analysis",
                 value=confluence_text,
                 inline=False
             )
 
-        ct_time = embed.timestamp.astimezone(CENTRAL_TZ).strftime('%I:%M %p')
-        embed.set_footer(text=f"🕒 Central Time: {ct_time} | Next chronicle in 5 minutes")
+        # Optional lore quote
+        scribe_quotes = [
+            "“The ink is fresh, the path unclear.”",
+            "“From signal to scroll, truth shall unfold.”",
+            "“Let the candle bear witness to the realm’s pulse.”",
+            "“In quiet patterns, the future is foretold.”",
+        ]
+        embed.add_field(
+            name="📜 Words of the Scribe",
+            value=random.choice(scribe_quotes),
+            inline=False
+        )
 
+        # Footer: both Central and UTC
+        utc_time = embed.timestamp.strftime('%H:%M UTC')
+        ct_time = embed.timestamp.astimezone(CENTRAL_TZ).strftime('%I:%M %p CT')
+        embed.set_footer(text=f"🕒 {ct_time} | {utc_time}")
+
+        # Send to Scribes-Keep
         channel = bot.get_channel(SCRIBES_KEEP_ID)
         if channel:
             await channel.send(embed=embed)
@@ -489,6 +514,7 @@ async def send_enhanced_scorecard():
 
     except Exception as e:
         logger.error(f"Error sending enhanced scorecard: {e}")
+
 
 # Proximity warnings for knights-watch
 async def send_proximity_warning(level_name, level_price, current_price, rsi, volume_ratio, trend):
@@ -608,10 +634,12 @@ async def send_battle_signal(direction, level_name, level_price, entry, stop_los
     except Exception as e:
         logger.error(f"Error sending battle signal: {e}")
 
-@tasks.loop(minutes=15)
+@tasks.loop(minutes=1)
 async def send_market_chronicle():
-    """Send enhanced scorecard to scribes-keep every 15 minutes."""
-    await send_enhanced_scorecard()
+    """Send enhanced scorecard at :00, :15, :30, :45."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if now.minute % 15 == 0:
+        await send_enhanced_scorecard()
 
 @tasks.loop(minutes=1)
 async def scan_trade_alerts():
@@ -866,14 +894,13 @@ async def check_camarilla_warning():
     except Exception as e:
         logger.error(f"Error in check_camarilla_warning: {e}")
 
-@tasks.loop(minutes=15)
-async def battleground_update():
+async def send_battleground_embed():
     """Send quick market updates to eth-battleground as an embed, including Camarilla proximity."""
     try:
         df = fetch_ohlc("ETH", interval=1)
         if df is None:
             return
-            
+        
         df = calculate_indicators(df)
         if df is None or len(df) < 5:
             return
@@ -885,7 +912,6 @@ async def battleground_update():
         avg_volume = df["volume"].tail(10).mean()
         volume_ratio = volume / avg_volume
 
-        # Determine market condition status
         if volume_ratio > 2.0:
             emoji = "🌋"
             status = "HIGH VOLATILITY"
@@ -907,7 +933,6 @@ async def battleground_update():
             status = "NORMAL CONDITIONS"
             color = discord.Color.teal()
 
-        # === Camarilla Proximity ===
         high, low, close = fetch_daily_ohlc()
         if any(x is None for x in [high, low, close]):
             return
@@ -921,7 +946,6 @@ async def battleground_update():
         distance = price - level_price
         distance_pct = (distance / price) * 100
 
-        # Determine directional label
         if abs(distance_pct) < 0.1:
             direction = "⚖️ At Level"
         elif distance > 0:
@@ -929,12 +953,10 @@ async def battleground_update():
         else:
             direction = "🔽 Below"
 
-        # Format timestamps
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         local_time = datetime.datetime.now().strftime('%I:%M %p')
         utc_time = now_utc.strftime('%H:%M UTC')
 
-        # === Build Embed ===
         embed = discord.Embed(
             title=f"{emoji} ETH Battleground Update",
             description="*Real-time field report from the frontline*",
@@ -966,6 +988,11 @@ async def battleground_update():
     except Exception as e:
         logger.error(f"Error in battleground_update: {e}")
 
+@tasks.loop(minutes=1)
+async def battleground_loop():
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if now.minute in [7, 23, 37, 52]:
+        await send_battleground_embed()
 
 @tasks.loop(hours=5)
 async def heartbeat():
@@ -1059,8 +1086,8 @@ async def on_ready():
             scan_trade_alerts.start()
         if not trade_100x_scan.is_running():
             trade_100x_scan.start()
-        if not battleground_update.is_running():
-            battleground_update.start()
+        if not battleground_loop.is_running():
+            battleground_loop.start()
         if not performance_report.is_running():
             performance_report.start()
             
