@@ -36,12 +36,12 @@ if not TOKEN:
     exit(1)
 
 # Discord Channel Configuration - Update with your actual channel IDs
-SCRIBES_KEEP_ID = 1399532442075005038          # Main analytics/scorecard
-BATTLE_SIGNALS_ID = 1398690647417819198        # High-probability trades  
-EAGLE_SIGNAL_ID = 1399532925279666278          # Premium 100x signals
-KNIGHTS_WATCH_ID = 1399067396488302623         # Proximity warnings
-ETH_BATTLEGROUND_ID = 1399532102571135118      # Real-time updates
-SCROLLS_ORDER_ID = 1398691425347961016         # Performance/history
+SCRIBES_KEEP_ID = 1398691425347961016          # Main analytics/scorecard
+BATTLE_SIGNALS_ID = 1399532925279666278        # High-probability trades  
+EAGLE_SIGNAL_ID = 1398690647417819198          # Premium 100x signals
+KNIGHTS_WATCH_ID = 1399532102571135118         # Proximity warnings
+ETH_BATTLEGROUND_ID = 1399532442075005038      # Real-time updates
+SCROLLS_ORDER_ID = 1399067396488302623         # Performance/history
 
 # Heartbeat channels (status updates)
 HEARTBEAT_CHANNEL_IDS = [
