@@ -1,4 +1,3 @@
-# === ETH Camarilla Trade Alert Bot ===
 
 import os
 import discord
@@ -20,11 +19,23 @@ TOKEN = os.getenv("TOKEN")
 
 # === Channel IDs ===
 SCORECARD_CHANNEL_ID = 1399532442075005038  # 🏰・eth-battleground
+EAGLE_SIGNAL_CHANNEL_ID = 1398690647417819198  # 🦅・eagle-signal
 TRADE_100X_CHANNEL_ID = 1399532925279666278  # ⚔️・battle-signals
+
+HEARTBEAT_CHANNEL_IDS = [
+    1399067396488302623,  # 📜・scrolls-of-the-order
+    1399532102571135118,  # 🕰️・knights’-watch
+    1398691425347961016,  # ✒️・scribe’s-keep
+    SCORECARD_CHANNEL_ID,
+    EAGLE_SIGNAL_CHANNEL_ID,
+    TRADE_100X_CHANNEL_ID
+]
 
 # === Globals ===
 last_100x_trade_time = None
 last_scorecard_sent = None
+camarilla_warning_cooldowns = {}
+last_trade_alert_time = {}
 
 # === Timezones ===
 UTC = pytz.utc
@@ -42,7 +53,6 @@ def run_flask():
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# === Fetch OHLC Data ===
 def fetch_ohlc(symbol="ETH", interval=1):
     kraken_map = {"ETH": "XETHZUSD"}
     pair = kraken_map.get(symbol.upper(), "XETHZUSD")
@@ -56,13 +66,11 @@ def fetch_ohlc(symbol="ETH", interval=1):
     df.set_index("datetime", inplace=True)
     return df
 
-# === Fetch Daily OHLC for Camarilla ===
 def fetch_daily_ohlc():
     df = fetch_ohlc(interval=1440)
     latest = df.iloc[-2]
     return latest["high"], latest["low"], latest["close"]
 
-# === Calculate Camarilla Levels ===
 def calculate_camarilla(high, low, close):
     D4 = 0.55
     D3 = 0.275
@@ -75,10 +83,6 @@ def calculate_camarilla(high, low, close):
     P = (high + low + close) / 3
     return {"H5": H5, "H4": H4, "H3": H3, "L3": L3, "L4": L4, "L5": L5, "Pivot": P}
 
-def calculate_camarilla_levels(high, low, close):
-    return calculate_camarilla(high, low, close)
-
-# === Apply Indicators ===
 def calculate_indicators(df):
     df["rsi"] = RSIIndicator(close=df["close"], window=14).rsi()
     df["vwap"] = (df["volume"] * (df["high"] + df["low"] + df["close"]) / 3).cumsum() / df["volume"].cumsum()
@@ -87,121 +91,11 @@ def calculate_indicators(df):
     df["macd_hist"] = df["macd"] - df["macd_signal"]
     return df.dropna()
 
-# === Knight Assignment ===
-def assign_knight(direction):
-    return "Sir Leonis Ironhart" if direction == "Long" else "Sir Lucien Frostveil"
-
-# === Trade Confidence Scoring ===
-def score_trade(rsi, rsi_trend, direction, price, level_price, volume, avg_volume, price_trend):
-    direction_match = (price_trend and direction == "Long") or (not price_trend and direction == "Short")
-    rsi_match = (rsi_trend == "up" and direction == "Long") or (rsi_trend == "down" and direction == "Short")
-    rsi_score = (rsi > 55 if direction == "Long" else rsi < 45)
-    proximity = abs(price - level_price) / level_price < 0.003
-    volume_confirm = volume > avg_volume * 1.2
-    return sum([direction_match, rsi_match, rsi_score, proximity, volume_confirm])
-
-# === Scorecard Logic ===
-def evaluate_scorecard(df, cam_levels):
-    latest = df.iloc[-1]
-    prev_10 = df.iloc[-11:-1]
-
-    score = 0
-    reasons = []
-
-    price = latest['close']
-    rsi_val = latest['rsi']
-    macd_hist = latest['macd_hist']
-    vwap = latest['vwap']
-    volume = latest['volume']
-    avg_volume = prev_10['volume'].mean()
-
-    all_levels = [cam_levels[lvl] for lvl in ['L3', 'L4', 'L5', 'H3', 'H4', 'H5']]
-    nearest = min(all_levels, key=lambda x: abs(price - x))
-    near_level = abs(price - nearest) / price <= 0.0025
-    if near_level:
-        score += 1
-        reasons.append("Price near Camarilla ✅")
-
-    if (price <= nearest and rsi_val < 40) or (price >= nearest and rsi_val > 60):
-        score += 1
-        reasons.append("RSI aligned ✅")
-    else:
-        reasons.append("RSI neutral ❌")
-
-    candle_body = abs(latest['close'] - latest['open'])
-    candle_range = latest['high'] - latest['low']
-    body_to_range = candle_body / candle_range if candle_range > 0 else 0
-    if body_to_range > 0.5:
-        score += 1
-        reasons.append("Strong candle ✅")
-    else:
-        reasons.append("Weak candle ❌")
-
-    if volume > avg_volume * 1.2:
-        score += 1
-        reasons.append("Volume spike ✅")
-    else:
-        reasons.append("Volume normal ❌")
-
-    if (price > vwap and nearest > price) or (price < vwap and nearest < price):
-        score += 1
-        reasons.append("VWAP aligned ✅")
-    else:
-        reasons.append("VWAP misaligned ❌")
-
-    if (price > nearest and macd_hist > 0) or (price < nearest and macd_hist < 0):
-        score += 1
-        reasons.append("MACD histogram ✅")
-    else:
-        reasons.append("MACD mismatch ❌")
-
-    return score, reasons, nearest
-
-# === 100x Trade Detection ===
-def detect_100x_trade(df, cam):
-    global last_100x_trade_time
-    latest = df.iloc[-1]
-    prev_10 = df.iloc[-11:-1]
-
-    score, reasons, level = evaluate_scorecard(df, cam)
-    now = datetime.datetime.now(datetime.timezone.utc)
-
-    if score < 5:
-        return None
-
-    price = latest['close']
-    volume = latest['volume']
-    avg_volume = prev_10['volume'].mean()
-    body = abs(latest['close'] - latest['open'])
-    range_ = latest['high'] - latest['low']
-    body_ratio = body / range_ if range_ > 0 else 0
-
-    breakout_confirmed = (
-        (price > level and latest['open'] < level) or
-        (price < level and latest['open'] > level)
-    ) and body_ratio > 0.5 and volume > avg_volume * 1.2
-
-    if not breakout_confirmed or (last_100x_trade_time and (now - last_100x_trade_time).total_seconds() < 900):
-        return None
-
-    last_100x_trade_time = now
-
-    direction = "Long" if price > level else "Short"
-    entry = price
-    sl = entry * (0.99 if direction == "Long" else 1.01)
-    tp1 = entry * (1.015 if direction == "Long" else 0.985)
-    tp2 = entry * (1.03 if direction == "Long" else 0.97)
-
-    return {
-        "direction": direction, "entry": entry, "tp1": tp1, "tp2": tp2, "sl": sl,
-        "score": score, "reasons": reasons, "level": level, "timestamp": now
-    }
-
-# === Camarilla Trade Alert ===
 @tasks.loop(minutes=1)
 async def scan_trade_alerts():
+    global last_trade_alert_time
     df = fetch_ohlc("ETH", interval=1)
-    df["rsi"] = RSIIndicator(close=df["close"], window=14).rsi()
+    df = calculate_indicators(df)
     df = df.dropna()
     latest = df.iloc[-1]
     recent = df[-5:]
@@ -214,7 +108,7 @@ async def scan_trade_alerts():
     rsi_trend = "up" if df["rsi"].iloc[-1] > df["rsi"].iloc[-3] else "down"
 
     high, low, close = fetch_daily_ohlc()
-    levels = calculate_camarilla_levels(high, low, close)
+    levels = calculate_camarilla(high, low, close)
 
     df5 = fetch_ohlc("ETH", interval=5)
     confirm = df5.iloc[-1]
@@ -223,10 +117,16 @@ async def scan_trade_alerts():
     strong_body = body / wick > 0.5 if wick else False
     volume_valid = confirm["volume"] > df5["volume"].iloc[-5:].mean() * 1.2
 
+    now = datetime.datetime.utcnow()
     for name, lvl in levels.items():
+        if name == "Pivot":
+            continue
         is_upper = "H" in name
         broken = (confirm["close"] > lvl and confirm["open"] < lvl) if is_upper else (confirm["close"] < lvl and confirm["open"] > lvl)
         if not broken or not strong_body or not volume_valid:
+            continue
+
+        if name in last_trade_alert_time and (now - last_trade_alert_time[name]).total_seconds() < 1800:
             continue
 
         direction = "Long" if is_upper else "Short"
@@ -264,73 +164,68 @@ async def scan_trade_alerts():
 
         channel = bot.get_channel(SCORECARD_CHANNEL_ID)
         await channel.send(embed=embed)
+        last_trade_alert_time[name] = now
 
-# === Scorecard Task ===
-@tasks.loop(minutes=5)
-async def scorecard_check():
-    global last_scorecard_sent
-    df = fetch_ohlc("ETH", interval=5)
-    if df is None or len(df) < 20:
-        return
-    df = calculate_indicators(df)
-    high, low, close = fetch_daily_ohlc()
-    cam = calculate_camarilla_levels(high, low, close)
-    score, reasons, level = evaluate_scorecard(df, cam)
-
-    now = datetime.datetime.now(datetime.timezone.utc)
-    if last_scorecard_sent and (now - last_scorecard_sent).seconds < 300:
-        return
-    last_scorecard_sent = now
-
-    embed = discord.Embed(
-        title=f"📊 ETH Camarilla Scorecard",
-        description=f"🧠 Confluence Score: **{score} / 6**\n🎯 Level in focus: `${level:,.2f}`\n\n" + "\n".join(reasons),
-        color=0x7289da
-    )
-    embed.set_footer(text=f"UTC Time: {now.strftime('%H:%M')}")
-    embed.add_field(name="⚠️ Note", value="This is a scorecard only. Not a trade signal.", inline=False)
-
-    channel = bot.get_channel(SCORECARD_CHANNEL_ID)
-    await channel.send(embed=embed)
-
-# === 100x Trade Alert ===
 @tasks.loop(minutes=1)
 async def trade_100x_scan():
+    global last_100x_trade_time
     df = fetch_ohlc("ETH", interval=5)
+    df = calculate_indicators(df)
     if df is None or len(df) < 20:
         return
-    df = calculate_indicators(df)
+
     high, low, close = fetch_daily_ohlc()
-    cam = calculate_camarilla_levels(high, low, close)
-    result = detect_100x_trade(df, cam)
-    if not result:
+    cam = calculate_camarilla(high, low, close)
+    score, reasons, level = evaluate_scorecard(df, cam)
+
+    now = datetime.datetime.utcnow()
+    if score < 5 or (last_100x_trade_time and (now - last_100x_trade_time).total_seconds() < 900):
         return
 
+    latest = df.iloc[-1]
+    prev_10 = df.iloc[-11:-1]
+    price = latest["close"]
+    volume = latest["volume"]
+    avg_volume = prev_10["volume"].mean()
+    body = abs(latest["close"] - latest["open"])
+    range_ = latest["high"] - latest["low"]
+    body_ratio = body / range_ if range_ > 0 else 0
+    breakout_confirmed = (
+        (price > level and latest["open"] < level) or (price < level and latest["open"] > level)
+    ) and body_ratio > 0.5 and volume > avg_volume * 1.2
+
+    if not breakout_confirmed:
+        return
+
+    direction = "Long" if price > level else "Short"
+    entry = price
+    sl = entry * (0.99 if direction == "Long" else 1.01)
+    tp1 = entry * (1.015 if direction == "Long" else 0.985)
+    tp2 = entry * (1.03 if direction == "Long" else 0.97)
+
     embed = discord.Embed(
-        title=f"⚔️ 100x Trade Alert – ETH {result['direction']}",
+        title=f"⚔️ 100x Trade Alert – ETH {direction}",
         description=(
-            f"📍 **Entry:** `${result['entry']:.2f}`\n"
-            f"🎯 **TP1:** `${result['tp1']:.2f}`\n"
-            f"🎯 **TP2:** `${result['tp2']:.2f}`\n"
-            f"🛡️ **SL:** `${result['sl']:.2f}`\n\n"
-            f"📊 **Confluence Score:** {result['score']} / 6\n" + "\n".join(result['reasons'])
+            f"📍 **Entry:** `${entry:.2f}`\n"
+            f"🎯 **TP1:** `${tp1:.2f}`\n"
+            f"🎯 **TP2:** `${tp2:.2f}`\n"
+            f"🛡️ **SL:** `${sl:.2f}`\n\n"
+            f"📊 **Confluence Score:** {score} / 6\n" + "\n".join(reasons)
         ),
-        color=0xD32F2F if result['direction'] == "Short" else 0x2E7D32
+        color=0xD32F2F if direction == "Short" else 0x2E7D32
     )
-    embed.set_footer(text=f"5-min | UTC: {result['timestamp'].strftime('%H:%M')} | High-Leverage Trade")
+    embed.set_footer(text=f"🕒 UTC: {now.strftime('%Y-%m-%d %H:%M:%S')} | CT: {now.astimezone(CENTRAL_TZ).strftime('%I:%M %p')} | High-Leverage Trade")
 
     channel = bot.get_channel(TRADE_100X_CHANNEL_ID)
     await channel.send(embed=embed)
+    last_100x_trade_time = now
 
-# === On Ready ===
 @bot.event
 async def on_ready():
     print(f"🟢 Logged in as {bot.user}")
-    scan_trade_alerts.start()
+    heartbeat.start()
+    check_camarilla_warning.start()
     scorecard_check.start()
+    scan_trade_alerts.start()
     trade_100x_scan.start()
 
-# === Start Flask + Discord Bot ===
-if __name__ == "__main__":
-    threading.Thread(target=run_flask).start()
-    bot.run(TOKEN)
