@@ -370,19 +370,14 @@ async def send_enhanced_scorecard():
         # Find closest level
         closest_level = min(levels.items(), key=lambda x: abs(price - x[1]))
         level_name, level_price = closest_level
-        distance = level_price - price
+        distance = price - level_price
         distance_pct = (distance / price) * 100
+        level_direction = "Above" if price > level_price else "Below"
 
-        direction = (
-            "Above" if price > level_price else
-            "Below" if price < level_price else
-            "At Level"
-        )
-
-        # Calculate comprehensive score
+        # Scorecard
         score, reasons, _ = evaluate_scorecard(df, levels)
 
-        # Determine market bias
+        # Market bias
         if score >= 5:
             bias = "🟢 Strong Bullish"
             bias_color = discord.Color.green()
@@ -399,11 +394,12 @@ async def send_enhanced_scorecard():
             bias = "🔴 Strong Bearish"
             bias_color = discord.Color.red()
 
-        # Price change calculation
+        # Price change vs 24h
         price_24h_ago = df.iloc[-1440] if len(df) >= 1440 else df.iloc[0]
         price_change = price - price_24h_ago["close"]
         price_change_pct = (price_change / price_24h_ago["close"]) * 100
 
+        # === Embed Start ===
         embed = discord.Embed(
             title="📜 ETH Market Chronicle",
             description="*The scribes record the current state of the battlefield*",
@@ -411,7 +407,7 @@ async def send_enhanced_scorecard():
             timestamp=datetime.datetime.now(datetime.timezone.utc)
         )
 
-        # Current price section
+        # Current Price
         price_emoji = "📈" if price_change >= 0 else "📉"
         embed.add_field(
             name=f"{price_emoji} Current Price",
@@ -419,27 +415,27 @@ async def send_enhanced_scorecard():
             inline=True
         )
 
-        # Key level focus
-        distance_emoji = "🎯" if abs(distance_pct) < 0.5 else "📍"
+        # Level in Focus
+        distance_emoji = "📍"
         embed.add_field(
             name=f"{distance_emoji} Level in Focus",
-            value=f"**{level_name}: ${level_price:.2f}**\n{direction} • {distance_pct:+.2f}% (${distance:+.2f})",
+            value=f"**{level_name}: ${level_price:.2f}**\n{level_direction} • {distance_pct:+.2f}% (${distance:+.2f})",
             inline=True
         )
 
-        # Market bias
+        # Market Bias
         embed.add_field(
             name="🧠 Market Bias",
             value=f"**{bias}**\nScore: {score}/6",
             inline=True
         )
 
-        # Technical indicators
+        # === Technical Indicators ===
         rsi_emoji = "🟢" if rsi > 55 else "🔴" if rsi < 45 else "⚪"
         macd_emoji = "🟢" if macd_hist > 0 else "🔴"
-        volume_ratio = volume / avg_volume
+        volume_ratio = volume / avg_volume if avg_volume else 0
         volume_emoji = "🟢" if volume_ratio > 1.2 else "🔴" if volume_ratio < 0.8 else "⚪"
-        vwap_diff = price - latest["vwap"]
+        vwap_diff = price - latest.get("vwap", 0)
         vwap_emoji = "🟢" if vwap_diff > 0 else "🔴"
 
         indicators_text = (
@@ -455,22 +451,27 @@ async def send_enhanced_scorecard():
             inline=False
         )
 
-        # Battlefield map
+        # === Battlefield Map ===
         level_order = ["H5", "H4", "H3", "Pivot", "L3", "L4", "L5"]
         ordered_levels = [(name, levels[name]) for name in level_order if name in levels]
 
         level_map = "```\n"
         for name, val in ordered_levels:
             if val > price:
-                level_map += f"{name:<6} ${val:>8.2f} (+${val - price:>6.2f})\n"
+                diff = val - price
+                level_map += f"{name:<6} ${val:>8.2f} (+${diff:>6.2f})\n"
 
-        level_map += f"{'═'*25}\n"
-        level_map += f"YOU ➤  ${price:>8.2f}\n"
-        level_map += f"{'═'*25}\n"
+        level_map += f"{'─'*28}\n"
+        level_map += f"YOU  ➤  ${price:>8.2f}\n"
+        level_map += f"{'─'*28}\n"
 
-        for name, val in reversed(ordered_levels):
-            if val < price:
-                level_map += f"{name:<6} ${val:>8.2f} (-${price - val:>6.2f})\n"
+        # L3–L5 in ascending order (closest to lowest)
+        for name in ["L3", "L4", "L5"]:
+            if name in levels and levels[name] < price:
+                val = levels[name]
+                diff = price - val
+                level_map += f"{name:<6} ${val:>8.2f} (-${diff:>6.2f})\n"
+
         level_map += "```"
 
         embed.add_field(
@@ -479,34 +480,19 @@ async def send_enhanced_scorecard():
             inline=False
         )
 
-        # Confluence
+        # === Confluence Analysis ===
         if reasons:
-            confluence_text = "\n".join(reasons[:6])
             embed.add_field(
                 name="⚖️ Confluence Analysis",
-                value=confluence_text,
+                value="\n".join(reasons[:6]),
                 inline=False
             )
 
-        # Optional lore quote
-        scribe_quotes = [
-            "“The ink is fresh, the path unclear.”",
-            "“From signal to scroll, truth shall unfold.”",
-            "“Let the candle bear witness to the realm’s pulse.”",
-            "“In quiet patterns, the future is foretold.”",
-        ]
-        embed.add_field(
-            name="📜 Words of the Scribe",
-            value=random.choice(scribe_quotes),
-            inline=False
-        )
-
-        # Footer: both Central and UTC
+        # === Footer ===
+        ct_time = embed.timestamp.astimezone(CENTRAL_TZ).strftime('%I:%M %p')
         utc_time = embed.timestamp.strftime('%H:%M UTC')
-        ct_time = embed.timestamp.astimezone(CENTRAL_TZ).strftime('%I:%M %p CT')
-        embed.set_footer(text=f"🕒 {ct_time} | {utc_time}")
+        embed.set_footer(text=f"🕒 {ct_time} | {utc_time} • Today at {ct_time}")
 
-        # Send to Scribes-Keep
         channel = bot.get_channel(SCRIBES_KEEP_ID)
         if channel:
             await channel.send(embed=embed)
