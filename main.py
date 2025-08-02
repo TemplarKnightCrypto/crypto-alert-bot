@@ -81,7 +81,7 @@ def evaluate_scorecard(df, cam):
     level = cam["H3"] if price > cam["Pivot"] else cam["L3"]
     return score, reasons, level
 
-@tasks.loop(minutes=1)
+@tasks.loop(hours=1)
 async def heartbeat():
     now = datetime.datetime.now(datetime.timezone.utc)
     ct_time = now.astimezone(CENTRAL_TZ).strftime("%I:%M %p")
