@@ -660,7 +660,6 @@ async def send_market_chronicle():
         await send_enhanced_scorecard()
 
 @tasks.loop(minutes=1)
-@tasks.loop(minutes=1)
 async def scan_trade_alerts():
     """Scan for trade alerts and send to battle-signals."""
     global last_trade_alert_time
