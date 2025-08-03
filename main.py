@@ -1,3 +1,8 @@
+
+# ============================================
+# The Control Tower - Templar Knight Crypto
+# ============================================
+
 import os
 import discord
 import asyncio
@@ -15,6 +20,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from ta.momentum import RSIIndicator
 from ta.trend import MACD
+from ta.trend import EMAIndicator
 
 # Configure logging
 logging.basicConfig(
@@ -199,6 +205,7 @@ def calculate_camarilla(high, low, close):
         logger.error(f"Error calculating Camarilla levels: {e}")
         return {}
 
+
 def calculate_indicators(df):
     """Calculate technical indicators with error handling."""
     if df is None or len(df) < 20:
@@ -207,6 +214,10 @@ def calculate_indicators(df):
         
     try:
         df = df.copy()
+        
+        # EMA10 & EMA20 (needed for reversal logic)
+        df["ema10"] = EMAIndicator(close=df["close"], window=10).ema_indicator()
+        df["ema20"] = EMAIndicator(close=df["close"], window=20).ema_indicator()
         
         # RSI
         df["rsi"] = RSIIndicator(close=df["close"], window=14).rsi()
