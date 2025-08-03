@@ -399,7 +399,6 @@ async def send_enhanced_scorecard():
         price_change = price - price_24h_ago["close"]
         price_change_pct = (price_change / price_24h_ago["close"]) * 100
 
-        # === Embed Start ===
         embed = discord.Embed(
             title="📜 ETH Market Chronicle",
             description="*The scribes record the current state of the battlefield*",
@@ -407,7 +406,7 @@ async def send_enhanced_scorecard():
             timestamp=datetime.datetime.now(datetime.timezone.utc)
         )
 
-        # Current Price
+        # Price Overview
         price_emoji = "📈" if price_change >= 0 else "📉"
         embed.add_field(
             name=f"{price_emoji} Current Price",
@@ -415,22 +414,19 @@ async def send_enhanced_scorecard():
             inline=True
         )
 
-        # Level in Focus
-        distance_emoji = "📍"
         embed.add_field(
-            name=f"{distance_emoji} Level in Focus",
+            name="📍 Level in Focus",
             value=f"**{level_name}: ${level_price:.2f}**\n{level_direction} • {distance_pct:+.2f}% (${distance:+.2f})",
             inline=True
         )
 
-        # Market Bias
         embed.add_field(
             name="🧠 Market Bias",
             value=f"**{bias}**\nScore: {score}/6",
             inline=True
         )
 
-        # === Technical Indicators ===
+        # Indicators
         rsi_emoji = "🟢" if rsi > 55 else "🔴" if rsi < 45 else "⚪"
         macd_emoji = "🟢" if macd_hist > 0 else "🔴"
         volume_ratio = volume / avg_volume if avg_volume else 0
@@ -444,54 +440,33 @@ async def send_enhanced_scorecard():
             f"{volume_emoji} **Volume:** {volume_ratio:.1f}x avg ({volume:.0f})\n"
             f"{vwap_emoji} **VWAP:** ${vwap_diff:+.2f} ({'Above' if vwap_diff > 0 else 'Below'})"
         )
+        embed.add_field(name="📊 Technical Indicators", value=indicators_text, inline=False)
 
-        embed.add_field(
-            name="📊 Technical Indicators",
-            value=indicators_text,
-            inline=False
-        )
-
-        # === Battlefield Map ===
+        # Battlefield Map
         level_order = ["H5", "H4", "H3", "Pivot", "L3", "L4", "L5"]
-        ordered_levels = [(name, levels[name]) for name in level_order if name in levels]
-
+        ordered = [(k, levels[k]) for k in level_order if k in levels]
         level_map = "```\n"
-        for name, val in ordered_levels:
-            if val > price:
-                diff = val - price
-                level_map += f"{name:<6} ${val:>8.2f} (+${diff:>6.2f})\n"
-
-        level_map += f"{'─'*28}\n"
-        level_map += f"YOU  ➤  ${price:>8.2f}\n"
-        level_map += f"{'─'*28}\n"
-
-        # L3–L5 in ascending order (closest to lowest)
+        for name, val in ordered:
+            if name == "Pivot":
+                level_map += f"{name:<5} {val:>8.2f}\n"
+        for name in ["H5", "H4", "H3"]:
+            if name in levels and levels[name] > price:
+                level_map += f"{name:<5} {levels[name]:>8.2f}\n"
+        level_map += f"➤   Price {price:>8.2f}\n"
         for name in ["L3", "L4", "L5"]:
             if name in levels and levels[name] < price:
-                val = levels[name]
-                diff = price - val
-                level_map += f"{name:<6} ${val:>8.2f} (-${diff:>6.2f})\n"
-
+                level_map += f"{name:<5} {levels[name]:>8.2f}\n"
         level_map += "```"
+        embed.add_field(name="🗺️ Battlefield Map", value=level_map, inline=False)
 
-        embed.add_field(
-            name="🗺️ Battlefield Map",
-            value=level_map,
-            inline=False
-        )
-
-        # === Confluence Analysis ===
+        # Confluence Analysis
         if reasons:
-            embed.add_field(
-                name="⚖️ Confluence Analysis",
-                value="\n".join(reasons[:6]),
-                inline=False
-            )
+            embed.add_field(name="⚖️ Confluence Analysis", value="\n".join(reasons[:6]), inline=False)
 
-        # === Footer ===
-        ct_time = embed.timestamp.astimezone(CENTRAL_TZ).strftime('%I:%M %p')
+        # Footer with UTC + CT only
+        ct_time = embed.timestamp.astimezone(CENTRAL_TZ).strftime('%I:%M %p CT')
         utc_time = embed.timestamp.strftime('%H:%M UTC')
-        embed.set_footer(text=f"🕒 {ct_time} | {utc_time} • Today at {ct_time}")
+        embed.set_footer(text=f"🕒 {utc_time} | {ct_time}")
 
         channel = bot.get_channel(SCRIBES_KEEP_ID)
         if channel:
@@ -502,6 +477,7 @@ async def send_enhanced_scorecard():
         logger.error(f"Error sending enhanced scorecard: {e}")
 
 
+
 # Proximity warnings for knights-watch
 async def send_proximity_warning(level_name, level_price, current_price, rsi, volume_ratio, trend):
     """Send proximity warning to knights-watch."""
@@ -509,7 +485,6 @@ async def send_proximity_warning(level_name, level_price, current_price, rsi, vo
         distance = level_price - current_price
         distance_pct = (distance / current_price) * 100
         
-        # Analyze breakout probability
         is_resistance = "H" in level_name
         likely_break = (trend == "up" and is_resistance) or (trend == "down" and not is_resistance)
         rsi_supports = (rsi > 55 and is_resistance) or (rsi < 45 and not is_resistance)
@@ -526,29 +501,15 @@ async def send_proximity_warning(level_name, level_price, current_price, rsi, vo
             bias_color = 0xFFAA00
         
         embed = discord.Embed(
-            title=f"⚠️ Knight's Warning - Approaching {level_name}",
-            description=f"*The knights observe movement toward a critical level*",
+            title=f"⚠️ Knight's Warning - ETH Approaching {level_name}",
+            description="*The knights observe movement toward a critical level*",
             color=bias_color,
             timestamp=datetime.datetime.now(datetime.timezone.utc)
         )
 
-        embed.add_field(
-            name="🎯 Target Level",
-            value=f"**${level_price:.2f}**",
-            inline=True
-        )
-
-        embed.add_field(
-            name="📍 Current Price", 
-            value=f"**${current_price:.2f}**",
-            inline=True
-        )
-
-        embed.add_field(
-            name="📏 Distance",
-            value=f"**${distance:+.2f}**\n({distance_pct:+.2f}%)",
-            inline=True
-        )
+        embed.add_field(name="🎯 Target Level", value=f"**${level_price:.2f}**", inline=True)
+        embed.add_field(name="📍 Current Price", value=f"**${current_price:.2f}**", inline=True)
+        embed.add_field(name="📏 Distance", value=f"**${distance:+.2f}**\n({distance_pct:+.2f}%)", inline=True)
 
         analysis_text = (
             f"🎯 **Bias:** {bias}\n"
@@ -557,14 +518,11 @@ async def send_proximity_warning(level_name, level_price, current_price, rsi, vo
             f"🔊 **Volume:** {volume_ratio:.1f}x {'🟢' if volume_strong else '🔴'}"
         )
 
-        embed.add_field(
-            name="🔮 Analysis",
-            value=analysis_text,
-            inline=False
-        )
+        embed.add_field(name="🔮 Analysis", value=analysis_text, inline=False)
 
-        ct_time = embed.timestamp.astimezone(CENTRAL_TZ).strftime('%I:%M %p')
-        embed.set_footer(text=f"🕒 CT: {ct_time} | Knights remain vigilant")
+        ct = embed.timestamp.astimezone(CENTRAL_TZ).strftime('%I:%M %p CT')
+        utc = embed.timestamp.strftime('%H:%M UTC')
+        embed.set_footer(text=f"🕒 {utc} | {ct} • Knights remain vigilant")
 
         channel = bot.get_channel(KNIGHTS_WATCH_ID)
         if channel:
@@ -574,6 +532,7 @@ async def send_proximity_warning(level_name, level_price, current_price, rsi, vo
     except Exception as e:
         logger.error(f"Error sending proximity warning: {e}")
 
+
 # High-probability trades for battle-signals  
 async def send_battle_signal(direction, level_name, level_price, entry, stop_loss, targets, confidence, score):
     """Send trade signal to battle-signals."""
@@ -582,7 +541,7 @@ async def send_battle_signal(direction, level_name, level_price, entry, stop_los
         emoji = "🟩" if direction == "Long" else "🟥"
         
         embed = discord.Embed(
-            title=f"⚔️ Battle Signal - {direction} Formation",
+            title=f"⚔️ Battle Signal - ETH {direction} Formation",
             description=f"*{knight} calls for battle at {level_name}*",
             color=discord.Color.green() if direction == "Long" else discord.Color.red(),
             timestamp=datetime.datetime.now(datetime.timezone.utc)
@@ -609,8 +568,9 @@ async def send_battle_signal(direction, level_name, level_price, entry, stop_los
             inline=False
         )
 
-        ct_time = embed.timestamp.astimezone(CENTRAL_TZ).strftime('%I:%M %p')
-        embed.set_footer(text=f"🕒 CT: {ct_time} | May fortune favor the bold")
+        ct = embed.timestamp.astimezone(CENTRAL_TZ).strftime('%I:%M %p CT')
+        utc = embed.timestamp.strftime('%H:%M UTC')
+        embed.set_footer(text=f"🕒 {utc} | {ct} • May fortune favor the bold")
 
         channel = bot.get_channel(BATTLE_SIGNALS_ID)
         if channel:
@@ -619,6 +579,7 @@ async def send_battle_signal(direction, level_name, level_price, entry, stop_los
 
     except Exception as e:
         logger.error(f"Error sending battle signal: {e}")
+
 
 @tasks.loop(minutes=1)
 async def send_market_chronicle():
@@ -940,8 +901,6 @@ async def send_battleground_embed():
             direction = "🔽 Below"
 
         now_utc = datetime.datetime.now(datetime.timezone.utc)
-        local_time = datetime.datetime.now().strftime('%I:%M %p')
-        utc_time = now_utc.strftime('%H:%M UTC')
 
         embed = discord.Embed(
             title=f"{emoji} ETH Battleground Update",
@@ -964,7 +923,9 @@ async def send_battleground_embed():
             inline=False
         )
 
-        embed.set_footer(text=f"🕒 Local: {local_time} | UTC: {utc_time}")
+        ct = now_utc.astimezone(CENTRAL_TZ).strftime('%I:%M %p CT')
+        utc = now_utc.strftime('%H:%M UTC')
+        embed.set_footer(text=f"🕒 {utc} | {ct}")
 
         channel = bot.get_channel(ETH_BATTLEGROUND_ID)
         if channel:
@@ -973,6 +934,7 @@ async def send_battleground_embed():
 
     except Exception as e:
         logger.error(f"Error in battleground_update: {e}")
+
 
 @tasks.loop(minutes=1)
 async def battleground_loop():
@@ -986,29 +948,42 @@ async def heartbeat():
     try:
         now = datetime.datetime.now(datetime.timezone.utc)
         ct_now = now.astimezone(CENTRAL_TZ)
-        
-        message = (
-            f"🛡️ **Heartbeat Check** – All systems operational\n"
-            f"🕒 **UTC:** {now.strftime('%H:%M:%S')}\n"
-            f"🕒 **CT:** {ct_now.strftime('%I:%M %p')}\n"
-            f"📊 **Mode:** {CONFIRMATION_MODE.upper()}\n"
-            f"⚙️ **Tasks:** Chronicle, Signals, Eagle, Watch, Battleground"
+
+        embed = discord.Embed(
+            title="🛡️ Heartbeat Check – ETH Bot Status",
+            description="*All systems operational*",
+            color=discord.Color.teal(),
+            timestamp=now
         )
-        
+
+        embed.add_field(name="🕒 UTC Time", value=now.strftime('%H:%M:%S'), inline=True)
+        embed.add_field(name="🕒 CT Time", value=ct_now.strftime('%I:%M %p'), inline=True)
+        embed.add_field(name="📊 Mode", value=CONFIRMATION_MODE.upper(), inline=True)
+        embed.add_field(
+            name="⚙️ Active Tasks",
+            value="Chronicle, Signals, Eagle, Watch, Battleground",
+            inline=False
+        )
+
+        utc = now.strftime('%H:%M UTC')
+        ct = ct_now.strftime('%I:%M %p CT')
+        embed.set_footer(text=f"🕒 {utc} | {ct}")
+
         for channel_id in HEARTBEAT_CHANNEL_IDS:
             try:
                 channel = bot.get_channel(channel_id)
                 if channel:
-                    await channel.send(message)
+                    await channel.send(embed=embed)
                 else:
                     logger.warning(f"Heartbeat channel not found: {channel_id}")
             except Exception as e:
                 logger.error(f"Error sending heartbeat to {channel_id}: {e}")
-                
+
         logger.info("Heartbeat sent successfully")
-        
+
     except Exception as e:
         logger.error(f"Error in heartbeat: {e}")
+
 
 @tasks.loop(hours=6)
 async def performance_report():
@@ -1017,7 +992,6 @@ async def performance_report():
         now = datetime.datetime.now(datetime.timezone.utc)
         ct_now = now.astimezone(CENTRAL_TZ)
         
-        # Basic performance metrics (you can expand this)
         embed = discord.Embed(
             title="📚 Performance Chronicle",
             description="*The scribes record our trading history*",
@@ -1043,8 +1017,10 @@ async def performance_report():
             inline=True
         )
 
-        ct_time = now.astimezone(CENTRAL_TZ).strftime('%I:%M %p')
-        embed.set_footer(text=f"🕒 CT: {ct_time} | Next report in 6 hours")
+        # Simplified footer with UTC + CT
+        ct_time = ct_now.strftime('%I:%M %p CT')
+        utc_time = now.strftime('%H:%M UTC')
+        embed.set_footer(text=f"🕒 {utc_time} | {ct_time}")
 
         channel = bot.get_channel(SCROLLS_ORDER_ID)
         if channel:
@@ -1053,6 +1029,7 @@ async def performance_report():
 
     except Exception as e:
         logger.error(f"Error sending performance report: {e}")
+
 
 @bot.event
 async def on_ready():
