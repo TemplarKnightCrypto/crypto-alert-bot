@@ -282,6 +282,77 @@ def assign_knight(direction):
     """Assign knight based on direction."""
     return "Sir Leonis ⚔️" if direction == "Long" else "Sir Lucien 🛡"
 
+def detect_camarilla_reversal(df, camarilla_levels):
+    """Detect early bounce or rejection off any Camarilla level."""
+    if df is None or len(df) < 2:
+        return None
+
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+    candidates = []
+
+    for label, level in camarilla_levels.items():
+        if level is None:
+            continue
+
+        # Proximity check (~0.8%)
+        proximity = abs(latest["low"] - level) / level < 0.008 or \
+                    abs(latest["high"] - level) / level < 0.008
+        if not proximity:
+            continue
+
+        # Candle structure
+        body = abs(latest["close"] - latest["open"])
+        candle_range = latest["high"] - latest["low"]
+        body_ratio = body / candle_range if candle_range > 0 else 0
+        is_bull = latest["close"] > latest["open"]
+        is_bear = latest["close"] < latest["open"]
+
+        # MA confluence
+        ma_bull = latest["close"] > max(latest["ema10"], latest["ema20"])
+        ma_bear = latest["close"] < min(latest["ema10"], latest["ema20"])
+
+        # RSI slope
+        rsi_bull = latest["rsi"] > 40 and latest["rsi"] > prev["rsi"]
+        rsi_bear = latest["rsi"] < 60 and latest["rsi"] < prev["rsi"]
+
+        # Previous candle context
+        bounce_ok = prev["close"] > level
+        reject_ok = prev["close"] < level
+
+        if label.startswith("L"):
+            score = sum([proximity, is_bull and body_ratio > 0.5, ma_bull, rsi_bull, bounce_ok])
+            if score >= 4:
+                candidates.append({
+                    "side": "Long",
+                    "level": label,
+                    "price": latest["close"],
+                    "score": score,
+                    "sl": round(latest["close"] * 0.99, 2),
+                    "tp1": round(latest["close"] * 1.015, 2),
+                    "tp2": round(latest["close"] * 1.03, 2),
+                    "knight": "Sir Lucien 🛡",
+                    "comment": f"Reversal off {label} with strong bullish candle"
+                })
+
+        if label.startswith("H"):
+            score = sum([proximity, is_bear and body_ratio > 0.5, ma_bear, rsi_bear, reject_ok])
+            if score >= 4:
+                candidates.append({
+                    "side": "Short",
+                    "level": label,
+                    "price": latest["close"],
+                    "score": score,
+                    "sl": round(latest["close"] * 1.01, 2),
+                    "tp1": round(latest["close"] * 0.985, 2),
+                    "tp2": round(latest["close"] * 0.97, 2),
+                    "knight": "Sir Lucien 🛡",
+                    "comment": f"Rejection at {label} with strong bearish candle"
+                })
+
+    return max(candidates, key=lambda x: x["score"]) if candidates else None
+
+
 def evaluate_scorecard(df, cam):
     """Evaluate trading scorecard."""
     try:
@@ -589,19 +660,20 @@ async def send_market_chronicle():
         await send_enhanced_scorecard()
 
 @tasks.loop(minutes=1)
+@tasks.loop(minutes=1)
 async def scan_trade_alerts():
     """Scan for trade alerts and send to battle-signals."""
     global last_trade_alert_time
-    
+
     try:
         # Fetch data
         df = fetch_ohlc("ETH", interval=1)
         df5 = fetch_ohlc("ETH", interval=5)
-        
+
         if df is None or df5 is None:
             logger.warning("Failed to fetch OHLC data for trade alerts")
             return
-            
+
         df = calculate_indicators(df)
         if df is None or len(df) < 5:
             logger.warning("Insufficient data for trade analysis")
@@ -622,68 +694,76 @@ async def scan_trade_alerts():
         high, low, close = fetch_daily_ohlc()
         if any(x is None for x in [high, low, close]):
             return
-            
+
         levels = calculate_camarilla(high, low, close)
         if not levels:
             return
 
-        # Check confirmation criteria
+        # Confirmation candle checks (for breakout entries)
         body = abs(confirm["close"] - confirm["open"])
         wick = confirm["high"] - confirm["low"]
         body_thresh, volume_thresh = get_confirmation_mode_thresholds()
-        
         strong_body = (body / wick) > body_thresh if wick > 0 else False
         volume_valid = confirm["volume"] > df5["volume"].tail(5).mean() * volume_thresh
         now = datetime.datetime.now(datetime.timezone.utc)
 
+        # 🔔 Check for breakout confirmations
         for name, lvl in levels.items():
             if name == "Pivot":
                 continue
-                
+
             is_upper = "H" in name
-            
-            # Check for level break
             broken = (
-                (confirm["close"] > lvl and confirm["open"] < lvl) if is_upper 
+                (confirm["close"] > lvl and confirm["open"] < lvl) if is_upper
                 else (confirm["close"] < lvl and confirm["open"] > lvl)
             )
-            
+
             if not (broken and strong_body and volume_valid):
                 continue
-                
-            # Check cooldown
-            if (name in last_trade_alert_time and 
+
+            if (name in last_trade_alert_time and
                 (now - last_trade_alert_time[name]).total_seconds() < 1800):
                 continue
 
             direction = "Long" if is_upper else "Short"
             confidence = score_trade(rsi, rsi_trend, direction, price, lvl, volume, avg_volume, price_trend)
-            
-            if confidence < 4:  # Only high-probability signals for battle-signals
+            if confidence < 4:
                 continue
 
-            # Calculate trade parameters
             entry = round(price, 2)
-            risk_pct = 0.01  # 1% risk
-            risk = entry * risk_pct
-            
-            if direction == "Long":
-                stop = round(entry - risk, 2)
-                tp1 = round(entry + risk * 1.5, 2)
-                tp2 = round(entry + risk * 3.0, 2)
-            else:
-                stop = round(entry + risk, 2)
-                tp1 = round(entry - risk * 1.5, 2)
-                tp2 = round(entry - risk * 3.0, 2)
-
-            if confidence >= 5:
-                confidence_label = "🟢 Strong Move (80%+)"
-            else:
-                confidence_label = "🟡 Likely Move (75%)"
+            risk = entry * 0.01
+            stop = round(entry - risk, 2) if direction == "Long" else round(entry + risk, 2)
+            tp1 = round(entry + risk * 1.5, 2) if direction == "Long" else round(entry - risk * 1.5, 2)
+            tp2 = round(entry + risk * 3.0, 2) if direction == "Long" else round(entry - risk * 3.0, 2)
+            confidence_label = "🟢 Strong Move (80%+)" if confidence >= 5 else "🟡 Likely Move (75%)"
 
             await send_battle_signal(direction, name, lvl, entry, stop, [tp1, tp2], confidence_label, confidence)
             last_trade_alert_time[name] = now
-                
+
+        # 🔄 Check for Camarilla reversal setups
+        reversal = detect_camarilla_reversal(df, levels)
+        if reversal:
+            level_key = reversal["level"]
+            if (level_key in last_trade_alert_time and
+                (now - last_trade_alert_time[level_key]).total_seconds() < 1800):
+                return
+
+            direction = reversal["side"]
+            confidence = reversal["score"]
+            confidence_label = "🟢 High Confidence" if confidence >= 5 else "🟡 Medium Confidence"
+
+            await send_battle_signal(
+                direction=direction,
+                level_name=level_key,
+                level_price=levels[level_key],
+                entry=reversal["price"],
+                stop_loss=reversal["sl"],
+                targets=[reversal["tp1"], reversal["tp2"]],
+                confidence=confidence_label,
+                score=confidence
+            )
+            last_trade_alert_time[level_key] = now
+
     except Exception as e:
         logger.error(f"Error in scan_trade_alerts: {e}")
 
