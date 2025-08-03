@@ -436,6 +436,42 @@ async def send_setup_alert(direction, level_name, level_price, score, missing_it
     if channel:
         await channel.send(embed=embed)
 
+def calculate_confluence_score(df):
+    # Example placeholder logic
+    rsi = df.iloc[-1]["rsi"]
+    macd_hist = df.iloc[-1]["macd_hist"]
+    volume = df.iloc[-1]["volume"]
+    avg_volume = df["volume"].tail(10).mean()
+    score = 0
+    if rsi > 50: score += 1
+    if macd_hist > 0: score += 1
+    if volume > avg_volume: score += 1
+    return score
+
+async def send_trade_alert(price, score):
+    embed = discord.Embed(
+        title=f"⚔️ ETH Trade Alert",
+        description=f"**Price:** ${price:.2f}\n**Score:** {score}/6",
+        color=discord.Color.green(),
+        timestamp=datetime.datetime.now(datetime.timezone.utc)
+    )
+    embed.set_footer(text="Templar Knight Crypto")
+    channel = bot.get_channel(BATTLE_SIGNALS_ID)
+    if channel:
+        await channel.send(embed=embed)
+
+async def send_100x_alert(price, score):
+    embed = discord.Embed(
+        title=f"🦅 100x Signal – ETH",
+        description=f"**Price:** ${price:.2f}\n**Score:** {score}/6",
+        color=discord.Color.red(),
+        timestamp=datetime.datetime.now(datetime.timezone.utc)
+    )
+    embed.set_footer(text="Templar Knight Crypto")
+    channel = bot.get_channel(EAGLE_SIGNAL_ID)
+    if channel:
+        await channel.send(embed=embed)
+
 # ============================================
 # Section 4: Battle Signals, Trade Scan, 100x Alerts, Proximity Warnings
 # ============================================
@@ -845,6 +881,50 @@ async def performance_report():
 
     except Exception as e:
         logger.error(f"Error sending performance report: {e}")
+
+# === Real-Time Trade Alert Scanner ===
+@tasks.loop(minutes=1)
+async def scan_trade_alerts():
+    try:
+        df = fetch_ohlc("ETH", interval=1)
+        if df is None:
+            return
+
+        df = calculate_indicators(df)
+        if df is None or len(df) < 5:
+            return
+
+        latest = df.iloc[-1]
+        price = latest["close"]
+
+        # Confluence scoring or trade logic placeholder
+        score = calculate_confluence_score(df)
+        if score >= ALERT_SCORE_THRESHOLD:
+            await send_trade_alert(price, score)
+
+    except Exception as e:
+        logger.error(f"Error in scan_trade_alerts: {e}")
+
+# === High Conviction 100x Trade Logic ===
+@tasks.loop(minutes=1)
+async def trade_100x_scan():
+    try:
+        df = fetch_ohlc("ETH", interval=1)
+        if df is None:
+            return
+
+        df = calculate_indicators(df)
+        if df is None or len(df) < 5:
+            return
+
+        latest = df.iloc[-1]
+        score = calculate_confluence_score(df)
+
+        if score >= 5:  # 100x signals require strong confidence
+            await send_100x_alert(latest["close"], score)
+
+    except Exception as e:
+        logger.error(f"Error in trade_100x_scan: {e}")
 
 # ============================================
 # Section 6: Startup, Commands, Bot Runner
