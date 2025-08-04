@@ -22,7 +22,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, EMAIndicator
-from datetime import datetime, timedelta
+
 
 # === Logging ===
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -410,8 +410,8 @@ async def send_setup_alert(direction, level_name, level_price, score, missing_it
             title=f"⚠️ Setup Alert - ETH {direction}",
             description=f"**Setup detected at {level_name}**\n*Awaiting full confirmation*",
             color=discord.Color.orange(),
-            timestamp=datetime.now(datetime.timezone.utc)
-        )
+            timestamp=datetime.datetime.now(datetime.timezone.utc)
+
 
         embed.add_field(name="🧭 Level", value=f"{level_name} (${level_price:.2f})", inline=True)
         embed.add_field(name="📊 Score", value=f"{score}/6", inline=True)
@@ -564,7 +564,7 @@ async def scan_camarilla_trades():
 
         if breakout_confirmed:
             last_alert = CAMARILLA_COOLDOWN.get(key)
-            if last_alert and (now - last_alert < timedelta(minutes=CAMARILLA_COOLDOWN_MINUTES)):
+            if last_alert and (now - last_alert < datetime.timedelta(minutes=CAMARILLA_COOLDOWN_MINUTES)):
                 logger.info(f"[Cooldown] Skipping breakout alert for {key}")
                 return
             CAMARILLA_COOLDOWN[key] = now
@@ -582,7 +582,7 @@ async def scan_camarilla_trades():
 
         elif reversal_confirmed:
             last_alert = CAMARILLA_COOLDOWN.get(key)
-            if last_alert and (now - last_alert < timedelta(minutes=CAMARILLA_COOLDOWN_MINUTES)):
+            if last_alert and (now - last_alert < datetime.timedelta(minutes=CAMARILLA_COOLDOWN_MINUTES)):
                 logger.info(f"[Cooldown] Skipping reversal alert for {key}")
                 return
             CAMARILLA_COOLDOWN[key] = now
@@ -663,7 +663,7 @@ async def send_100x_alert(price, score):
         embed.add_field(name="Current Price", value=f"${price:.2f}", inline=True)
         embed.add_field(name="Confidence Score", value=f"{score}/6", inline=True)
 
-        now = datetime.now(datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.timezone.utc)
         ct_now = now.astimezone(CENTRAL_TZ)
         embed.set_footer(text=f"🕒 UTC: {now.strftime('%H:%M')} | CT: {ct_now.strftime('%I:%M %p')}")
 
@@ -702,7 +702,7 @@ async def check_camarilla_warning():
         if not levels:
             return
 
-        now = datetime.now(datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.timezone.utc)
         for name, lvl in levels.items():
             if name == "P":
                 continue
@@ -809,7 +809,7 @@ async def send_battleground_embed():
 @tasks.loop(hours=6)
 async def performance_report():
     try:
-        now = datetime.now(datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.timezone.utc)
         ct_now = now.astimezone(CENTRAL_TZ)
 
         embed = discord.Embed(
@@ -908,7 +908,7 @@ async def alertmode(ctx, mode=None):
 # === Scheduled Loops ===
 @tasks.loop(minutes=1)
 async def battleground_loop():
-    now = datetime.now(datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.timezone.utc)
     if now.minute in [7, 23, 37, 52]:
         await send_battleground_embed()
 
