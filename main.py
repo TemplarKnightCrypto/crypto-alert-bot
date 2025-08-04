@@ -410,8 +410,8 @@ async def send_setup_alert(direction, level_name, level_price, score, missing_it
             title=f"⚠️ Setup Alert - ETH {direction}",
             description=f"**Setup detected at {level_name}**\n*Awaiting full confirmation*",
             color=discord.Color.orange(),
-            timestamp=datetime.datetime.now(datetime.timezone.utc)
-
+            timestamp=datetime.datetime.now(datetime.timezone.utc)  
+        )  
 
         embed.add_field(name="🧭 Level", value=f"{level_name} (${level_price:.2f})", inline=True)
         embed.add_field(name="📊 Score", value=f"{score}/6", inline=True)
