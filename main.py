@@ -334,7 +334,7 @@ async def send_enhanced_scorecard():
             title="📜 ETH Market Chronicle",
             description="*The scribes record the current state of the battlefield*",
             color=bias_color,
-            timestamp=datetime.datetime.now(datetime.timezone.utc)
+            timestamp=datetime.now(datetime.timezone.utc)
         )
 
         price_emoji = "📈" if price_change >= 0 else "📉"
@@ -409,7 +409,7 @@ async def send_setup_alert(direction, level_name, level_price, score, missing_it
         title=f"🧪 Setup Alert – ETH {direction}",
         description=f"*{knight} is observing {level_name}*",
         color=discord.Color.gold(),
-        timestamp=datetime.datetime.now(datetime.timezone.utc)
+        timestamp=datetime.now(datetime.timezone.utc)
     )
     embed.add_field(name="🎯 Level", value=f"{level_name} (${level_price:.2f})", inline=True)
     embed.add_field(name="📊 Score", value=f"{score}/6 – {get_tier_label(score)}", inline=True)
@@ -437,7 +437,7 @@ async def send_battle_signal(direction, level_name, level_price, entry, stop_los
             title=f"⚔️ Battle Signal - ETH {direction} {trade_type}",
             description=f"*{knight} calls for battle at {level_name}*",
             color=color,
-            timestamp=datetime.datetime.now(datetime.timezone.utc)
+            timestamp=datetime.now(datetime.timezone.utc)
         )
 
         embed.add_field(name="🛡️ Knight", value=knight, inline=True)
@@ -614,7 +614,7 @@ async def scan_camarilla_trades():
 async def trade_100x_scan():
     global last_100x_trade_time
     try:
-        now = datetime.datetime.utcnow()
+        now = datetime.utcnow()
         if last_100x_trade_time and (now - last_100x_trade_time).total_seconds() < 900:
             return
 
@@ -653,7 +653,7 @@ async def send_100x_alert(price, score):
         embed.add_field(name="Current Price", value=f"${price:.2f}", inline=True)
         embed.add_field(name="Confidence Score", value=f"{score}/6", inline=True)
 
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = datetime.now(datetime.timezone.utc)
         ct_now = now.astimezone(CENTRAL_TZ)
         embed.set_footer(text=f"🕒 UTC: {now.strftime('%H:%M')} | CT: {ct_now.strftime('%I:%M %p')}")
 
@@ -692,7 +692,7 @@ async def check_camarilla_warning():
         if not levels:
             return
 
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = datetime.now(datetime.timezone.utc)
         for name, lvl in levels.items():
             if name == "P":
                 continue
@@ -763,7 +763,7 @@ async def send_battleground_embed():
         else:
             direction = "🔽 Below"
 
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        now_utc = datetime.now(datetime.timezone.utc)
 
         embed = discord.Embed(
             title=f"{emoji} ETH Battleground Update",
@@ -799,7 +799,7 @@ async def send_battleground_embed():
 @tasks.loop(hours=6)
 async def performance_report():
     try:
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = datetime.now(datetime.timezone.utc)
         ct_now = now.astimezone(CENTRAL_TZ)
 
         embed = discord.Embed(
@@ -848,7 +848,7 @@ async def status(ctx):
         embed = discord.Embed(
             title="🤖 Knight's Status Report",
             color=discord.Color.green(),
-            timestamp=datetime.datetime.now(datetime.timezone.utc)
+            timestamp=datetime.now(datetime.timezone.utc)
         )
 
         embed.add_field(name="⚙️ Mode", value=CONFIRMATION_MODE.upper(), inline=True)
@@ -898,13 +898,13 @@ async def alertmode(ctx, mode=None):
 # === Scheduled Loops ===
 @tasks.loop(minutes=1)
 async def battleground_loop():
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.now(datetime.timezone.utc)
     if now.minute in [7, 23, 37, 52]:
         await send_battleground_embed()
 
 @tasks.loop(minutes=1)
 async def chronicle_loop():
-    if datetime.datetime.now(datetime.timezone.utc).minute % 15 == 0:
+    if datetime.now(datetime.timezone.utc).minute % 15 == 0:
         await send_enhanced_scorecard()
 
 # === Startup Event ===
@@ -931,7 +931,7 @@ async def on_ready():
             title="🏰 Control Tower Activated",
             description="*Trade scanning and alert systems are online.*",
             color=discord.Color.green(),
-            timestamp=datetime.datetime.now(datetime.timezone.utc)
+            timestamp=datetime.now(datetime.timezone.utc)
         )
         embed.add_field(name="⚙️ Current Alert Mode", value=f"Score ≥ {ALERT_SCORE_THRESHOLD}", inline=True)
         embed.add_field(name="📡 Strategy", value="Camarilla + RSI/Volume/Trend Confluence", inline=True)
