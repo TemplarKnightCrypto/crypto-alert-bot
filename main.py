@@ -42,6 +42,7 @@ EAGLE_SIGNAL_ID = 1398690647417819198          # 🦅 100x alerts
 KNIGHTS_WATCH_ID = 1399532102571135118         # 🕰️ Proximity warnings
 ETH_BATTLEGROUND_ID = 1399532442075005038      # 🏰 Real-time reports
 SCROLLS_ORDER_ID = 1399067396488302623         # 📚 Performance logs
+SETUP_ALERTS_ID = 1402053509490151424 	       # 🗺️・camarilla-alerts
 
 # === Timezones ===
 UTC = pytz.utc
@@ -404,24 +405,33 @@ async def send_enhanced_scorecard():
 
 # === Setup Alert Embed (Pre-Confirmation) ===
 async def send_setup_alert(direction, level_name, level_price, score, missing_items):
-    knight = assign_knight("Reversal" if "Reversal" in missing_items else "Breakout")
-    embed = discord.Embed(
-        title=f"🧪 Setup Alert – ETH {direction}",
-        description=f"*{knight} is observing {level_name}*",
-        color=discord.Color.gold(),
-        timestamp=datetime.now(datetime.timezone.utc)
-    )
-    embed.add_field(name="🎯 Level", value=f"{level_name} (${level_price:.2f})", inline=True)
-    embed.add_field(name="📊 Score", value=f"{score}/6 – {get_tier_label(score)}", inline=True)
-    embed.add_field(name="🧩 Missing Signals", value="\n".join(missing_items) or "Awaiting confirmation", inline=False)
+    try:
+        embed = discord.Embed(
+            title=f"⚠️ Setup Alert - ETH {direction}",
+            description=f"**Setup detected at {level_name}**\n*Awaiting full confirmation*",
+            color=discord.Color.orange(),
+            timestamp=datetime.now(datetime.timezone.utc)
+        )
 
-    ct = embed.timestamp.astimezone(CENTRAL_TZ).strftime('%I:%M %p CT')
-    utc = embed.timestamp.strftime('%H:%M UTC')
-    embed.set_footer(text=f"🕒 {utc} | {ct} • Setup alert")
+        embed.add_field(name="🧭 Level", value=f"{level_name} (${level_price:.2f})", inline=True)
+        embed.add_field(name="📊 Score", value=f"{score}/6", inline=True)
+        embed.add_field(name="❌ Missing Confirmation", value="\n".join(missing_items), inline=False)
 
-    channel = bot.get_channel(BATTLE_SIGNALS_ID)
-    if channel:
-        await channel.send(embed=embed)
+        now = embed.timestamp
+        ct = now.astimezone(CENTRAL_TZ).strftime('%I:%M %p CT')
+        utc = now.strftime('%H:%M UTC')
+        embed.set_footer(text=f"🕒 {utc} | {ct} • Awaiting confirmation...")
+
+        channel = bot.get_channel(SETUP_ALERTS_ID)
+        if channel:
+            await channel.send(embed=embed)
+            logger.info(f"⚠️ Setup alert sent for {level_name}")
+        else:
+            logger.warning("⚠️ Setup alert channel not found")
+
+    except Exception as e:
+        logger.error(f"Error in send_setup_alert: {e}")
+
 
 # ============================================
 # Section 4: Trade Signal Scanner, 100x Scanner, Proximity Warning Logic
