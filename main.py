@@ -477,13 +477,13 @@ async def send_100x_alert(price, score):
 # ============================================
 
 # === Battle Signal Embed (Confirmed Trade) ===
-async def send_battle_signal(direction, level_name, level_price, entry, stop_loss, targets, confidence, score):
+async def send_battle_signal(direction, level_name, level_price, entry, stop_loss, targets, confidence, score, trade_type="Breakout"):
     try:
         knight = assign_knight(direction)
         color = discord.Color.green() if direction == "Long" else discord.Color.red()
 
         embed = discord.Embed(
-            title=f"⚔️ Battle Signal - ETH {direction} Formation",
+            title=f"⚔️ Battle Signal - ETH {direction} {trade_type}",
             description=f"*{knight} calls for battle at {level_name}*",
             color=color,
             timestamp=datetime.datetime.now(datetime.timezone.utc)
@@ -886,24 +886,129 @@ async def performance_report():
 @tasks.loop(minutes=1)
 async def scan_trade_alerts():
     try:
-        df = fetch_ohlc("ETH", interval=1)
+        df = fetch_ohlc("ETH", interval=5)
         if df is None:
             return
 
         df = calculate_indicators(df)
-        if df is None or len(df) < 5:
+        if df is None or len(df) < 20:
+            return
+
+        high, low, close = fetch_daily_ohlc()
+        if any(x is None for x in [high, low, close]):
+            return
+        cam = calculate_camarilla(high, low, close)
+        if not cam:
             return
 
         latest = df.iloc[-1]
         price = latest["close"]
+        open_ = latest["open"]
+        high_ = latest["high"]
+        low_ = latest["low"]
+        volume = latest["volume"]
+        avg_volume = df["volume"].tail(10).mean()
+        rsi = latest["rsi"]
+        rsi_trend = "up" if rsi > df["rsi"].iloc[-3] else "down"
+        price_trend = price > df["close"].iloc[-3]
 
-        # Confluence scoring or trade logic placeholder
-        score = calculate_confluence_score(df)
-        if score >= ALERT_SCORE_THRESHOLD:
-            await send_trade_alert(price, score)
+        # === Closest Camarilla Level
+        closest = min(cam.items(), key=lambda x: abs(price - x[1]))
+        level_name, level_price = closest
+        level_dist_pct = abs(price - level_price) / price * 100
+        direction = "Long" if price > level_price else "Short"
+
+        # === Candle Confirmation
+        body = abs(price - open_)
+        range_ = high_ - low_
+        body_ratio = body / range_ if range_ > 0 else 0
+        volume_ok = volume > avg_volume * 1.2
+
+        # === Confirmed Breakout
+        breakout_confirmed = (
+            ((price > level_price and open_ < level_price) or
+             (price < level_price and open_ > level_price)) and
+            body_ratio > 0.5 and
+            volume_ok
+        )
+
+        # === Confirmed Reversal
+        reversal_confirmed = (
+            level_dist_pct <= 0.2 and
+            ((high_ > level_price > price and direction == "Short") or
+             (low_ < level_price < price and direction == "Long")) and
+            body_ratio > 0.5 and
+            volume_ok and
+            ((rsi < 40 and direction == "Long") or (rsi > 60 and direction == "Short"))
+        )
+
+        # === Score Trade
+        score = score_trade(rsi, rsi_trend, direction, price, level_price, volume, avg_volume, price_trend)
+        if score < ALERT_SCORE_THRESHOLD:
+            return
+
+        # === Entry and Targets
+        entry = round(price, 2)
+        stop_pct = 0.01
+        if direction == "Long":
+            sl = round(entry * (1 - stop_pct), 2)
+            tp1 = round(entry * 1.015, 2)
+            tp2 = round(entry * 1.03, 2)
+        else:
+            sl = round(entry * (1 + stop_pct), 2)
+            tp1 = round(entry * 0.985, 2)
+            tp2 = round(entry * 0.97, 2)
+
+        confidence = get_tier_label(score)
+
+        # === Send Alert
+        if breakout_confirmed:
+            await send_battle_signal(
+                direction=direction,
+                level_name=level_name,
+                level_price=level_price,
+                entry=entry,
+                stop_loss=sl,
+                targets=[tp1, tp2],
+                confidence=confidence,
+                score=score,
+                trade_type="Breakout"
+            )
+
+        elif reversal_confirmed:
+            await send_battle_signal(
+                direction=direction,
+                level_name=level_name,
+                level_price=level_price,
+                entry=entry,
+                stop_loss=sl,
+                targets=[tp1, tp2],
+                confidence=confidence,
+                score=score,
+                trade_type="Reversal"
+            )
+
+        else:
+            missing = []
+            if body_ratio <= 0.5:
+                missing.append("🧱 Weak Candle Body")
+            if not volume_ok:
+                missing.append("🔇 Volume Below Threshold")
+            if (price > level_price and open_ > level_price) or (price < level_price and open_ < level_price):
+                missing.append("📉 No Breakout Structure")
+            await send_setup_alert(
+                direction=direction,
+                level_name=level_name,
+                level_price=level_price,
+                score=score,
+                missing_items=missing
+            )
 
     except Exception as e:
         logger.error(f"Error in scan_trade_alerts: {e}")
+
+
+
 
 # === High Conviction 100x Trade Logic ===
 @tasks.loop(minutes=1)
