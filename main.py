@@ -372,19 +372,21 @@ async def send_enhanced_scorecard():
         )
         embed.add_field(name="📊 Technical Indicators", value=indicators_text, inline=False)
 
-        level_order = ["H5", "H4", "H3", "P", "L3", "L4", "L5"]
-        ordered = [(k, levels[k]) for k in level_order if k in levels]
+        # === 🗺️ Battlefield Map – Clean Centered Version ===
         level_map = "```\n"
-        for name, val in ordered:
-            if name == "P":
-                level_map += f"{name:<5} {val:>8.2f}\n"
         for name in ["H5", "H4", "H3"]:
             if name in levels and levels[name] > price:
                 level_map += f"{name:<5} {levels[name]:>8.2f}\n"
+
+        if "P" in levels:
+            level_map += f"P     {levels['P']:>8.2f}\n"
+
         level_map += f"➤   Price {price:>8.2f}\n"
+
         for name in ["L3", "L4", "L5"]:
             if name in levels and levels[name] < price:
                 level_map += f"{name:<5} {levels[name]:>8.2f}\n"
+
         level_map += "```"
         embed.add_field(name="🗺️ Battlefield Map", value=level_map, inline=False)
 
@@ -402,6 +404,7 @@ async def send_enhanced_scorecard():
 
     except Exception as e:
         logger.error(f"Error sending enhanced scorecard: {e}")
+
 
 # === Setup Alert Embed (Pre-Confirmation) ===
 async def send_setup_alert(direction, level_name, level_price, score, missing_items):
@@ -834,12 +837,7 @@ async def performance_report():
             inline=False
         )
 
-        embed.add_field(
-            name="⚙️ Configuration",
-            value=f"Mode: {CONFIRMATION_MODE.upper()}\nAPI Timeout: {API_TIMEOUT}s\nCache Duration: {CACHE_DURATION}s",
-            inline=True
-        )
-
+        
         embed.add_field(
             name="📈 Activity Summary",
             value="Chronicle: Every 15min\nSignals: Real-time\nEagle: 100x high-conviction\nWatch: Level proximity",
