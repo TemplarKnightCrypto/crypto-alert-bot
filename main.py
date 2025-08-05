@@ -1,5 +1,5 @@
 # ============================================
-# The Control Tower - Templar Knight Crypto - v8.5
+# The Control Tower - Templar Knight Crypto - v8.6
 # ============================================
 
 # ============================================
@@ -22,7 +22,9 @@ from dotenv import load_dotenv
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, EMAIndicator
 from datetime import datetime, timezone, timedelta
+import uuid
 
+active_trades = {}  # format: {symbol: {entry, tp1, tp2, sl, side, knight, rating, thread_id, id}}
 
 # === Logging ===
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -485,6 +487,32 @@ async def send_battle_signal(direction, level_name, level_price, entry, stop_los
     except Exception as e:
         logger.error(f"Error in send_battle_signal: {e}")
 
+async def send_exit_alert(reason, price, thread_id, direction, alert_id):
+    """Send TP/SL hit alert."""
+    now = datetime.now(timezone.utc)
+    ct = now.astimezone(CENTRAL_TZ)
+
+    embed = discord.Embed(
+        title=f"📍 ETH Trade Exit Alert – {reason}",
+        color=discord.Color.green() if "TP" in reason else discord.Color.red(),
+        timestamp=now
+    )
+    embed.add_field(name="Type", value=direction, inline=True)
+    embed.add_field(name="Exit Price", value=f"${price:.2f}", inline=True)
+    embed.add_field(name="Outcome", value=reason, inline=True)
+    embed.add_field(name="Trade ID", value=alert_id, inline=False)
+    embed.set_footer(text=f"🕒 UTC: {now.strftime('%H:%M:%S')} | CT: {ct.strftime('%I:%M %p')}")
+
+    channel = bot.get_channel(BATTLE_SIGNALS_ID)
+
+    if thread_id:
+        thread = channel.get_thread(thread_id)
+        if thread:
+            await thread.send(embed=embed)
+            return
+
+    await channel.send(embed=embed)
+
 # === Camarilla Trade Signal Scanner ===
 @tasks.loop(minutes=1)
 async def scan_camarilla_trades():
@@ -565,12 +593,17 @@ async def scan_camarilla_trades():
         key = f"{level_name}_{direction}"
         now = datetime.now(timezone.utc)
 
-        if breakout_confirmed:
+        if breakout_confirmed or reversal_confirmed:
             last_alert = CAMARILLA_COOLDOWN.get(key)
             if last_alert and (now - last_alert < timedelta(minutes=CAMARILLA_COOLDOWN_MINUTES)):
-                logger.info(f"[Cooldown] Skipping breakout alert for {key}")
+                logger.info(f"[Cooldown] Skipping alert for {key}")
                 return
+
             CAMARILLA_COOLDOWN[key] = now
+
+            trade_type = "Breakout" if breakout_confirmed else "Reversal"
+            knight = assign_knight(trade_type)
+
             await send_battle_signal(
                 direction=direction,
                 level_name=level_name,
@@ -580,26 +613,23 @@ async def scan_camarilla_trades():
                 targets=[tp1, tp2],
                 confidence=confidence,
                 score=score,
-                trade_type="Breakout"
+                trade_type=trade_type
             )
 
-        elif reversal_confirmed:
-            last_alert = CAMARILLA_COOLDOWN.get(key)
-            if last_alert and (now - last_alert < timedelta(minutes=CAMARILLA_COOLDOWN_MINUTES)):
-                logger.info(f"[Cooldown] Skipping reversal alert for {key}")
-                return
-            CAMARILLA_COOLDOWN[key] = now
-            await send_battle_signal(
-                direction=direction,
-                level_name=level_name,
-                level_price=level_price,
-                entry=entry,
-                stop_loss=sl,
-                targets=[tp1, tp2],
-                confidence=confidence,
-                score=score,
-                trade_type="Reversal"
-            )
+            # === Generate Unique Trade ID and Track
+            import uuid
+            alert_id = str(uuid.uuid4())[:8]
+            active_trades["ETH"] = {
+                "id": alert_id,
+                "entry": entry,
+                "tp1": tp1,
+                "tp2": tp2,
+                "sl": sl,
+                "side": direction,
+                "thread_id": None,  # optional: update if using threads
+                "knight": knight,
+                "rating": confidence
+            }
 
         else:
             # === Send Setup Alert with Cooldown
@@ -629,7 +659,6 @@ async def scan_camarilla_trades():
 
     except Exception as e:
         logger.error(f"Error in scan_camarilla_trades: {e}")
-
 
 # === 100x Trade Alert Scanner ===
 @tasks.loop(minutes=1)
@@ -726,6 +755,44 @@ async def check_camarilla_warning():
 
     except Exception as e:
         logger.error(f"Error in check_camarilla_warning: {e}")
+
+@tasks.loop(seconds=30)
+async def monitor_trade_exits():
+    try:
+        if "ETH" not in active_trades:
+            return
+
+        df = fetch_ohlc("ETH", interval=1)
+        if df is None or len(df) < 1:
+            return
+
+        latest = df.iloc[-1]
+        price = latest["close"]
+        trade = active_trades["ETH"]
+
+        tp2 = trade["tp2"]
+        sl = trade["sl"]
+        direction = trade["side"]
+        alert_id = trade["id"]
+        thread_id = trade.get("thread_id")
+
+        if direction == "Long":
+            if price >= tp2:
+                await send_exit_alert("TP HIT", price, thread_id, direction, alert_id)
+                del active_trades["ETH"]
+            elif price <= sl:
+                await send_exit_alert("SL HIT", price, thread_id, direction, alert_id)
+                del active_trades["ETH"]
+        elif direction == "Short":
+            if price <= tp2:
+                await send_exit_alert("TP HIT", price, thread_id, direction, alert_id)
+                del active_trades["ETH"]
+            elif price >= sl:
+                await send_exit_alert("SL HIT", price, thread_id, direction, alert_id)
+                del active_trades["ETH"]
+
+    except Exception as e:
+        logger.error(f"Error in monitor_trade_exits: {e}")
 
 
 # ============================================
@@ -927,6 +994,8 @@ async def on_ready():
             battleground_loop.start()
         if not performance_report.is_running():
             performance_report.start()
+        if not monitor_trade_exits.is_running():
+            monitor_trade_exits.start()
 
         embed = discord.Embed(
             title="🏰 Control Tower Activated",
