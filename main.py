@@ -49,8 +49,6 @@ UTC = pytz.utc
 CENTRAL_TZ = pytz.timezone("US/Central")
 
 # === Configurable Settings ===
-CONFIRMATION_MODE = "balanced"  # Options: aggressive, balanced, strict
-ALERT_SCORE_THRESHOLD = 4       # Can be modified with !alertmode
 API_TIMEOUT = 10
 MAX_RETRIES = 3
 CACHE_DURATION = 30  # seconds
@@ -64,6 +62,8 @@ last_trade_alert_time = {}
 camarilla_warning_cooldowns = {}
 CAMARILLA_COOLDOWN = {}
 CAMARILLA_COOLDOWN_MINUTES = 5  # Cooldown per level/direction
+setup_alert_cooldowns = {}
+SETUP_ALERT_COOLDOWN_MINUTES = 15  # customize as needed
 
 # === Flask App ===
 app = Flask(__name__)
@@ -564,7 +564,7 @@ async def scan_camarilla_trades():
 
         if breakout_confirmed:
             last_alert = CAMARILLA_COOLDOWN.get(key)
-            if last_alert and (now - last_alert < datetime.timedelta(minutes=CAMARILLA_COOLDOWN_MINUTES)):
+            if last_alert and (now - last_alert < timedelta(minutes=CAMARILLA_COOLDOWN_MINUTES)):
                 logger.info(f"[Cooldown] Skipping breakout alert for {key}")
                 return
             CAMARILLA_COOLDOWN[key] = now
@@ -582,7 +582,7 @@ async def scan_camarilla_trades():
 
         elif reversal_confirmed:
             last_alert = CAMARILLA_COOLDOWN.get(key)
-            if last_alert and (now - last_alert < datetime.timedelta(minutes=CAMARILLA_COOLDOWN_MINUTES)):
+            if last_alert and (now - last_alert < timedelta(minutes=CAMARILLA_COOLDOWN_MINUTES)):
                 logger.info(f"[Cooldown] Skipping reversal alert for {key}")
                 return
             CAMARILLA_COOLDOWN[key] = now
@@ -599,7 +599,7 @@ async def scan_camarilla_trades():
             )
 
         else:
-            # Send Setup Alert
+            # === Send Setup Alert with Cooldown
             missing = []
             if body_ratio <= 0.5:
                 missing.append("🧱 Weak Candle Body")
@@ -608,6 +608,14 @@ async def scan_camarilla_trades():
             if (price > level_price and open_ > level_price) or (price < level_price and open_ < level_price):
                 missing.append("📉 No Breakout Structure")
 
+            # === Setup Cooldown Key
+            setup_key = f"{level_name}_{direction}_setup"
+            last_setup = setup_alert_cooldowns.get(setup_key)
+            if last_setup and (now - last_setup).total_seconds() < SETUP_ALERT_COOLDOWN_MINUTES * 60:
+                logger.info(f"[Cooldown] Skipping setup alert for {setup_key}")
+                return
+
+            setup_alert_cooldowns[setup_key] = now
             await send_setup_alert(
                 direction=direction,
                 level_name=level_name,
@@ -618,6 +626,7 @@ async def scan_camarilla_trades():
 
     except Exception as e:
         logger.error(f"Error in scan_camarilla_trades: {e}")
+
 
 # === 100x Trade Alert Scanner ===
 @tasks.loop(minutes=1)
@@ -861,7 +870,6 @@ async def status(ctx):
             timestamp=datetime.now(timezone.utc)
         )
 
-        embed.add_field(name="⚙️ Mode", value=CONFIRMATION_MODE.upper(), inline=True)
         embed.add_field(name="📊 Tasks", value="✅ All Running", inline=True)
 
         task_status = (
@@ -891,20 +899,6 @@ async def test_chronicle(ctx):
     else:
         await ctx.send("⚠️ Administrator permissions required")
 
-# === Command: !alertmode (strict, balanced, exploratory) ===
-@bot.command(name='alertmode')
-async def alertmode(ctx, mode=None):
-    global ALERT_SCORE_THRESHOLD
-    modes = {"strict": 5, "balanced": 4, "exploratory": 3}
-    if mode in modes:
-        ALERT_SCORE_THRESHOLD = modes[mode]
-        await ctx.send(f"⚙️ Alert mode set to **{mode.upper()}** (score ≥ {ALERT_SCORE_THRESHOLD})")
-    else:
-        await ctx.send(
-            f"⚙️ Current mode: score ≥ **{ALERT_SCORE_THRESHOLD}**\n"
-            f"Use: `!alertmode strict` | `balanced` | `exploratory`"
-        )
-
 # === Scheduled Loops ===
 @tasks.loop(minutes=1)
 async def battleground_loop():
@@ -921,7 +915,6 @@ async def chronicle_loop():
 @bot.event
 async def on_ready():
     logger.info(f"🟢 Bot logged in as {bot.user}")
-    logger.info(f"⚙️ Alert Mode: score ≥ {ALERT_SCORE_THRESHOLD}")
 
     try:
         if not scan_camarilla_trades.is_running():
@@ -943,7 +936,6 @@ async def on_ready():
             color=discord.Color.green(),
             timestamp=datetime.now(timezone.utc)
         )
-        embed.add_field(name="⚙️ Current Alert Mode", value=f"Score ≥ {ALERT_SCORE_THRESHOLD}", inline=True)
         embed.add_field(name="📡 Strategy", value="Camarilla + RSI/Volume/Trend Confluence", inline=True)
         ct = embed.timestamp.astimezone(CENTRAL_TZ).strftime('%I:%M %p CT')
         utc = embed.timestamp.strftime('%H:%M UTC')
