@@ -410,20 +410,16 @@ async def send_battlefield_map():
         if not levels:
             return
 
-        # === Build Battlefield Map ===
+        # === Build Battlefield Map with dynamic price placement ===
         level_map = "```\n"
-        for lvl in ["H5", "H4", "H3", "H2", "H1"]:
-            if lvl in levels:
-                level_map += f"{lvl:<5} {levels[lvl]:>8.2f}\n"
 
-        if "P" in levels:
-            level_map += f"P     {levels['P']:>8.2f}\n"
+        # Add price into levels with a custom key for sorting
+        levels_with_price = {**levels, "➤ Price": price}
+        sorted_levels = sorted(levels_with_price.items(), key=lambda x: -x[1])  # descending order
 
-        level_map += f"➤   Price {price:>8.2f}\n"
-
-        for lvl in ["L1", "L2", "L3", "L4", "L5"]:
-            if lvl in levels:
-                level_map += f"{lvl:<5} {levels[lvl]:>8.2f}\n"
+        for name, val in sorted_levels:
+            label = f"{name:<8}"
+            level_map += f"{label}{val:>8.2f}\n"
 
         level_map += "```"
 
@@ -441,14 +437,13 @@ async def send_battlefield_map():
         utc_time = embed.timestamp.strftime('%H:%M UTC')
         embed.set_footer(text=f"🕒 {utc_time} | {ct_time}")
 
-        channel = bot.get_channel(SCRIBES_KEEP_ID)  # or use a dedicated map channel if desired
+        channel = bot.get_channel(SCRIBES_KEEP_ID)  # update this if you want to route to a new map channel
         if channel:
             await channel.send(embed=embed)
             logger.info("📡 Battlefield map sent to scribes-keep")
 
     except Exception as e:
         logger.error(f"Error sending battlefield map: {e}")
-
 
 
 # === Setup Alert Embed (Pre-Confirmation) ===
