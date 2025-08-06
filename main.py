@@ -374,20 +374,20 @@ async def send_enhanced_scorecard():
         )
         embed.add_field(name="📊 Technical Indicators", value=indicators_text, inline=False)
 
-        # === 🗺️ Battlefield Map – Clean Centered Version ===
+        # === 🗺️ Battlefield Map – Full Map Fixed ===
         level_map = "```\n"
-        for name in ["H5", "H4", "H3"]:
-            if name in levels and levels[name] > price:
-                level_map += f"{name:<5} {levels[name]:>8.2f}\n"
+        for lvl in ["H5", "H4", "H3", "H2", "H1"]:
+            if lvl in levels:
+                level_map += f"{lvl:<5} {levels[lvl]:>8.2f}\n"
 
         if "P" in levels:
             level_map += f"P     {levels['P']:>8.2f}\n"
 
         level_map += f"➤   Price {price:>8.2f}\n"
 
-        for name in ["L3", "L4", "L5"]:
-            if name in levels and levels[name] < price:
-                level_map += f"{name:<5} {levels[name]:>8.2f}\n"
+        for lvl in ["L1", "L2", "L3", "L4", "L5"]:
+            if lvl in levels:
+                level_map += f"{lvl:<5} {levels[lvl]:>8.2f}\n"
 
         level_map += "```"
         embed.add_field(name="🗺️ Battlefield Map", value=level_map, inline=False)
@@ -406,6 +406,7 @@ async def send_enhanced_scorecard():
 
     except Exception as e:
         logger.error(f"Error sending enhanced scorecard: {e}")
+
 
 
 # === Setup Alert Embed (Pre-Confirmation) ===
@@ -447,6 +448,7 @@ async def send_battle_signal(direction, level_name, level_price, entry, stop_los
     try:
         knight = assign_knight(trade_type)
         color = discord.Color.green() if direction == "Long" else discord.Color.red()
+        trade_id = str(uuid.uuid4())[:8]  # Short unique ID
 
         embed = discord.Embed(
             title=f"⚔️ Battle Signal - ETH {direction} {trade_type}",
@@ -475,6 +477,8 @@ async def send_battle_signal(direction, level_name, level_price, entry, stop_los
             inline=False
         )
 
+        embed.add_field(name="🆔 Trade ID", value=trade_id, inline=False)
+
         ct = embed.timestamp.astimezone(CENTRAL_TZ).strftime('%I:%M %p CT')
         utc = embed.timestamp.strftime('%H:%M UTC')
         embed.set_footer(text=f"🕒 {utc} | {ct} • May fortune favor the bold")
@@ -483,6 +487,19 @@ async def send_battle_signal(direction, level_name, level_price, entry, stop_los
         if channel:
             await channel.send(embed=embed)
             logger.info(f"✅ Battle signal sent: {direction} at {level_name}")
+
+        # === Store Trade for Exit Monitoring ===
+        active_trades["ETH"] = {
+            "id": trade_id,
+            "entry": entry,
+            "tp1": targets[0],
+            "tp2": targets[1],
+            "sl": stop_loss,
+            "side": direction,
+            "thread_id": None,
+            "knight": knight,
+            "rating": confidence
+        }
 
     except Exception as e:
         logger.error(f"Error in send_battle_signal: {e}")
