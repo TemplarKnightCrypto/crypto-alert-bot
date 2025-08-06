@@ -1,5 +1,5 @@
 # ============================================
-# The Control Tower - Templar Knight Crypto - v8.6
+# The Control Tower - Templar Knight Crypto - v8.7
 # ============================================
 
 # ============================================
@@ -374,7 +374,43 @@ async def send_enhanced_scorecard():
         )
         embed.add_field(name="📊 Technical Indicators", value=indicators_text, inline=False)
 
-        # === 🗺️ Battlefield Map – Full Map Fixed ===
+        if reasons:
+            embed.add_field(name="⚖️ Confluence Analysis", value="\n".join(reasons[:6]), inline=False)
+
+        ct_time = embed.timestamp.astimezone(CENTRAL_TZ).strftime('%I:%M %p CT')
+        utc_time = embed.timestamp.strftime('%H:%M UTC')
+        embed.set_footer(text=f"🕒 {utc_time} | {ct_time}")
+
+        channel = bot.get_channel(SCRIBES_KEEP_ID)
+        if channel:
+            await channel.send(embed=embed)
+            logger.info("✅ Enhanced scorecard sent to scribes-keep")
+
+    except Exception as e:
+        logger.error(f"Error sending enhanced scorecard: {e}")
+
+async def send_battlefield_map():
+    try:
+        df = fetch_ohlc("ETH", interval=1)
+        if df is None or len(df) < 5:
+            return
+
+        df = calculate_indicators(df)
+        if df is None:
+            return
+
+        latest = df.iloc[-1]
+        price = latest["close"]
+
+        high, low, close = fetch_daily_ohlc()
+        if any(x is None for x in [high, low, close]):
+            return
+
+        levels = calculate_camarilla(high, low, close)
+        if not levels:
+            return
+
+        # === Build Battlefield Map ===
         level_map = "```\n"
         for lvl in ["H5", "H4", "H3", "H2", "H1"]:
             if lvl in levels:
@@ -390,22 +426,28 @@ async def send_enhanced_scorecard():
                 level_map += f"{lvl:<5} {levels[lvl]:>8.2f}\n"
 
         level_map += "```"
-        embed.add_field(name="🗺️ Battlefield Map", value=level_map, inline=False)
 
-        if reasons:
-            embed.add_field(name="⚖️ Confluence Analysis", value="\n".join(reasons[:6]), inline=False)
+        # === Create Embed ===
+        embed = discord.Embed(
+            title="🗺️ ETH Battlefield Map",
+            description="*A tactical overlay of the Camarilla battlefield*",
+            color=discord.Color.dark_blue(),
+            timestamp=datetime.now(timezone.utc)
+        )
+
+        embed.add_field(name="🔍 Levels Overview", value=level_map, inline=False)
 
         ct_time = embed.timestamp.astimezone(CENTRAL_TZ).strftime('%I:%M %p CT')
         utc_time = embed.timestamp.strftime('%H:%M UTC')
         embed.set_footer(text=f"🕒 {utc_time} | {ct_time}")
 
-        channel = bot.get_channel(SCRIBES_KEEP_ID)
+        channel = bot.get_channel(SCRIBES_KEEP_ID)  # or use a dedicated map channel if desired
         if channel:
             await channel.send(embed=embed)
-            logger.info("✅ Enhanced scorecard sent to scribes-keep")
+            logger.info("📡 Battlefield map sent to scribes-keep")
 
     except Exception as e:
-        logger.error(f"Error sending enhanced scorecard: {e}")
+        logger.error(f"Error sending battlefield map: {e}")
 
 
 
@@ -811,6 +853,9 @@ async def monitor_trade_exits():
     except Exception as e:
         logger.error(f"Error in monitor_trade_exits: {e}")
 
+@tasks.loop(minutes=15)
+async def battlefield_map_loop():
+    await send_battlefield_map()
 
 # ============================================
 # Section 5: Battleground Update + Performance Chronicle
@@ -1013,7 +1058,9 @@ async def on_ready():
             performance_report.start()
         if not monitor_trade_exits.is_running():
             monitor_trade_exits.start()
-
+	if not battlefield_map_loop.is_running():
+            battlefield_map_loop.start()
+        
         embed = discord.Embed(
             title="🏰 Control Tower Activated",
             description="*Trade scanning and alert systems are online.*",
