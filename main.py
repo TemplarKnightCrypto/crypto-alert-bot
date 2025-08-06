@@ -1058,9 +1058,9 @@ async def on_ready():
             performance_report.start()
         if not monitor_trade_exits.is_running():
             monitor_trade_exits.start()
-	if not battlefield_map_loop.is_running():
+        if not battlefield_map_loop.is_running():  # FIXED INDENT HERE
             battlefield_map_loop.start()
-        
+      
         embed = discord.Embed(
             title="🏰 Control Tower Activated",
             description="*Trade scanning and alert systems are online.*",
