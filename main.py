@@ -770,6 +770,49 @@ async def send_100x_alert(price, score):
     except Exception as e:
         logger.error(f"Error sending 100x alert: {e}")
 
+async def send_proximity_warning(level_name, level_price, current_price, rsi, volume_ratio, trend):
+    try:
+        distance = current_price - level_price
+        distance_pct = (distance / current_price) * 100
+        direction = "🔼 Approaching from Below" if current_price < level_price else "🔽 Approaching from Above"
+
+        # Predict outcome
+        if trend == "up" and rsi > 55 and volume_ratio > 1.2:
+            outcome = "🟢 Likely Reversal"
+        elif trend == "down" and rsi < 45 and volume_ratio > 1.2:
+            outcome = "🔴 Likely Break"
+        else:
+            outcome = "⚪ Unclear / 50/50"
+
+        embed = discord.Embed(
+            title="🕰️ Knight's Warning – ETH",
+            description=f"*Price is nearing {level_name}*",
+            color=discord.Color.orange(),
+            timestamp=datetime.now(timezone.utc)
+        )
+
+        embed.add_field(name="📍 Level", value=f"{level_name} – ${level_price:.2f}", inline=True)
+        embed.add_field(name="💰 Current Price", value=f"${current_price:.2f}", inline=True)
+        embed.add_field(name="📉 Distance", value=f"{direction}\nΔ {distance:+.2f} ({distance_pct:+.2f}%)", inline=False)
+        embed.add_field(name="📊 RSI", value=f"{rsi:.1f}", inline=True)
+        embed.add_field(name="🔊 Volume Ratio", value=f"{volume_ratio:.2f}x", inline=True)
+        embed.add_field(name="🧠 Trend", value=f"{trend.title()}", inline=True)
+        embed.add_field(name="🔮 Outlook", value=outcome, inline=False)
+
+        now = datetime.now(timezone.utc)
+        ct = now.astimezone(CENTRAL_TZ).strftime('%I:%M %p CT')
+        utc = now.strftime('%H:%M UTC')
+        embed.set_footer(text=f"🕒 {utc} | {ct}")
+
+        channel = bot.get_channel(KNIGHTS_WATCH_ID)
+        if channel:
+            await channel.send(embed=embed)
+            logger.info(f"⚠️ Proximity warning sent for {level_name}")
+
+    except Exception as e:
+        logger.error(f"Error in send_proximity_warning: {e}")
+
+
 # === Camarilla Proximity Warning Scanner ===
 @tasks.loop(minutes=2)
 async def check_camarilla_warning():
