@@ -1,6 +1,6 @@
 # ============================================
-# The Control Tower - Templar Knight Crypto - v9.0 PRODUCTION
-# Complete Trade Tracking & Zero-Cost Deployment Ready
+# The Control Tower - Templar Knight Crypto - v10.0 ENHANCED
+# Complete Trade Tracking & H5/L5 Breakout Support
 # ============================================
 
 import os
@@ -130,7 +130,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "ETH Camarilla Alert Bot is running!"
+    return "ETH Camarilla Alert Bot v10.0 is running!"
 
 @app.route("/health")
 def health():
@@ -140,11 +140,13 @@ def health():
     
     return {
         "status": "healthy",
+        "version": "10.0",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "active_trades": active_count,
         "cache_size": cache_size,
         "tracking_enabled": trade_tracker is not None,
-        "memory_usage": f"{cache_size}/{MAX_CACHE_SIZE} cache slots"
+        "memory_usage": f"{cache_size}/{MAX_CACHE_SIZE} cache slots",
+        "features": ["H5_L5_Breakout", "Dynamic_Levels", "Trend_Following"]
     }
 
 @app.route("/stats")
@@ -156,7 +158,8 @@ def stats_endpoint():
         "uptime": uptime,
         "active_trades": len(active_trades),
         "cache_size": len(ohlc_cache.cache),
-        "tracking_online": trade_tracker is not None
+        "tracking_online": trade_tracker is not None,
+        "version": "10.0"
     }
 
 def run_flask():
@@ -172,7 +175,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ============================================
-# TRADE TRACKING SYSTEM
+# TRADE TRACKING SYSTEM (UNCHANGED)
 # ============================================
 
 class IntegratedTradeTracker:
@@ -516,7 +519,7 @@ class IntegratedTradeTracker:
 trade_tracker = None
 
 # ============================================
-# MARKET DATA & ANALYSIS FUNCTIONS
+# ENHANCED MARKET DATA & ANALYSIS FUNCTIONS
 # ============================================
 
 def retry_api_call(func, *args, **kwargs):
@@ -598,6 +601,166 @@ def calculate_camarilla(high, low, close):
         logger.error(f"Camarilla calculation error: {e}")
         return {}
 
+# ============================================
+# NEW ENHANCED LEVEL CALCULATION FUNCTIONS
+# ============================================
+
+def calculate_extended_camarilla(high, low, close):
+    """Calculate traditional + extended Camarilla levels for breakout scenarios"""
+    try:
+        range_ = high - low
+        
+        # Traditional Camarilla levels
+        traditional = {
+            "L5": close - (range_ * 1.1 / 2),
+            "L4": close - (range_ * 1.1 / 4),
+            "L3": close - (range_ * 1.1 / 6),
+            "P": close,
+            "H3": close + (range_ * 1.1 / 6),
+            "H4": close + (range_ * 1.1 / 4),
+            "H5": close + (range_ * 1.1 / 2)
+        }
+        
+        # Extended levels for breakout scenarios
+        extended = {
+            "L6": close - (range_ * 1.1 * 0.75),  # 75% of range below
+            "L7": close - (range_ * 1.1 * 1.0),   # Full range below
+            "H6": close + (range_ * 1.1 * 0.75),  # 75% of range above
+            "H7": close + (range_ * 1.1 * 1.0)    # Full range above
+        }
+        
+        return {**traditional, **extended}
+        
+    except Exception as e:
+        logger.error(f"Extended Camarilla calculation error: {e}")
+        return {}
+
+def calculate_atr(df, period=14):
+    """Calculate Average True Range"""
+    try:
+        df = df.copy()
+        df['h-l'] = df['high'] - df['low']
+        df['h-pc'] = abs(df['high'] - df['close'].shift(1))
+        df['l-pc'] = abs(df['low'] - df['close'].shift(1))
+        df['tr'] = df[['h-l', 'h-pc', 'l-pc']].max(axis=1)
+        df['atr'] = df['tr'].rolling(window=period).mean()
+        return df['atr']
+    except Exception as e:
+        logger.error(f"ATR calculation error: {e}")
+        return pd.Series()
+
+def calculate_dynamic_levels(df, current_price):
+    """Calculate dynamic support/resistance levels based on recent price action"""
+    try:
+        if df is None or len(df) < 50:
+            return {}
+        
+        # Get recent highs and lows for dynamic levels
+        recent_df = df.tail(20)
+        
+        # Support levels (recent swing lows)
+        swing_lows = []
+        for i in range(2, len(recent_df) - 2):
+            if (recent_df.iloc[i]['low'] < recent_df.iloc[i-1]['low'] and 
+                recent_df.iloc[i]['low'] < recent_df.iloc[i-2]['low'] and
+                recent_df.iloc[i]['low'] < recent_df.iloc[i+1]['low'] and
+                recent_df.iloc[i]['low'] < recent_df.iloc[i+2]['low']):
+                swing_lows.append(recent_df.iloc[i]['low'])
+        
+        # Resistance levels (recent swing highs)
+        swing_highs = []
+        for i in range(2, len(recent_df) - 2):
+            if (recent_df.iloc[i]['high'] > recent_df.iloc[i-1]['high'] and 
+                recent_df.iloc[i]['high'] > recent_df.iloc[i-2]['high'] and
+                recent_df.iloc[i]['high'] > recent_df.iloc[i+1]['high'] and
+                recent_df.iloc[i]['high'] > recent_df.iloc[i+2]['high']):
+                swing_highs.append(recent_df.iloc[i]['high'])
+        
+        # ATR-based levels
+        atr = calculate_atr(df, period=14)
+        latest_atr = atr.iloc[-1] if not atr.empty else 20
+        
+        dynamic_levels = {}
+        
+        # Add closest swing levels
+        if swing_lows:
+            closest_support = max([sl for sl in swing_lows if sl < current_price], default=None)
+            if closest_support:
+                dynamic_levels["DYN_SUPPORT"] = closest_support
+        
+        if swing_highs:
+            closest_resistance = min([sh for sh in swing_highs if sh > current_price], default=None)
+            if closest_resistance:
+                dynamic_levels["DYN_RESISTANCE"] = closest_resistance
+        
+        # ATR-based levels around current price
+        dynamic_levels.update({
+            "ATR_SUPPORT_1": current_price - latest_atr,
+            "ATR_SUPPORT_2": current_price - (latest_atr * 2),
+            "ATR_RESISTANCE_1": current_price + latest_atr,
+            "ATR_RESISTANCE_2": current_price + (latest_atr * 2)
+        })
+        
+        return dynamic_levels
+        
+    except Exception as e:
+        logger.error(f"Dynamic levels calculation error: {e}")
+        return {}
+
+def detect_breakout_scenario(df, cam_levels, current_price):
+    """Detect if we're in a breakout scenario beyond H5/L5"""
+    try:
+        if not cam_levels or df is None or len(df) < 5:
+            return None, None
+        
+        h5 = cam_levels.get("H5")
+        l5 = cam_levels.get("L5")
+        
+        if not h5 or not l5:
+            return None, None
+        
+        # Check if price has broken beyond traditional levels
+        if current_price > h5:
+            return "BULLISH_BREAKOUT", "above_H5"
+        elif current_price < l5:
+            return "BEARISH_BREAKOUT", "below_L5"
+        else:
+            return "WITHIN_RANGE", "normal"
+            
+    except Exception as e:
+        logger.error(f"Breakout detection error: {e}")
+        return None, None
+
+def calculate_trend_strength(df, period=20):
+    """Calculate trend strength using linear regression slope"""
+    try:
+        if df is None or len(df) < period:
+            return 0, "NEUTRAL"
+        
+        recent_closes = df['close'].tail(period).values
+        x = np.arange(len(recent_closes))
+        
+        # Linear regression to find trend slope
+        slope = np.polyfit(x, recent_closes, 1)[0]
+        
+        # Normalize slope relative to price
+        normalized_slope = (slope / recent_closes[-1]) * 100
+        
+        if normalized_slope > 0.5:
+            return normalized_slope, "STRONG_BULL"
+        elif normalized_slope > 0.1:
+            return normalized_slope, "WEAK_BULL"
+        elif normalized_slope < -0.5:
+            return normalized_slope, "STRONG_BEAR"
+        elif normalized_slope < -0.1:
+            return normalized_slope, "WEAK_BEAR"
+        else:
+            return normalized_slope, "NEUTRAL"
+            
+    except Exception as e:
+        logger.error(f"Trend strength calculation error: {e}")
+        return 0, "NEUTRAL"
+
 def calculate_indicators(df):
     if df is None or len(df) < 20:
         return None
@@ -654,7 +817,305 @@ def assign_knight(strategy_type):
         return "Orion Vellum 🌘"
 
 # ============================================
-# DISCORD EMBED FUNCTIONS
+# ENHANCED SCANNING LOGIC
+# ============================================
+
+async def scan_bullish_breakout_signals(df, levels, breakout_type, trend_strength):
+    """Scan for continuation signals in bullish breakout scenarios"""
+    try:
+        latest = df.iloc[-1]
+        current_price = latest["close"]
+        open_price = latest["open"]
+        high_price = latest["high"]
+        low_price = latest["low"]
+        volume = latest["volume"]
+        avg_volume = df["volume"].tail(10).mean()
+        rsi = latest["rsi"]
+        
+        # Look for relevant levels above current price
+        relevant_levels = {}
+        for name, level in levels.items():
+            if level > current_price and abs(level - current_price) / current_price < 0.02:  # Within 2%
+                relevant_levels[name] = level
+        
+        # If no relevant levels, create ATR-based targets
+        if not relevant_levels:
+            atr = calculate_atr(df, 14).iloc[-1] if len(df) >= 14 else 20
+            relevant_levels = {
+                "ATR_T1": current_price + atr,
+                "ATR_T2": current_price + (atr * 2),
+                "ATR_T3": current_price + (atr * 3)
+            }
+        
+        # Signal conditions for bullish breakout continuation
+        signal_conditions = []
+        score = 0
+        
+        # Volume confirmation
+        if volume > avg_volume * 1.3:
+            signal_conditions.append("✅ Strong Volume")
+            score += 2
+        elif volume > avg_volume:
+            signal_conditions.append("✅ Above Average Volume")
+            score += 1
+        
+        # RSI conditions (not overbought)
+        if rsi < 75:
+            signal_conditions.append("✅ RSI Not Overbought")
+            score += 1
+        
+        # Trend strength
+        if trend_strength in ["STRONG_BULL", "WEAK_BULL"]:
+            signal_conditions.append(f"✅ {trend_strength} Trend")
+            score += 2 if trend_strength == "STRONG_BULL" else 1
+        
+        # Candle pattern (bullish engulfing or strong green candle)
+        body_size = abs(current_price - open_price)
+        candle_range = high_price - low_price
+        body_ratio = body_size / candle_range if candle_range > 0 else 0
+        
+        if current_price > open_price and body_ratio > 0.6:
+            signal_conditions.append("✅ Strong Bullish Candle")
+            score += 1
+        
+        # Price action near support (pullback opportunity)
+        support_levels = [level for name, level in levels.items() 
+                         if level < current_price and "SUPPORT" in name.upper()]
+        
+        nearest_support = max(support_levels) if support_levels else current_price * 0.99
+        
+        # Generate signal if conditions met
+        if score >= 4:  # Require at least 4 points for breakout continuation
+            # Find best target level
+            target_level = min(relevant_levels.items(), key=lambda x: abs(x[1] - current_price))
+            level_name, level_price = target_level
+            
+            # Calculate targets and stop loss
+            entry = current_price
+            stop_loss = max(nearest_support, current_price * 0.985)  # 1.5% max risk
+            
+            # Progressive targets
+            distance_to_target = level_price - entry
+            tp1 = entry + (distance_to_target * 0.5)  # 50% to target
+            tp2 = level_price  # Full target
+            
+            await send_breakout_continuation_signal(
+                direction="Long",
+                signal_type="Bullish Breakout Continuation",
+                level_name=level_name,
+                level_price=level_price,
+                entry=entry,
+                stop_loss=stop_loss,
+                targets=[tp1, tp2],
+                score=score,
+                conditions=signal_conditions,
+                breakout_context=f"Price above H5 - {trend_strength} trend"
+            )
+            
+    except Exception as e:
+        logger.error(f"Error in scan_bullish_breakout_signals: {e}")
+
+async def scan_bearish_breakout_signals(df, levels, breakout_type, trend_strength):
+    """Scan for continuation signals in bearish breakout scenarios"""
+    try:
+        latest = df.iloc[-1]
+        current_price = latest["close"]
+        open_price = latest["open"]
+        high_price = latest["high"]
+        low_price = latest["low"]
+        volume = latest["volume"]
+        avg_volume = df["volume"].tail(10).mean()
+        rsi = latest["rsi"]
+        
+        # Look for relevant levels below current price
+        relevant_levels = {}
+        for name, level in levels.items():
+            if level < current_price and abs(current_price - level) / current_price < 0.02:  # Within 2%
+                relevant_levels[name] = level
+        
+        # If no relevant levels, create ATR-based targets
+        if not relevant_levels:
+            atr = calculate_atr(df, 14).iloc[-1] if len(df) >= 14 else 20
+            relevant_levels = {
+                "ATR_T1": current_price - atr,
+                "ATR_T2": current_price - (atr * 2),
+                "ATR_T3": current_price - (atr * 3)
+            }
+        
+        # Signal conditions for bearish breakout continuation
+        signal_conditions = []
+        score = 0
+        
+        # Volume confirmation
+        if volume > avg_volume * 1.3:
+            signal_conditions.append("✅ Strong Volume")
+            score += 2
+        elif volume > avg_volume:
+            signal_conditions.append("✅ Above Average Volume")
+            score += 1
+        
+        # RSI conditions (not oversold)
+        if rsi > 25:
+            signal_conditions.append("✅ RSI Not Oversold")
+            score += 1
+        
+        # Trend strength
+        if trend_strength in ["STRONG_BEAR", "WEAK_BEAR"]:
+            signal_conditions.append(f"✅ {trend_strength} Trend")
+            score += 2 if trend_strength == "STRONG_BEAR" else 1
+        
+        # Candle pattern (bearish engulfing or strong red candle)
+        body_size = abs(current_price - open_price)
+        candle_range = high_price - low_price
+        body_ratio = body_size / candle_range if candle_range > 0 else 0
+        
+        if current_price < open_price and body_ratio > 0.6:
+            signal_conditions.append("✅ Strong Bearish Candle")
+            score += 1
+        
+        # Price action near resistance (rejection opportunity)
+        resistance_levels = [level for name, level in levels.items() 
+                           if level > current_price and "RESISTANCE" in name.upper()]
+        
+        nearest_resistance = min(resistance_levels) if resistance_levels else current_price * 1.01
+        
+        # Generate signal if conditions met
+        if score >= 4:  # Require at least 4 points for breakout continuation
+            # Find best target level
+            target_level = max(relevant_levels.items(), key=lambda x: x[1])  # Closest level below
+            level_name, level_price = target_level
+            
+            # Calculate targets and stop loss
+            entry = current_price
+            stop_loss = min(nearest_resistance, current_price * 1.015)  # 1.5% max risk
+            
+            # Progressive targets
+            distance_to_target = entry - level_price
+            tp1 = entry - (distance_to_target * 0.5)  # 50% to target
+            tp2 = level_price  # Full target
+            
+            await send_breakout_continuation_signal(
+                direction="Short",
+                signal_type="Bearish Breakout Continuation",
+                level_name=level_name,
+                level_price=level_price,
+                entry=entry,
+                stop_loss=stop_loss,
+                targets=[tp1, tp2],
+                score=score,
+                conditions=signal_conditions,
+                breakout_context=f"Price below L5 - {trend_strength} trend"
+            )
+            
+    except Exception as e:
+        logger.error(f"Error in scan_bearish_breakout_signals: {e}")
+
+async def scan_traditional_camarilla(df, cam_levels):
+    """Traditional Camarilla scanning for when price is within normal range"""
+    try:
+        latest = df.iloc[-1]
+        price = latest["close"]
+        open_ = latest["open"]
+        high_ = latest["high"]
+        low_ = latest["low"]
+        volume = latest["volume"]
+        avg_volume = df["volume"].tail(10).mean()
+        rsi = latest["rsi"]
+        rsi_trend = "up" if rsi > df["rsi"].iloc[-3] else "down"
+        price_trend = price > df["close"].iloc[-3]
+
+        closest = min(cam_levels.items(), key=lambda x: abs(price - x[1]))
+        level_name, level_price = closest
+        level_dist_pct = abs(price - level_price) / price * 100
+        direction = "Long" if price > level_price else "Short"
+
+        body = abs(price - open_)
+        range_ = high_ - low_
+        body_ratio = body / range_ if range_ > 0 else 0
+        volume_ok = volume > avg_volume * 1.2
+
+        breakout_confirmed = (
+            ((price > level_price and open_ < level_price) or
+             (price < level_price and open_ > level_price)) and
+            body_ratio > 0.5 and
+            volume_ok
+        )
+
+        reversal_confirmed = (
+            level_dist_pct <= 0.2 and
+            ((high_ > level_price > price and direction == "Short") or
+             (low_ < level_price < price and direction == "Long")) and
+            body_ratio > 0.5 and
+            volume_ok and
+            ((rsi < 40 and direction == "Long") or (rsi > 60 and direction == "Short"))
+        )
+
+        score = score_trade(rsi, rsi_trend, direction, price, level_price, volume, avg_volume, price_trend)
+        confidence = get_tier_label(score)
+
+        entry = round(price, 2)
+        stop_pct = 0.01
+        if direction == "Long":
+            sl = round(entry * (1 - stop_pct), 2)
+            tp1 = round(entry * 1.015, 2)
+            tp2 = round(entry * 1.03, 2)
+        else:
+            sl = round(entry * (1 + stop_pct), 2)
+            tp1 = round(entry * 0.985, 2)
+            tp2 = round(entry * 0.97, 2)
+
+        key = f"{level_name}_{direction}"
+        now = datetime.now(timezone.utc)
+
+        if breakout_confirmed or reversal_confirmed:
+            last_alert = CAMARILLA_COOLDOWN.get(key)
+            if last_alert and (now - last_alert < timedelta(minutes=CAMARILLA_COOLDOWN_MINUTES)):
+                return
+
+            CAMARILLA_COOLDOWN[key] = now
+
+            trade_type = "Breakout" if breakout_confirmed else "Reversal"
+
+            await send_battle_signal(
+                direction=direction,
+                level_name=level_name,
+                level_price=level_price,
+                entry=entry,
+                stop_loss=sl,
+                targets=[tp1, tp2],
+                confidence=confidence,
+                score=score,
+                trade_type=trade_type
+            )
+
+        else:
+            missing = []
+            if body_ratio <= 0.5:
+                missing.append("🧱 Weak Candle Body")
+            if not volume_ok:
+                missing.append("🔇 Volume Below Threshold")
+            if (price > level_price and open_ > level_price) or (price < level_price and open_ < level_price):
+                missing.append("📉 No Breakout Structure")
+
+            setup_key = f"{level_name}_{direction}_setup"
+            last_setup = setup_alert_cooldowns.get(setup_key)
+            if last_setup and (now - last_setup).total_seconds() < SETUP_ALERT_COOLDOWN_MINUTES * 60:
+                return
+
+            setup_alert_cooldowns[setup_key] = now
+            await send_setup_alert(
+                direction=direction,
+                level_name=level_name,
+                level_price=level_price,
+                score=score,
+                missing_items=missing
+            )
+
+    except Exception as e:
+        logger.error(f"Error in scan_traditional_camarilla: {e}")
+
+# ============================================
+# DISCORD EMBED FUNCTIONS (UNCHANGED + NEW)
 # ============================================
 
 def evaluate_scorecard(df, cam):
@@ -941,7 +1402,7 @@ async def send_battle_signal(direction, level_name, level_price, entry, stop_los
             "rating": confidence
         }
 
-        # NEW: Log to tracking system
+        # Log to tracking system
         if trade_tracker:
             trade_data = {
                 "id": trade_id,
@@ -959,6 +1420,92 @@ async def send_battle_signal(direction, level_name, level_price, entry, stop_los
 
     except Exception as e:
         logger.error(f"Error in send_battle_signal: {e}")
+
+async def send_breakout_continuation_signal(direction, signal_type, level_name, level_price, 
+                                          entry, stop_loss, targets, score, conditions, breakout_context):
+    """Send enhanced breakout continuation signal"""
+    try:
+        knight = assign_knight("Breakout")
+        color = discord.Color.gold() if direction == "Long" else discord.Color.dark_red()
+        trade_id = str(uuid.uuid4())[:8]
+
+        embed = discord.Embed(
+            title=f"🚀 {signal_type} - ETH {direction}",
+            description=f"*{knight} signals continuation beyond traditional levels*",
+            color=color,
+            timestamp=datetime.now(timezone.utc)
+        )
+
+        embed.add_field(name="🎯 Context", value=breakout_context, inline=False)
+        embed.add_field(name="🛡️ Knight", value=knight, inline=True)
+        embed.add_field(name="📍 Target Level", value=f"{level_name} (${level_price:.2f})", inline=True)
+        embed.add_field(name="⭐ Score", value=f"{score}/8", inline=True)
+        
+        embed.add_field(name="⚔️ Entry", value=f"${entry:.2f}", inline=True)
+        embed.add_field(name="🛑 Stop Loss", value=f"${stop_loss:.2f}", inline=True)
+        embed.add_field(name="🎯 Targets", value=f"${targets[0]:.2f} | ${targets[1]:.2f}", inline=True)
+
+        # Risk calculation
+        risk_pct = abs((entry - stop_loss) / entry) * 100
+        reward1_pct = abs((targets[0] - entry) / entry) * 100
+        reward2_pct = abs((targets[1] - entry) / entry) * 100
+
+        embed.add_field(
+            name="📊 Risk Analysis",
+            value=(f"**Risk:** {risk_pct:.1f}%\n"
+                   f"**R:R1:** 1:{reward1_pct/risk_pct:.1f}\n"
+                   f"**R:R2:** 1:{reward2_pct/risk_pct:.1f}"),
+            inline=True
+        )
+        
+        embed.add_field(
+            name="✅ Signal Confirmation",
+            value="\n".join(conditions[:6]),  # Show first 6 conditions
+            inline=False
+        )
+
+        embed.add_field(name="🆔 Trade ID", value=trade_id, inline=False)
+
+        ct = embed.timestamp.astimezone(CENTRAL_TZ).strftime('%I:%M %p CT')
+        utc = embed.timestamp.strftime('%H:%M UTC')
+        embed.set_footer(text=f"🕒 {utc} | {ct} • Breakout Continuation Strategy")
+
+        channel = bot.get_channel(BATTLE_SIGNALS_ID)
+        if channel:
+            await channel.send(embed=embed)
+            logger.warning(f"✅ Breakout continuation signal: {direction} targeting {level_name}")
+
+        # Store in active trades
+        active_trades["ETH"] = {
+            "id": trade_id,
+            "entry": entry,
+            "tp1": targets[0],
+            "tp2": targets[1],
+            "sl": stop_loss,
+            "side": direction,
+            "thread_id": None,
+            "knight": knight,
+            "rating": f"Breakout Score: {score}/8"
+        }
+
+        # Log to tracking system
+        if trade_tracker:
+            trade_data = {
+                "id": trade_id,
+                "entry_price": entry,
+                "tp1": targets[0],
+                "tp2": targets[1],
+                "sl": stop_loss,
+                "direction": direction,
+                "level_name": level_name,
+                "score": score,
+                "knight": knight,
+                "rating": f"Breakout Continuation"
+            }
+            await trade_tracker.log_trade_entry(trade_data)
+
+    except Exception as e:
+        logger.error(f"Error sending breakout continuation signal: {e}")
 
 async def send_exit_alert(reason, price, thread_id, direction, alert_id):
     now = datetime.now(timezone.utc)
@@ -1132,11 +1679,12 @@ async def send_battleground_embed():
         logger.error(f"Error in send_battleground_embed: {e}")
 
 # ============================================
-# SCANNER TASKS
+# ENHANCED SCANNER TASKS
 # ============================================
 
 @tasks.loop(minutes=2)
-async def scan_camarilla_trades():
+async def enhanced_camarilla_scan():
+    """Enhanced scanner that works beyond H5/L5 breakouts"""
     try:
         df = fetch_ohlc("ETH", interval=5)
         if df is None:
@@ -1146,113 +1694,42 @@ async def scan_camarilla_trades():
         if df is None or len(df) < 20:
             return
 
+        # Get market data
         high, low, close = fetch_daily_ohlc()
         if any(x is None for x in [high, low, close]):
             return
-        cam = calculate_camarilla(high, low, close)
-        if not cam:
+            
+        # Calculate all level types
+        cam_levels = calculate_extended_camarilla(high, low, close)
+        if not cam_levels:
             return
 
         latest = df.iloc[-1]
-        price = latest["close"]
-        open_ = latest["open"]
-        high_ = latest["high"]
-        low_ = latest["low"]
-        volume = latest["volume"]
-        avg_volume = df["volume"].tail(10).mean()
-        rsi = latest["rsi"]
-        rsi_trend = "up" if rsi > df["rsi"].iloc[-3] else "down"
-        price_trend = price > df["close"].iloc[-3]
-
-        closest = min(cam.items(), key=lambda x: abs(price - x[1]))
-        level_name, level_price = closest
-        level_dist_pct = abs(price - level_price) / price * 100
-        direction = "Long" if price > level_price else "Short"
-
-        body = abs(price - open_)
-        range_ = high_ - low_
-        body_ratio = body / range_ if range_ > 0 else 0
-        volume_ok = volume > avg_volume * 1.2
-
-        breakout_confirmed = (
-            ((price > level_price and open_ < level_price) or
-             (price < level_price and open_ > level_price)) and
-            body_ratio > 0.5 and
-            volume_ok
-        )
-
-        reversal_confirmed = (
-            level_dist_pct <= 0.2 and
-            ((high_ > level_price > price and direction == "Short") or
-             (low_ < level_price < price and direction == "Long")) and
-            body_ratio > 0.5 and
-            volume_ok and
-            ((rsi < 40 and direction == "Long") or (rsi > 60 and direction == "Short"))
-        )
-
-        score = score_trade(rsi, rsi_trend, direction, price, level_price, volume, avg_volume, price_trend)
-        confidence = get_tier_label(score)
-
-        entry = round(price, 2)
-        stop_pct = 0.01
-        if direction == "Long":
-            sl = round(entry * (1 - stop_pct), 2)
-            tp1 = round(entry * 1.015, 2)
-            tp2 = round(entry * 1.03, 2)
+        current_price = latest["close"]
+        
+        # Get dynamic levels
+        dynamic_levels = calculate_dynamic_levels(df, current_price)
+        
+        # Combine all levels
+        all_levels = {**cam_levels, **dynamic_levels}
+        
+        # Detect breakout scenario
+        breakout_type, scenario = detect_breakout_scenario(df, cam_levels, current_price)
+        
+        # Calculate trend strength
+        trend_slope, trend_strength = calculate_trend_strength(df)
+        
+        # Enhanced signal logic based on scenario
+        if scenario == "above_H5":
+            await scan_bullish_breakout_signals(df, all_levels, breakout_type, trend_strength)
+        elif scenario == "below_L5":
+            await scan_bearish_breakout_signals(df, all_levels, breakout_type, trend_strength)
         else:
-            sl = round(entry * (1 + stop_pct), 2)
-            tp1 = round(entry * 0.985, 2)
-            tp2 = round(entry * 0.97, 2)
-
-        key = f"{level_name}_{direction}"
-        now = datetime.now(timezone.utc)
-
-        if breakout_confirmed or reversal_confirmed:
-            last_alert = CAMARILLA_COOLDOWN.get(key)
-            if last_alert and (now - last_alert < timedelta(minutes=CAMARILLA_COOLDOWN_MINUTES)):
-                return
-
-            CAMARILLA_COOLDOWN[key] = now
-
-            trade_type = "Breakout" if breakout_confirmed else "Reversal"
-
-            await send_battle_signal(
-                direction=direction,
-                level_name=level_name,
-                level_price=level_price,
-                entry=entry,
-                stop_loss=sl,
-                targets=[tp1, tp2],
-                confidence=confidence,
-                score=score,
-                trade_type=trade_type
-            )
-
-        else:
-            missing = []
-            if body_ratio <= 0.5:
-                missing.append("🧱 Weak Candle Body")
-            if not volume_ok:
-                missing.append("🔇 Volume Below Threshold")
-            if (price > level_price and open_ > level_price) or (price < level_price and open_ < level_price):
-                missing.append("📉 No Breakout Structure")
-
-            setup_key = f"{level_name}_{direction}_setup"
-            last_setup = setup_alert_cooldowns.get(setup_key)
-            if last_setup and (now - last_setup).total_seconds() < SETUP_ALERT_COOLDOWN_MINUTES * 60:
-                return
-
-            setup_alert_cooldowns[setup_key] = now
-            await send_setup_alert(
-                direction=direction,
-                level_name=level_name,
-                level_price=level_price,
-                score=score,
-                missing_items=missing
-            )
-
+            # Traditional Camarilla scanning
+            await scan_traditional_camarilla(df, cam_levels)
+            
     except Exception as e:
-        logger.error(f"Error in scan_camarilla_trades: {e}")
+        logger.error(f"Error in enhanced_camarilla_scan: {e}")
 
 @tasks.loop(minutes=1)
 async def trade_100x_scan():
@@ -1440,17 +1917,17 @@ async def performance_report():
 
         embed.add_field(
             name="📊 System Status",
-            value="✅ All systems operational\n✅ API connections stable\n✅ All channels active\n✅ Trade tracking online",
+            value="✅ All systems operational\n✅ API connections stable\n✅ All channels active\n✅ Trade tracking online\n✅ H5/L5 breakout support active",
             inline=False
         )
 
         embed.add_field(
             name="📈 Activity Summary",
-            value="Chronicle: Every 15min\nSignals: Real-time\nEagle: 100x high-conviction\nWatch: Level proximity\nTracking: Full logging",
+            value="Chronicle: Every 15min\nSignals: Real-time\nEagle: 100x high-conviction\nWatch: Level proximity\nTracking: Full logging\nBreakout: Beyond H5/L5",
             inline=True
         )
 
-        embed.set_footer(text=f"🕒 {now.strftime('%H:%M UTC')} | {ct_now.strftime('%I:%M %p CT')}")
+        embed.set_footer(text=f"🕒 {now.strftime('%H:%M UTC')} | {ct_now.strftime('%I:%M %p CT')} • v10.0")
 
         channel = bot.get_channel(SCROLLS_ORDER_ID)
         if channel:
@@ -1657,7 +2134,7 @@ async def list_recent_trades(ctx, count: int = 5):
 async def status(ctx):
     try:
         embed = discord.Embed(
-            title="🤖 Knight's Status Report",
+            title="🤖 Knight's Status Report v10.0",
             color=discord.Color.green(),
             timestamp=datetime.now(timezone.utc)
         )
@@ -1666,11 +2143,12 @@ async def status(ctx):
 
         task_status = (
             f"📜 Chronicle: {'✅' if chronicle_loop.is_running() else '❌'}\n"
-            f"⚔️ Signals: {'✅' if scan_camarilla_trades.is_running() else '❌'}\n"
+            f"⚔️ Enhanced Signals: {'✅' if enhanced_camarilla_scan.is_running() else '❌'}\n"
             f"🦅 Eagle: {'✅' if trade_100x_scan.is_running() else '❌'}\n"
             f"👁️ Watch: {'✅' if check_camarilla_warning.is_running() else '❌'}\n"
             f"🏰 Battleground: {'✅' if battleground_loop.is_running() else '❌'}\n"
-            f"📊 Tracking: {'✅' if trade_tracker else '❌'}"
+            f"📊 Tracking: {'✅' if trade_tracker else '❌'}\n"
+            f"🚀 H5/L5 Breakouts: ✅ Active"
         )
 
         embed.add_field(name="🔄 Active Tasks", value=task_status, inline=False)
@@ -1681,6 +2159,12 @@ async def status(ctx):
                 value=f"Trades: {trade_tracker.daily_stats['trades']}\nWins: {trade_tracker.daily_stats['wins']}\nPnL: {trade_tracker.daily_stats['total_pnl']:+.2f}%", 
                 inline=True
             )
+        
+        embed.add_field(
+            name="🆕 v10.0 Features", 
+            value="✅ Extended Camarilla Levels\n✅ Dynamic Support/Resistance\n✅ Trend Following Signals\n✅ ATR-based Targets", 
+            inline=True
+        )
         
         await ctx.send(embed=embed)
 
@@ -1740,11 +2224,62 @@ async def test_chronicle(ctx):
     else:
         await ctx.send("⚠️ Administrator permissions required")
 
+@bot.command(name='test_breakout')
+async def test_breakout(ctx):
+    """Test the breakout detection system"""
+    if ctx.author.guild_permissions.administrator:
+        try:
+            df = fetch_ohlc("ETH", interval=5)
+            if df is None:
+                await ctx.send("❌ Could not fetch data")
+                return
+                
+            df = calculate_indicators(df)
+            if df is None:
+                await ctx.send("❌ Could not calculate indicators")
+                return
+                
+            high, low, close = fetch_daily_ohlc()
+            if any(x is None for x in [high, low, close]):
+                await ctx.send("❌ Could not fetch daily data")
+                return
+                
+            cam_levels = calculate_extended_camarilla(high, low, close)
+            current_price = df.iloc[-1]["close"]
+            
+            breakout_type, scenario = detect_breakout_scenario(df, cam_levels, current_price)
+            trend_slope, trend_strength = calculate_trend_strength(df)
+            
+            embed = discord.Embed(
+                title="🧪 Breakout Detection Test",
+                color=discord.Color.blue(),
+                timestamp=datetime.now(timezone.utc)
+            )
+            
+            embed.add_field(name="💰 Current Price", value=f"${current_price:.2f}", inline=True)
+            embed.add_field(name="🏗️ H5 Level", value=f"${cam_levels.get('H5', 0):.2f}", inline=True)
+            embed.add_field(name="🏗️ L5 Level", value=f"${cam_levels.get('L5', 0):.2f}", inline=True)
+            embed.add_field(name="📊 Scenario", value=scenario or "Unknown", inline=True)
+            embed.add_field(name="🚀 Breakout Type", value=breakout_type or "None", inline=True)
+            embed.add_field(name="📈 Trend Strength", value=f"{trend_strength} ({trend_slope:.3f})", inline=True)
+            
+            dynamic_levels = calculate_dynamic_levels(df, current_price)
+            if dynamic_levels:
+                levels_text = "\n".join([f"{k}: ${v:.2f}" for k, v in list(dynamic_levels.items())[:4]])
+                embed.add_field(name="🎯 Dynamic Levels", value=levels_text, inline=False)
+            
+            await ctx.send(embed=embed)
+            
+        except Exception as e:
+            await ctx.send(f"❌ Test error: {e}")
+    else:
+        await ctx.send("⚠️ Administrator permissions required")
+
 @bot.command(name='health')
 async def system_health(ctx):
     """Comprehensive system health check"""
     if ctx.author.guild_permissions.administrator:
-        embed = discord.Embed(title="🏥 System Health", color=discord.Color.green())
+        embed = discord.Embed(title="🏥 System Health v10.0", color=discord.Color.green())
         
         # Basic bot health
         uptime = datetime.now(timezone.utc) - bot_start_time if bot_start_time else timedelta(0)
@@ -1759,6 +2294,9 @@ async def system_health(ctx):
         cache_size = len(ohlc_cache.cache)
         embed.add_field(name="🧠 Memory", value=f"{cache_size}/{MAX_CACHE_SIZE} cache slots", inline=True)
         embed.add_field(name="🔄 Active Trades", value=str(len(active_trades)), inline=True)
+        
+        # Enhanced features status
+        embed.add_field(name="🚀 Enhanced Features", value="✅ H5/L5 Breakout Support\n✅ Dynamic Levels\n✅ Trend Following", inline=True)
         
         # Google Sheets integration
         sheets_status = "✅ Configured" if trade_tracker and trade_tracker.sheets_webhook else "❌ Not configured"
@@ -1783,9 +2321,9 @@ async def on_ready():
     logger.warning(f"🟢 Bot logged in as {bot.user}")
 
     try:
-        # Start all monitoring tasks
-        if not scan_camarilla_trades.is_running():
-            scan_camarilla_trades.start()
+        # Start all monitoring tasks with ENHANCED scanner
+        if not enhanced_camarilla_scan.is_running():
+            enhanced_camarilla_scan.start()
         if not chronicle_loop.is_running():
             chronicle_loop.start()
         if not trade_100x_scan.is_running():
@@ -1805,15 +2343,21 @@ async def on_ready():
 
         # Send startup notification
         embed = discord.Embed(
-            title="🏰 Control Tower Activated - v9.0",
-            description="*Complete trade tracking and alert systems online*",
-            color=discord.Color.green(),
+            title="🏰 Control Tower Activated - v10.0 ENHANCED",
+            description="*Complete trade tracking with H5/L5 breakout support*",
+            color=discord.Color.gold(),
             timestamp=datetime.now(timezone.utc)
         )
         
         embed.add_field(
-            name="📊 New Features", 
-            value="✅ Full Trade Tracking\n✅ Performance Analytics\n✅ CSV Export\n✅ Real-time Stats\n✅ Google Sheets Integration", 
+            name="🆕 NEW v10.0 Features", 
+            value="🚀 **H5/L5 Breakout Signals**\n✅ Extended Camarilla Levels (H6/H7, L6/L7)\n🎯 Dynamic Support/Resistance Detection\n📈 Trend Following Continuation Signals\n🔄 ATR-based Target Generation", 
+            inline=False
+        )
+        
+        embed.add_field(
+            name="📊 Existing Features", 
+            value="✅ Full Trade Tracking\n✅ Performance Analytics\n✅ CSV Export\n✅ Real-time Stats\n✅ Google Sheets Integration\n✅ Multi-channel Discord Alerts", 
             inline=True
         )
         embed.add_field(
@@ -1823,13 +2367,13 @@ async def on_ready():
         )
         embed.add_field(
             name="📈 Commands", 
-            value="`!report [days]`\n`!stats`\n`!export [days]`\n`!trades [count]`\n`!health`", 
+            value="`!report [days]`\n`!stats`\n`!export [days]`\n`!trades [count]`\n`!health`\n`!test_breakout`", 
             inline=True
         )
         
         embed.add_field(
-            name="🔧 System Info",
-            value=f"**Deployment:** Render Free Tier\n**Memory:** Optimized for 512MB\n**Uptime:** UptimeRobot monitoring\n**Cost:** $0.00/month",
+            name="🔧 Enhanced Capabilities",
+            value=f"**Breakout Detection:** Beyond traditional H5/L5 levels\n**Dynamic Levels:** Real-time support/resistance\n**Trend Analysis:** Linear regression slope detection\n**Smart Targets:** ATR-based when no levels available",
             inline=False
         )
         
@@ -1872,9 +2416,10 @@ def start_flask_thread():
 # ============================================
 
 if __name__ == "__main__":
-    logger.warning("🚀 Starting Control Tower ETH Camarilla Bot v9.0 - Production Ready")
-    logger.warning("📊 Features: Full trade tracking, performance analytics, zero-cost deployment")
+    logger.warning("🚀 Starting Control Tower ETH Camarilla Bot v10.0 - ENHANCED EDITION")
+    logger.warning("📊 Features: Full trade tracking + H5/L5 breakout support")
     logger.warning("🔧 Optimized for: Render free tier + UptimeRobot monitoring")
+    logger.warning("🆕 NEW: Extended levels, dynamic S/R, trend following signals")
     
     # Start Flask server for health checks
     start_flask_thread()
