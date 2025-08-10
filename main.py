@@ -1,7 +1,5 @@
 # ============================================
-# The Control Tower - Templar Knight Crypto - v10.2 FIXED
-# Complete Trade Tracking & Enhanced Alert Intelligence
-# All Critical Issues Fixed + Performance Optimized
+# The Control Tower - Templar Knight Crypto - v10.2.1 FIXED
 # ============================================
 
 import os
