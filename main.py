@@ -306,7 +306,7 @@ class IntegratedTradeTracker:
             'timestamp': datetime.now(timezone.utc).isoformat()
         })
 
-async def log_trade_exit(self, trade_id, exit_price, exit_reason, pnl_pct):
+    async def log_trade_exit(self, trade_id, exit_price, exit_reason, pnl_pct):
         """Update trade with exit information"""
         try:
             channel = self.bot.get_channel(SCROLLS_ORDER_ID)
@@ -476,7 +476,7 @@ async def log_trade_exit(self, trade_id, exit_price, exit_reason, pnl_pct):
             'tp_success_rate': tp_success_rate
         }
 
-async def _send_to_sheets(self, data, action):
+    async def _send_to_sheets(self, data, action):
         """Send data to Google Sheets using aiohttp"""
         try:
             if action == 'entry':
