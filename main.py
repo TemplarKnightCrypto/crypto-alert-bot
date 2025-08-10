@@ -259,7 +259,56 @@ class IntegratedTradeTracker:
             logger.error(f"Error logging trade entry: {e}")
             return False
     
-    async def log_trade_exit(self, trade_id, exit_price, exit_reason, pnl_pct):
+    async def log_partial_exit(self, trade_id, exit_price, exit_reason, pnl_pct):
+        """Log partial exits (TP1) while keeping trade active for TP2"""
+        try:
+            channel = self.bot.get_channel(SCROLLS_ORDER_ID)
+            if not channel:
+                return False
+
+            # Create a partial exit log entry
+            embed = discord.Embed(
+                title=f"📊 Partial Exit - {trade_id}",
+                description=f"Target hit: {exit_reason}",
+                color=discord.Color.gold(),  # Different color for partial exits
+                timestamp=datetime.now(timezone.utc)
+            )
+            
+            embed.add_field(name="Exit Price", value=f"${exit_price:.2f}", inline=True)
+            embed.add_field(name="Reason", value=exit_reason, inline=True)
+            embed.add_field(name="Partial PnL", value=f"{pnl_pct:+.2f}%", inline=True)
+            
+            if exit_reason == "TP1 HIT":
+                embed.add_field(name="Status", value="🔄 Monitoring for TP2", inline=False)
+            
+            await channel.send(embed=embed)
+            
+            # Store partial exit data for analysis
+            self._store_partial_exit(trade_id, exit_price, exit_reason, pnl_pct)
+            
+            logger.warning(f"✅ Partial exit logged: {trade_id} - {exit_reason}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error logging partial exit: {e}")
+            return False
+
+    def _store_partial_exit(self, trade_id, exit_price, exit_reason, pnl_pct):
+        """Store partial exit data for enhanced analytics"""
+        if not hasattr(self, 'partial_exits'):
+            self.partial_exits = {}
+        
+        if trade_id not in self.partial_exits:
+            self.partial_exits[trade_id] = []
+        
+        self.partial_exits[trade_id].append({
+            'exit_price': exit_price,
+            'exit_reason': exit_reason,
+            'pnl_pct': pnl_pct,
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        })
+
+async def log_trade_exit(self, trade_id, exit_price, exit_reason, pnl_pct):
         """Update trade with exit information"""
         try:
             channel = self.bot.get_channel(SCROLLS_ORDER_ID)
@@ -321,7 +370,115 @@ class IntegratedTradeTracker:
             logger.error(f"Error logging trade exit: {e}")
             return False
     
-    async def _send_to_sheets(self, data, action):
+    async def generate_performance_report(self, days=7):
+        """Generate performance report from Discord messages"""
+        try:
+            channel = self.bot.get_channel(SCROLLS_ORDER_ID)
+            if not channel:
+                return {'error': 'Tracking channel not found'}
+                
+            since = datetime.now(timezone.utc) - timedelta(days=days)
+            trades = []
+            
+            async for message in channel.history(after=since, limit=500):
+                if message.embeds and ("Trade Entry" in message.embeds[0].title or "Trade Complete" in message.embeds[0].title):
+                    trade_data = self._parse_trade_from_message(message)
+                    if trade_data:
+                        trades.append(trade_data)
+            
+            return self._calculate_performance_stats_enhanced(trades, days)
+            
+        except Exception as e:
+            logger.error(f"Error generating performance report: {e}")
+            return {'error': str(e)}
+
+    def _calculate_performance_stats_enhanced(self, trades, days):
+        """Enhanced performance statistics with TP1/TP2 breakdown"""
+        if not trades:
+            return {
+                'period_days': days,
+                'total_trades': 0,
+                'closed_trades': 0,
+                'pending_trades': 0,
+                'message': f'No trades found in last {days} days'
+            }
+        
+        total_trades = len(trades)
+        closed_trades = [t for t in trades if t.get('closed', False)]
+        
+        if not closed_trades:
+            return {
+                'period_days': days,
+                'total_trades': total_trades,
+                'closed_trades': 0,
+                'pending_trades': total_trades,
+                'win_rate': 0,
+                'total_pnl': 0,
+                'avg_pnl': 0,
+                'winning_trades': 0,
+                'losing_trades': 0,
+                'best_trade': 0,
+                'worst_trade': 0,
+                'avg_score': 0,
+                'exit_reasons': {},
+                'tp_breakdown': {'TP1': 0, 'TP2': 0, 'SL': 0},
+                'message': 'No closed trades in this period'
+            }
+        
+        # Standard calculations
+        winning_trades = [t for t in closed_trades if t.get('pnl', 0) > 0]
+        losing_trades = [t for t in closed_trades if t.get('pnl', 0) <= 0]
+        
+        total_pnl = sum(t.get('pnl', 0) for t in closed_trades)
+        win_rate = (len(winning_trades) / len(closed_trades)) * 100 if closed_trades else 0
+        avg_pnl = total_pnl / len(closed_trades) if closed_trades else 0
+        
+        pnl_values = [t.get('pnl', 0) for t in closed_trades]
+        best_trade = max(pnl_values) if pnl_values else 0
+        worst_trade = min(pnl_values) if pnl_values else 0
+        
+        scores = [t.get('score', 0) for t in trades if t.get('score')]
+        avg_score = sum(scores) / len(scores) if scores else 0
+        
+        # Enhanced: TP1/TP2/SL breakdown
+        exit_reasons = {}
+        tp_breakdown = {'TP1_ONLY': 0, 'TP2': 0, 'SL': 0}
+        
+        for trade in closed_trades:
+            reason = trade.get('exit_reason', 'Unknown')
+            exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
+            
+            # Categorize for TP breakdown
+            if 'TP2' in reason:
+                tp_breakdown['TP2'] += 1
+            elif 'TP1' in reason:
+                tp_breakdown['TP1_ONLY'] += 1
+            elif 'SL' in reason:
+                tp_breakdown['SL'] += 1
+        
+        # Calculate TP success rates
+        total_exits = sum(tp_breakdown.values())
+        tp_success_rate = ((tp_breakdown['TP1_ONLY'] + tp_breakdown['TP2']) / total_exits * 100) if total_exits > 0 else 0
+        
+        return {
+            'period_days': days,
+            'total_trades': total_trades,
+            'closed_trades': len(closed_trades),
+            'pending_trades': total_trades - len(closed_trades),
+            'winning_trades': len(winning_trades),
+            'losing_trades': len(losing_trades),
+            'win_rate': win_rate,
+            'total_pnl': total_pnl,
+            'avg_pnl': avg_pnl,
+            'best_trade': best_trade,
+            'worst_trade': worst_trade,
+            'avg_score': avg_score,
+            'exit_reasons': exit_reasons,
+            'tp_breakdown': tp_breakdown,
+            'tp_success_rate': tp_success_rate
+        }
+
+async def _send_to_sheets(self, data, action):
         """Send data to Google Sheets using aiohttp"""
         try:
             if action == 'entry':
@@ -572,6 +729,25 @@ def calculate_camarilla(high, low, close):
     except Exception as e:
         logger.error(f"Camarilla calculation error: {e}")
         return {}
+
+async def log_partial_exit(trade_id, exit_price, exit_reason, entry_price, direction, silent=False):
+    """Log partial exits (TP1/TP2) to tracking system"""
+    try:
+        # Calculate PnL for this exit
+        if direction == "Long":
+            pnl = ((exit_price - entry_price) / entry_price) * 100
+        else:
+            pnl = ((entry_price - exit_price) / entry_price) * 100
+        
+        # Log to tracking system
+        if trade_tracker:
+            await trade_tracker.log_partial_exit(trade_id, exit_price, exit_reason, pnl)
+        
+        if not silent:
+            logger.warning(f"Trade {trade_id} partial exit: {exit_reason} at ${exit_price:.2f} ({pnl:+.2f}%)")
+            
+    except Exception as e:
+        logger.error(f"Error logging partial exit: {e}")
 
 # ============================================
 # ENHANCED LEVEL CALCULATION & ANALYSIS FUNCTIONS
@@ -1685,7 +1861,7 @@ async def send_enhanced_scorecard():
             bias_color = discord.Color.gold()
         elif score >= 3:
             bias = "⚪ Neutral"
-            bias_color = discord.Color.light_grey()  # FIXED: Use light_grey() method
+            bias_color = discord.Color.light_grey()
         elif score >= 2:
             bias = "🟠 Moderate Bearish"
             bias_color = discord.Color.orange()
@@ -1909,7 +2085,7 @@ async def trade_100x_scan():
 
 @tasks.loop(seconds=30)
 async def monitor_trade_exits():
-    """FIXED: Monitor multiple trades instead of single ETH trade"""
+    """ENHANCED: Track TP1 and TP2 hits separately for better analytics"""
     global trade_tracker
     try:
         if not active_trades:
@@ -1923,7 +2099,8 @@ async def monitor_trade_exits():
         latest = df.iloc[-1]
         price = latest["close"]
         
-        # FIXED: Iterate through all active trades
+        # Enhanced: Track partial and full exits separately
+        trades_to_update = []
         trades_to_close = []
         
         for trade_id, trade in active_trades.items():
@@ -1931,73 +2108,101 @@ async def monitor_trade_exits():
             sl = trade["sl"]
             direction = trade["side"]
             entry_price = trade["entry"]
+            
+            # Track what's already been hit
+            tp1_hit = trade.get("tp1_hit", False)
+            tp2_hit = trade.get("tp2_hit", False)
 
             exit_reason = None
-            notify_discord = False  # FIXED: Only send TP2 alerts, not TP1
+            notify_discord = False
+            partial_exit = False
             
             if direction == "Long":
-                if price >= tp2:
+                # Check TP2 first (full exit)
+                if price >= tp2 and not tp2_hit:
                     exit_reason = "TP2 HIT"
                     notify_discord = True
-                elif price >= tp1:
+                    trades_to_close.append(trade_id)
+                    
+                    # Log both TP1 and TP2 if TP1 wasn't logged before
+                    if not tp1_hit:
+                        await log_partial_exit(trade_id, tp1, "TP1 HIT", entry_price, direction, silent=True)
+                        await log_partial_exit(trade_id, price, "TP2 HIT", entry_price, direction, silent=False)
+                    else:
+                        await log_partial_exit(trade_id, price, "TP2 HIT", entry_price, direction, silent=False)
+                        
+                # Check TP1 (partial exit)
+                elif price >= tp1 and not tp1_hit:
                     exit_reason = "TP1 HIT"
-                    notify_discord = False  # FIXED: TP1 alerts disabled
+                    partial_exit = True
+                    trade["tp1_hit"] = True
+                    trades_to_update.append(trade_id)
+                    await log_partial_exit(trade_id, price, "TP1 HIT", entry_price, direction, silent=True)
+                    
+                # Check Stop Loss
                 elif price <= sl:
                     exit_reason = "SL HIT"
                     notify_discord = True
+                    trades_to_close.append(trade_id)
+                    await log_partial_exit(trade_id, price, "SL HIT", entry_price, direction, silent=False)
+                    
             elif direction == "Short":
-                if price <= tp2:
+                # Check TP2 first (full exit)
+                if price <= tp2 and not tp2_hit:
                     exit_reason = "TP2 HIT"
                     notify_discord = True
-                elif price <= tp1:
+                    trades_to_close.append(trade_id)
+                    
+                    # Log both TP1 and TP2 if TP1 wasn't logged before
+                    if not tp1_hit:
+                        await log_partial_exit(trade_id, tp1, "TP1 HIT", entry_price, direction, silent=True)
+                        await log_partial_exit(trade_id, price, "TP2 HIT", entry_price, direction, silent=False)
+                    else:
+                        await log_partial_exit(trade_id, price, "TP2 HIT", entry_price, direction, silent=False)
+                        
+                # Check TP1 (partial exit)
+                elif price <= tp1 and not tp1_hit:
                     exit_reason = "TP1 HIT"
-                    notify_discord = False  # FIXED: TP1 alerts disabled
+                    partial_exit = True
+                    trade["tp1_hit"] = True
+                    trades_to_update.append(trade_id)
+                    await log_partial_exit(trade_id, price, "TP1 HIT", entry_price, direction, silent=True)
+                    
+                # Check Stop Loss
                 elif price >= sl:
                     exit_reason = "SL HIT"
                     notify_discord = True
+                    trades_to_close.append(trade_id)
+                    await log_partial_exit(trade_id, price, "SL HIT", entry_price, direction, silent=False)
             
-            if exit_reason:
-                # Calculate PnL
-                if direction == "Long":
-                    pnl = ((price - entry_price) / entry_price) * 100
-                else:
-                    pnl = ((entry_price - price) / entry_price) * 100
-                
-                # FIXED: Only send Discord alert for TP2 and SL, not TP1
-                if notify_discord:
-                    now = datetime.now(timezone.utc)
-                    ct = now.astimezone(CENTRAL_TZ)
+            # Send Discord notification for major exits only (TP2 and SL)
+            if exit_reason and notify_discord:
+                now = datetime.now(timezone.utc)
+                ct = now.astimezone(CENTRAL_TZ)
 
-                    embed = discord.Embed(
-                        title=f"📍 ETH Trade Exit Alert – {exit_reason}",
-                        color=discord.Color.green() if "TP" in exit_reason else discord.Color.red(),
-                        timestamp=now
-                    )
-                    embed.add_field(name="Type", value=direction, inline=True)
-                    embed.add_field(name="Exit Price", value=f"${price:.2f}", inline=True)
-                    embed.add_field(name="Outcome", value=exit_reason, inline=True)
-                    embed.add_field(name="Trade ID", value=trade_id, inline=False)
-                    embed.set_footer(text=f"🕒 UTC: {now.strftime('%H:%M:%S')} | CT: {ct.strftime('%I:%M %p')}")
+                embed = discord.Embed(
+                    title=f"📍 ETH Trade Exit Alert – {exit_reason}",
+                    color=discord.Color.green() if "TP" in exit_reason else discord.Color.red(),
+                    timestamp=now
+                )
+                embed.add_field(name="Type", value=direction, inline=True)
+                embed.add_field(name="Exit Price", value=f"${price:.2f}", inline=True)
+                embed.add_field(name="Outcome", value=exit_reason, inline=True)
+                embed.add_field(name="Trade ID", value=trade_id, inline=False)
+                embed.set_footer(text=f"🕒 UTC: {now.strftime('%H:%M:%S')} | CT: {ct.strftime('%I:%M %p')}")
 
-                    channel = bot.get_channel(BATTLE_SIGNALS_ID)
-                    if channel:
-                        await channel.send(embed=embed)
-                
-                # Log to tracking system
-                if trade_tracker:
-                    await trade_tracker.log_trade_exit(trade_id, price, exit_reason, pnl)
-                
-                # Mark for removal
-                trades_to_close.append(trade_id)
-                
-                logger.warning(f"Trade {trade_id} closed: {exit_reason} at ${price:.2f} ({pnl:+.2f}%)")
+                channel = bot.get_channel(BATTLE_SIGNALS_ID)
+                if channel:
+                    await channel.send(embed=embed)
         
-        # Remove closed trades
+        # Remove fully closed trades
         for trade_id in trades_to_close:
-            del active_trades[trade_id]
+            if trade_id in active_trades:
+                del active_trades[trade_id]
+                logger.warning(f"Trade {trade_id} fully closed")
 
     except Exception as e:
-        logger.error(f"Error in monitor_trade_exits: {e}")
+        logger.error(f"Error in enhanced monitor_trade_exits: {e}")
 
 @tasks.loop(minutes=5)
 async def memory_cleanup():
@@ -2283,15 +2488,15 @@ async def health_check(ctx):
         await ctx.send(f"❌ Health check failed: {e}")
 
 @bot.command(name='report')
-async def performance_report(ctx, days: int = 7):
-    """Generate performance report"""
+async def enhanced_performance_report(ctx, days: int = 7):
+    """Enhanced performance report with TP1/TP2 analysis"""
     if ctx.author.guild_permissions.administrator:
         try:
             if not trade_tracker:
                 await ctx.send("❌ Trade tracker not initialized")
                 return
             
-            # Generate performance report
+            # Use enhanced stats calculation
             report = await trade_tracker.generate_performance_report(days)
             
             if not report or 'error' in report:
@@ -2299,23 +2504,24 @@ async def performance_report(ctx, days: int = 7):
                 return
             
             embed = discord.Embed(
-                title=f"📊 Performance Report - Last {days} Days",
+                title=f"📊 Enhanced Performance Report - Last {days} Days",
                 color=discord.Color.gold(),
                 timestamp=datetime.now(timezone.utc)
             )
             
-            # Summary stats
+            # Trade summary
             embed.add_field(
                 name="📈 Trade Summary",
                 value=(
-                    f"**Total Trades:** {report['total_trades']}\n"
-                    f"**Closed Trades:** {report['closed_trades']}\n"
-                    f"**Pending Trades:** {report['pending_trades']}"
+                    f"**Total:** {report['total_trades']}\n"
+                    f"**Closed:** {report['closed_trades']}\n"
+                    f"**Pending:** {report['pending_trades']}"
                 ),
                 inline=True
             )
             
             if report['closed_trades'] > 0:
+                # Performance metrics
                 embed.add_field(
                     name="🎯 Performance",
                     value=(
@@ -2326,11 +2532,26 @@ async def performance_report(ctx, days: int = 7):
                     inline=True
                 )
                 
+                # Enhanced: TP Success breakdown
+                if 'tp_breakdown' in report:
+                    tp_data = report['tp_breakdown']
+                    embed.add_field(
+                        name="🎯 Target Analysis",
+                        value=(
+                            f"**TP2 Hits:** {tp_data['TP2']}\n"
+                            f"**TP1 Only:** {tp_data['TP1_ONLY']}\n"
+                            f"**Stop Losses:** {tp_data['SL']}\n"
+                            f"**TP Success:** {report.get('tp_success_rate', 0):.1f}%"
+                        ),
+                        inline=True
+                    )
+                
+                # Trade quality
                 embed.add_field(
                     name="📊 Trade Quality",
                     value=(
-                        f"**Best Trade:** {report['best_trade']:+.2f}%\n"
-                        f"**Worst Trade:** {report['worst_trade']:+.2f}%\n"
+                        f"**Best:** {report['best_trade']:+.2f}%\n"
+                        f"**Worst:** {report['worst_trade']:+.2f}%\n"
                         f"**Avg Score:** {report['avg_score']:.1f}/6"
                     ),
                     inline=True
@@ -2351,7 +2572,7 @@ async def performance_report(ctx, days: int = 7):
             await ctx.send(embed=embed)
             
         except Exception as e:
-            logger.error(f"Report error: {e}")
+            logger.error(f"Enhanced report error: {e}")
             await ctx.send(f"❌ Report generation failed: {e}")
     else:
         await ctx.send("⚠️ Administrator permissions required")
