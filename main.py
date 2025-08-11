@@ -3520,6 +3520,38 @@ async def diag_sheets():
     ok = await trade_tracker._send_to_sheets(sample, "entry")
     return ({"ok": True}, 200) if ok else ({"ok": False}, 500)
 
+@app.route("/diag/sheets_direct", methods=["GET"])
+def diag_sheets_direct():
+    url = os.environ.get("GOOGLE_SHEETS_WEBHOOK")
+    if not url:
+        return ({"ok": False, "error": "GOOGLE_SHEETS_WEBHOOK missing"}, 500)
+
+    payload = {
+        "timestamp": "2025-08-11T00:00:00Z",
+        "trade_id": f"diag_{int(time.time())}",
+        "asset": "ETH",
+        "direction": "Long",
+        "entry_price": 2800.0,
+        "stop_loss": 2775.0,
+        "target1": 2825.0,
+        "target2": 2850.0,
+        "score": 4,
+        "level_name": "H4",
+        "knight": "Sir Leonis Ironhart ⚔️",
+        "trade_type": "Breakout",
+        "confidence": "A"
+    }
+
+    try:
+        r = requests.post(url, json=payload, timeout=12)
+        body = r.text[:400]
+        logger.info(f"/diag/sheets_direct → {r.status_code} {body}")
+        ok = r.status_code < 300
+        return ({"ok": ok, "status": r.status_code, "body": body}, 200 if ok else 500)
+    except Exception as e:
+        logger.exception("diag/sheets_direct error")
+        return ({"ok": False, "error": str(e)}, 500)
+
 @bot.event
 async def on_error(event, *args, **kwargs):
     logger.error(f"Discord event error in {event}: {args}")
