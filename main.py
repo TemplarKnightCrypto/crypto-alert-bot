@@ -17,6 +17,7 @@ import gc
 import json
 import csv
 import sqlite3
+import requests
 from io import StringIO, BytesIO
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
