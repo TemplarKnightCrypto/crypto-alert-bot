@@ -694,11 +694,9 @@ class IntegratedTradeTracker:
                 color=discord.Color.blue(),
                 timestamp=datetime.now(timezone.utc)
             )
-
             embed.add_field(name="🎯 Entry", value=f"${trade_data['entry_price']:.2f}", inline=True)
             embed.add_field(name="🛑 Stop Loss", value=f"${trade_data['sl']:.2f}", inline=True)
             embed.add_field(name="🎪 Targets", value=f"${trade_data['tp1']:.2f} / ${trade_data['tp2']:.2f}", inline=True)
-
             embed.add_field(name="⚔️ Knight", value=trade_data['knight'], inline=True)
             embed.add_field(name="📊 Score", value=f"{trade_data['score']}/6", inline=True)
             embed.add_field(name="🏆 Tier", value=get_tier_label(trade_data['score']), inline=True)
@@ -706,18 +704,15 @@ class IntegratedTradeTracker:
             risk_pct = abs((trade_data['entry_price'] - trade_data['sl']) / trade_data['entry_price']) * 100
             reward1_pct = abs((trade_data['tp1'] - trade_data['entry_price']) / trade_data['entry_price']) * 100
             rr = (reward1_pct / risk_pct) if risk_pct else 0.0
-
             embed.add_field(
                 name="⚖️ Risk/Reward",
                 value=f"Risk: {risk_pct:.1f}%\nR:R = 1:{rr:.1f}",
                 inline=False
             )
-
             embed.set_footer(text=f"ID:{trade_data['id']} | Entry logged")
 
             message = await channel.send(embed=embed)
             self.trade_messages[trade_data['id']] = message.id
-
             self._update_daily_stats('entry')
 
             # Send to Google Sheets if configured
@@ -727,7 +722,6 @@ class IntegratedTradeTracker:
             logger.warning(f"✅ Trade {trade_data['id']} logged")
             return True
 
-            # (falls through)
         except Exception as e:
             logger.error(f"Error logging trade entry: {e}")
             return False
@@ -753,8 +747,6 @@ class IntegratedTradeTracker:
                 embed.add_field(name="Status", value="🔄 Monitoring for TP2", inline=False)
 
             await channel.send(embed=embed)
-
-            # Store partial exit data for analysis
             self._store_partial_exit(trade_id, exit_price, exit_reason, pnl_pct)
 
             logger.warning(f"✅ Partial exit logged: {trade_id} - {exit_reason}")
@@ -768,10 +760,8 @@ class IntegratedTradeTracker:
         """Store partial exit data for enhanced analytics."""
         if not hasattr(self, 'partial_exits'):
             self.partial_exits = {}
-
         if trade_id not in self.partial_exits:
             self.partial_exits[trade_id] = []
-
         self.partial_exits[trade_id].append({
             'exit_price': exit_price,
             'exit_reason': exit_reason,
@@ -793,18 +783,14 @@ class IntegratedTradeTracker:
                 try:
                     message = await channel.fetch_message(message_id)
                     embed = message.embeds[0]
-
                     embed.color = discord.Color.green() if pnl_pct > 0 else discord.Color.red()
                     embed.add_field(name="🏁 Exit Price", value=f"${exit_price:.2f}", inline=True)
                     embed.add_field(name="📋 Exit Reason", value=exit_reason, inline=True)
                     embed.add_field(name="💰 PnL", value=f"{pnl_pct:+.2f}%", inline=True)
-
                     result_emoji = "🟢" if pnl_pct > 0 else "🔴"
                     embed.title = f"{result_emoji} Trade Complete - {trade_id}"
-
                     await message.edit(embed=embed)
                     updated_original = True
-
                 except discord.NotFound:
                     pass
 
@@ -847,7 +833,6 @@ class IntegratedTradeTracker:
 
             since = datetime.now(timezone.utc) - timedelta(days=days)
             trades = []
-
             async for message in channel.history(after=since, limit=500):
                 if message.embeds and ("Trade Entry" in message.embeds[0].title or "Trade Complete" in message.embeds[0].title):
                     trade_data = self._parse_trade_from_message(message)
@@ -896,26 +881,21 @@ class IntegratedTradeTracker:
         # Standard calculations
         winning_trades = [t for t in closed_trades if t.get('pnl', 0) > 0]
         losing_trades = [t for t in closed_trades if t.get('pnl', 0) <= 0]
-
         total_pnl = sum(t.get('pnl', 0) for t in closed_trades)
         win_rate = (len(winning_trades) / len(closed_trades)) * 100 if closed_trades else 0
         avg_pnl = total_pnl / len(closed_trades) if closed_trades else 0
-
         pnl_values = [t.get('pnl', 0) for t in closed_trades]
         best_trade = max(pnl_values) if pnl_values else 0
         worst_trade = min(pnl_values) if pnl_values else 0
-
         scores = [t.get('score', 0) for t in trades if t.get('score')]
         avg_score = sum(scores) / len(scores) if scores else 0
 
         # Enhanced: TP1/TP2/SL breakdown
         exit_reasons = {}
         tp_breakdown = {'TP1_ONLY': 0, 'TP2': 0, 'SL': 0}
-
         for trade in closed_trades:
             reason = trade.get('exit_reason', 'Unknown')
             exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
-
             if 'TP2' in reason:
                 tp_breakdown['TP2'] += 1
             elif 'TP1' in reason:
@@ -950,9 +930,9 @@ class IntegratedTradeTracker:
             logger.warning("Sheets disabled: no GOOGLE_SHEETS_WEBHOOK")
             return False
 
-        # Build payload (keeps your current schema)
         if action == "entry":
-            payload = {
+            # base entry fields
+            base = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "trade_id": data["id"],
                 "direction": data["direction"],
@@ -964,10 +944,12 @@ class IntegratedTradeTracker:
                 "score": data["score"],
                 "knight": data["knight"],
                 "status": "OPEN",
+                "asset": data.get("asset", "ETH"),
+                "trade_type": data.get("trade_type", "Breakout"),
+                "confidence": data.get("rating") or get_tier_label(data["score"]),
             }
-            payload["asset"] = data.get("asset", "ETH")
-            payload["trade_type"] = data.get("trade_type", "Breakout")
-            payload["confidence"] = data.get("rating") or get_tier_label(data["score"])
+            # if enhanced metrics exist, forward them
+            payload = {**base, "enhanced_data": data["enhanced_data"]} if data.get("enhanced_data") else base
         else:  # exit/update
             payload = {
                 "action": "update",
@@ -989,7 +971,6 @@ class IntegratedTradeTracker:
                         text = await resp.text()
                         if resp.status < 300:
                             logger.info(f"Sheets ok: {resp.status} {text[:200]}")
-                            # Accept as success if JSON says status: success, or any 2xx
                             try:
                                 j = json.loads(text)
                                 if isinstance(j, dict) and j.get("status") == "success":
@@ -1008,7 +989,6 @@ class IntegratedTradeTracker:
     def _update_daily_stats(self, action, pnl=None):
         """Update daily statistics."""
         today = datetime.now(timezone.utc).date()
-
         if today > self.daily_stats['date']:
             self.daily_stats = {
                 'date': today,
@@ -1016,7 +996,6 @@ class IntegratedTradeTracker:
                 'wins': 0,
                 'total_pnl': 0.0
             }
-
         if action == 'entry':
             self.daily_stats['trades'] += 1
         elif action == 'exit' and pnl is not None:
@@ -1033,7 +1012,6 @@ class IntegratedTradeTracker:
 
             since = datetime.now(timezone.utc) - timedelta(days=days)
             trades = []
-
             async for message in channel.history(after=since, limit=1000):
                 if message.embeds and "Trade" in message.embeds[0].title:
                     trade_data = self._parse_trade_from_message(message)
@@ -1068,7 +1046,6 @@ class IntegratedTradeTracker:
         try:
             embed = message.embeds[0]
             trade_data = {'timestamp': message.created_at}
-
             for field in embed.fields:
                 if "PnL" in field.name:
                     pnl_str = field.value.replace('%', '').replace('+', '')
@@ -1079,14 +1056,11 @@ class IntegratedTradeTracker:
                 elif "Score" in field.name:
                     score_str = field.value.split('/')[0]
                     trade_data['score'] = int(score_str)
-
             if "Trade Complete" in embed.title or embed.color == discord.Color.green() or embed.color == discord.Color.red():
                 trade_data['closed'] = True
             else:
                 trade_data['closed'] = False
-
             return trade_data
-
         except Exception:
             return None
 
@@ -2477,6 +2451,7 @@ async def send_battle_signal(
     confidence,
     score,
     trade_type="Breakout",
+    enhanced: dict | None = None,   # <- NEW optional enhanced metrics
 ):
     try:
         knight = assign_knight(trade_type)
@@ -2494,7 +2469,6 @@ async def send_battle_signal(
             color=color,
             timestamp=datetime.now(timezone.utc),
         )
-
         embed.add_field(name="🛡️ Knight", value=knight, inline=True)
         embed.add_field(name="🎯 Level", value=f"{level_name} (${level_price:.2f})", inline=True)
         embed.add_field(name="📊 Confidence", value=str(confidence), inline=True)
@@ -2505,8 +2479,6 @@ async def send_battle_signal(
         risk_pct = abs((entry - stop_loss) / entry) * 100 if entry else 0.0
         reward1_pct = abs((targets[0] - entry) / entry) * 100 if entry else 0.0
         reward2_pct = abs((targets[1] - entry) / entry) * 100 if entry else 0.0
-
-        # Avoid divide-by-zero for R:R
         rr1 = (reward1_pct / risk_pct) if risk_pct > 0 else float("inf")
         rr2 = (reward2_pct / risk_pct) if risk_pct > 0 else float("inf")
         rr1_str = f"1:{rr1:.1f}" if rr1 != float("inf") else "∞"
@@ -2522,7 +2494,6 @@ async def send_battle_signal(
             ),
             inline=False,
         )
-
         embed.add_field(name="🆔 Trade ID", value=trade_id, inline=False)
 
         ct = embed.timestamp.astimezone(CENTRAL_TZ).strftime("%I:%M %p CT")
@@ -2536,7 +2507,7 @@ async def send_battle_signal(
         else:
             logger.error("send_battle_signal: channel %s not found", BATTLE_SIGNALS_ID)
 
-        # FIXED: Store trades by trade_id instead of overwriting single ETH trade
+        # Track active trade (unchanged)
         active_trades[trade_id] = {
             "id": trade_id,
             "entry": float(entry),
@@ -2562,14 +2533,46 @@ async def send_battle_signal(
                 "level_name": level_name,
                 "score": score,
                 "knight": knight,
-                "rating": confidence,
-                "level_price": level_price,  # ADDED for automated tracking
-                "trade_type": trade_type     # ADDED for automated tracking
+                "rating": confidence,     # used as "confidence" in Sheets
+                "level_price": level_price,
+                "trade_type": trade_type,
+                "asset": "ETH",
             }
+
+            # ---- enhanced_data support ----
+            if enhanced is None:
+                # Try to assemble from locally available variables if you compute them earlier
+                _locals = locals()
+                enhanced = {
+                    "enhanced_score":          _locals.get("enhanced_score"),
+                    "rsi_level":               _locals.get("rsi_level_str") or _locals.get("rsi_level"),
+                    "volume_ratio":            _locals.get("volume_ratio_str") or _locals.get("volume_ratio"),
+                    "market_status":           _locals.get("market_status"),
+                    "vwap_position":           _locals.get("vwap_position") or _locals.get("vwap_pos"),
+                    "macd_status":             _locals.get("macd_status"),
+                    "market_bias":             _locals.get("market_bias"),
+                    "setup_age_minutes":       _locals.get("setup_age_minutes") or _locals.get("setup_age_min"),
+                    "breakout_structure":      _locals.get("breakout_structure") or _locals.get("breakout_struct"),
+                    "confluence_count":        _locals.get("confluence_count"),
+                    "candle_body_strength":    _locals.get("candle_body_strength") or _locals.get("candle_body"),
+                    "market_session":          _locals.get("market_session") or _locals.get("session"),
+                    "distance_from_level_pct": _locals.get("distance_from_level_pct") or _locals.get("dist_pct"),
+                    "recent_news_events":      _locals.get("recent_news_events") or _locals.get("news_str"),
+                    "volatility_state":        _locals.get("volatility_state") or _locals.get("vol_state"),
+                    "trend_strength":          _locals.get("trend_strength") or _locals.get("trend_str"),
+                }
+                enhanced = {k: v for k, v in enhanced.items() if v is not None}
+
+            if enhanced:
+                trade_data["enhanced_data"] = enhanced
+            # --------------------------------
+
+            logger.info(f"entry trade_data keys: {list(trade_data.keys())}")
             await trade_tracker.log_trade_entry(trade_data)
 
     except Exception as e:
         logger.error("Error in send_battle_signal: %s", e)
+
 
 # ============================================
 # REMAINING TASKS & COMMANDS (FIXED)
