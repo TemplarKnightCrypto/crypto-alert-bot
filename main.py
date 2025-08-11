@@ -965,10 +965,9 @@ class IntegratedTradeTracker:
                 "knight": data["knight"],
                 "status": "OPEN",
             }
-            # Optional enrich:
-              payload["asset"] = "ETH"
-              payload["trade_type"] = data.get("trade_type", "Breakout")
-              payload["confidence"] = data.get("rating")  # S/A/B/C
+            payload["asset"] = data.get("asset", "ETH")
+            payload["trade_type"] = data.get("trade_type", "Breakout")
+            payload["confidence"] = data.get("rating") or get_tier_label(data["score"])
         else:  # exit/update
             payload = {
                 "action": "update",
