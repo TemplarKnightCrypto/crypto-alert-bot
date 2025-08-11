@@ -96,6 +96,10 @@ enhanced_cooldowns = {
 market_regime_history = []
 last_significant_event = None
 
+PARTIAL_FRACTION = float(os.getenv("PARTIAL_FRACTION", "0.5"))   # portion closed at TP1
+BE_AFTER_TP1     = os.getenv("BE_AFTER_TP1", "1") == "1"         # enable BE on remainder
+BE_OFFSET_PCT    = float(os.getenv("BE_OFFSET_PCT", "0.0005"))   # +5 bps to cover fees/slippage
+
 # ============================================
 # MEMORY-OPTIMIZED CACHE SYSTEM
 # ============================================
@@ -1258,20 +1262,23 @@ async def log_partial_exit(trade_id, exit_price, exit_reason, entry_price, direc
         logger.error(f"Error logging partial exit: {e}")
 
 def _pnl_pct(entry: float, px: float, side: str) -> float:
-    """Signed PnL % for a leg."""
-    return ((px - entry) / entry) * 100.0 if side == "Long" else ((entry - px) / entry) * 100.0
+    side_l = (side or "").lower()
+    return ((px - entry) / entry) * 100.0 if side_l.startswith("long") else ((entry - px) / entry) * 100.0
 
-def _blended_exit_pnl(entry: float, tp1: float, final_px: float, side: str, tp1_was_hit: bool) -> float:
-    """
-    If TP1 was hit earlier, assume 50/50 scaling: half closed at TP1, half at the final price (TP2 or SL).
-    Otherwise, full size closed at final price.
-    """
+def _blended_exit_pnl(
+    entry: float,
+    tp1: float,
+    final_px: float,
+    side: str,
+    tp1_was_hit: bool,
+    frac: float = 0.5,   # portion closed at TP1 (0..1)
+) -> float:
     if tp1_was_hit:
+        f = max(0.0, min(1.0, float(frac)))  # clamp 0..1
         leg1 = _pnl_pct(entry, tp1, side)
         leg2 = _pnl_pct(entry, final_px, side)
-        return (leg1 + leg2) / 2.0
-    else:
-        return _pnl_pct(entry, final_px, side)
+        return f * leg1 + (1.0 - f) * leg2
+    return _pnl_pct(entry, final_px, side)
 
 # ============================================
 # ENHANCED LEVEL CALCULATION & ANALYSIS FUNCTIONS
@@ -2660,173 +2667,165 @@ async def trade_100x_scan():
     except Exception as e:
         logger.error(f"Error in trade_100x_scan: {e}")
 
+from discord.ext import tasks
+from datetime import datetime, timezone
+import os
+
 @tasks.loop(seconds=30)
 async def monitor_trade_exits():
-    """Track TP1 and TP2 hits; send Sheets updates with correct/blended PnL."""
-    global trade_tracker
+    """
+    Watches active_trades for TP1/TP2/SL.
+    - On TP1: logs a partial (fraction=PARTIAL_FRACTION) and arms a BE stop on the remainder (optional).
+    - On TP2/SL/BE: computes blended PnL and closes via trade_tracker.log_trade_exit(...)
+    Requires:
+      - active_trades: {trade_id: {entry,tp1,tp2,sl,side,...}}
+      - bot, BATTLE_SIGNALS_ID, CENTRAL_TZ
+      - retry_api_call_async(fetch_ohlc_async, "ETH", 1) -> DataFrame with 'close'
+      - trade_tracker with log_partial_exit(...) and log_trade_exit(...)
+    """
     try:
         if not active_trades:
             return
 
-        # Latest tick
         df = await retry_api_call_async(fetch_ohlc_async, "ETH", 1)
         if df is None or len(df) < 1:
             return
 
-        latest = df.iloc[-1]
-        price = latest["close"]
-
+        price = float(df.iloc[-1]["close"])
         trades_to_close = []
 
         for trade_id, trade in list(active_trades.items()):
-            tp1 = trade["tp1"]
-            tp2 = trade["tp2"]
-            sl  = trade["sl"]
-            side = trade["side"]
-            entry = trade["entry"]
+            try:
+                side  = trade["side"]                  # "Long" / "Short"
+                entry = float(trade["entry"])
+                tp1   = float(trade["tp1"])
+                tp2   = float(trade["tp2"])
+                sl    = float(trade["sl"])
 
-            tp1_hit = trade.get("tp1_hit", False)
-            tp2_hit = trade.get("tp2_hit", False)
+                tp1_hit = bool(trade.get("tp1_hit", False))
 
-            # Decide outcomes
-            if side == "Long":
-                # TP2: full exit
-                if price >= tp2 and not tp2_hit:
-                    # If TP1 wasn't recorded yet, record a silent partial now
-                    if not tp1_hit:
-                        await log_partial_exit(trade_id, tp1, "TP1 HIT", entry, side, silent=True)
-                        tp1_hit = True
+                # ---------- TP2 (win) ----------
+                if side == "Long":
+                    if price >= tp2:
+                        if not tp1_hit:
+                            tp1_hit = True
+                            trade["tp1_hit"] = True
+                        now = datetime.now(timezone.utc); ct = now.astimezone(CENTRAL_TZ)
+                        embed = discord.Embed(title="📍 ETH Trade Exit Alert – TP2 HIT",
+                                              color=discord.Color.green(), timestamp=now)
+                        embed.add_field(name="Type", value=side, inline=True)
+                        embed.add_field(name="Exit Price", value=f"${price:.2f}", inline=True)
+                        embed.add_field(name="Outcome", value="TP2 HIT", inline=True)
+                        embed.add_field(name="Trade ID", value=trade_id, inline=False)
+                        embed.set_footer(text=f"🕒 UTC: {now.strftime('%H:%M:%S')} | CT: {ct.strftime('%I:%M %p')}")
+                        ch = bot.get_channel(BATTLE_SIGNALS_ID)
+                        if ch: await ch.send(embed=embed)
+
+                        pnl_pct = _blended_exit_pnl(entry, tp1, price, side, tp1_hit, PARTIAL_FRACTION)
+                        if trade_tracker:
+                            await trade_tracker.log_trade_exit(trade_id, float(price), "TP2 HIT" + (" (after TP1)" if tp1_hit else ""), float(pnl_pct))
+                        trades_to_close.append(trade_id)
+                        continue
+                else:  # Short
+                    if price <= tp2:
+                        if not tp1_hit:
+                            tp1_hit = True
+                            trade["tp1_hit"] = True
+                        now = datetime.now(timezone.utc); ct = now.astimezone(CENTRAL_TZ)
+                        embed = discord.Embed(title="📍 ETH Trade Exit Alert – TP2 HIT",
+                                              color=discord.Color.green(), timestamp=now)
+                        embed.add_field(name="Type", value=side, inline=True)
+                        embed.add_field(name="Exit Price", value=f"${price:.2f}", inline=True)
+                        embed.add_field(name="Outcome", value="TP2 HIT", inline=True)
+                        embed.add_field(name="Trade ID", value=trade_id, inline=False)
+                        embed.set_footer(text=f"🕒 UTC: {now.strftime('%H:%M:%S')} | CT: {ct.strftime('%I:%M %p')}")
+                        ch = bot.get_channel(BATTLE_SIGNALS_ID)
+                        if ch: await ch.send(embed=embed)
+
+                        pnl_pct = _blended_exit_pnl(entry, tp1, price, side, tp1_hit, PARTIAL_FRACTION)
+                        if trade_tracker:
+                            await trade_tracker.log_trade_exit(trade_id, float(price), "TP2 HIT" + (" (after TP1)" if tp1_hit else ""), float(pnl_pct))
+                        trades_to_close.append(trade_id)
+                        continue
+
+                # ---------- TP1 (partial + arm BE) ----------
+                if not tp1_hit:
+                    tp1_touched = (side == "Long" and price >= tp1) or (side != "Long" and price <= tp1)
+                    if tp1_touched:
                         trade["tp1_hit"] = True
+                        pnl_tp1 = _pnl_pct(entry, price, side)
+                        if trade_tracker:
+                            await trade_tracker.log_partial_exit(trade_id, float(price), "TP1 HIT", float(pnl_tp1), fraction=PARTIAL_FRACTION)
 
-                    # Discord alert
-                    now = datetime.now(timezone.utc)
-                    ct = now.astimezone(CENTRAL_TZ)
-                    embed = discord.Embed(
-                        title="📍 ETH Trade Exit Alert – TP2 HIT",
-                        color=discord.Color.green(),
-                        timestamp=now
-                    )
-                    embed.add_field(name="Type", value=side, inline=True)
-                    embed.add_field(name="Exit Price", value=f"${price:.2f}", inline=True)
-                    embed.add_field(name="Outcome", value="TP2 HIT", inline=True)
-                    embed.add_field(name="Trade ID", value=trade_id, inline=False)
-                    embed.set_footer(text=f"🕒 UTC: {now.strftime('%H:%M:%S')} | CT: {ct.strftime('%I:%M %p')}")
-                    channel = bot.get_channel(BATTLE_SIGNALS_ID)
-                    if channel:
-                        await channel.send(embed=embed)
+                        if BE_AFTER_TP1:
+                            be = entry * (1.0 + BE_OFFSET_PCT) if side == "Long" else entry * (1.0 - BE_OFFSET_PCT)
+                            trade["be_stop"] = float(be)
+                            trade["be_active"] = True
+                            logger.info("BE activated %s: stop=%.2f (entry=%.2f)", trade_id, be, entry)
 
-                    # Sheets/Tracker close with blended PnL if TP1 was hit
-                    pnl_pct = _blended_exit_pnl(entry, tp1, tp2, side, tp1_was_hit=tp1_hit)
-                    if trade_tracker:
-                        await trade_tracker.log_trade_exit(
-                            trade_id, tp2, "TP2 HIT" + (" (after TP1)" if tp1_hit else ""), pnl_pct
-                        )
-                    trades_to_close.append(trade_id)
-                    continue
+                        continue  # do not close yet
 
-                # TP1: partial
-                if price >= tp1 and not tp1_hit:
-                    trade["tp1_hit"] = True
-                    await log_partial_exit(trade_id, price, "TP1 HIT", entry, side, silent=True)
-                    continue
+                # ---------- BE stop (if armed) ----------
+                if trade.get("be_active"):
+                    be = float(trade["be_stop"])
+                    hit_be = (side == "Long" and price <= be) or (side != "Long" and price >= be)
+                    if hit_be:
+                        pnl_pct = _blended_exit_pnl(entry, tp1, price, side, True, PARTIAL_FRACTION)
+                        if trade_tracker:
+                            await trade_tracker.log_trade_exit(trade_id, float(price), "BREAKEVEN (after TP1)", float(pnl_pct))
+                        trades_to_close.append(trade_id)
+                        continue
 
-                # SL: full exit
-                if price <= sl:
-                    now = datetime.now(timezone.utc)
-                    ct = now.astimezone(CENTRAL_TZ)
-                    embed = discord.Embed(
-                        title="📍 ETH Trade Exit Alert – SL HIT",
-                        color=discord.Color.red(),
-                        timestamp=now
-                    )
-                    embed.add_field(name="Type", value=side, inline=True)
-                    embed.add_field(name="Exit Price", value=f"${price:.2f}", inline=True)
-                    embed.add_field(name="Outcome", value="SL HIT", inline=True)
-                    embed.add_field(name="Trade ID", value=trade_id, inline=False)
-                    embed.set_footer(text=f"🕒 UTC: {now.strftime('%H:%M:%S')} | CT: {ct.strftime('%I:%M %p')}")
-                    channel = bot.get_channel(BATTLE_SIGNALS_ID)
-                    if channel:
-                        await channel.send(embed=embed)
+                # ---------- SL (loss) ----------
+                if side == "Long":
+                    if price <= sl:
+                        now = datetime.now(timezone.utc); ct = now.astimezone(CENTRAL_TZ)
+                        embed = discord.Embed(title="📍 ETH Trade Exit Alert – SL HIT",
+                                              color=discord.Color.red(), timestamp=now)
+                        embed.add_field(name="Type", value=side, inline=True)
+                        embed.add_field(name="Exit Price", value=f"${price:.2f}", inline=True)
+                        embed.add_field(name="Outcome", value="SL HIT", inline=True)
+                        embed.add_field(name="Trade ID", value=trade_id, inline=False)
+                        embed.set_footer(text=f"🕒 UTC: {now.strftime('%H:%M:%S')} | CT: {ct.strftime('%I:%M %p')}")
+                        ch = bot.get_channel(BATTLE_SIGNALS_ID)
+                        if ch: await ch.send(embed=embed)
 
-                    pnl_pct = _blended_exit_pnl(entry, tp1, sl, side, tp1_was_hit=tp1_hit)
-                    if trade_tracker:
-                        await trade_tracker.log_trade_exit(
-                            trade_id, sl, "SL HIT" + (" (after TP1)" if tp1_hit else ""), pnl_pct
-                        )
-                    trades_to_close.append(trade_id)
-                    continue
+                        pnl_pct = _blended_exit_pnl(entry, tp1, price, side, tp1_hit, PARTIAL_FRACTION)
+                        if trade_tracker:
+                            await trade_tracker.log_trade_exit(trade_id, float(price), "SL HIT" + (" (after TP1)" if tp1_hit else ""), float(pnl_pct))
+                        trades_to_close.append(trade_id)
+                        continue
+                else:
+                    if price >= sl:
+                        now = datetime.now(timezone.utc); ct = now.astimezone(CENTRAL_TZ)
+                        embed = discord.Embed(title="📍 ETH Trade Exit Alert – SL HIT",
+                                              color=discord.Color.red(), timestamp=now)
+                        embed.add_field(name="Type", value=side, inline=True)
+                        embed.add_field(name="Exit Price", value=f"${price:.2f}", inline=True)
+                        embed.add_field(name="Outcome", value="SL HIT", inline=True)
+                        embed.add_field(name="Trade ID", value=trade_id, inline=False)
+                        embed.set_footer(text=f"🕒 UTC: {now.strftime('%H:%M:%S')} | CT: {ct.strftime('%I:%M %p')}")
+                        ch = bot.get_channel(BATTLE_SIGNALS_ID)
+                        if ch: await ch.send(embed=embed)
 
-            else:  # Short
-                # TP2: full exit
-                if price <= tp2 and not tp2_hit:
-                    if not tp1_hit:
-                        await log_partial_exit(trade_id, tp1, "TP1 HIT", entry, side, silent=True)
-                        tp1_hit = True
-                        trade["tp1_hit"] = True
+                        pnl_pct = _blended_exit_pnl(entry, tp1, price, side, tp1_hit, PARTIAL_FRACTION)
+                        if trade_tracker:
+                            await trade_tracker.log_trade_exit(trade_id, float(price), "SL HIT" + (" (after TP1)" if tp1_hit else ""), float(pnl_pct))
+                        trades_to_close.append(trade_id)
+                        continue
 
-                    now = datetime.now(timezone.utc)
-                    ct = now.astimezone(CENTRAL_TZ)
-                    embed = discord.Embed(
-                        title="📍 ETH Trade Exit Alert – TP2 HIT",
-                        color=discord.Color.green(),
-                        timestamp=now
-                    )
-                    embed.add_field(name="Type", value=side, inline=True)
-                    embed.add_field(name="Exit Price", value=f"${price:.2f}", inline=True)
-                    embed.add_field(name="Outcome", value="TP2 HIT", inline=True)
-                    embed.add_field(name="Trade ID", value=trade_id, inline=False)
-                    embed.set_footer(text=f"🕒 UTC: {now.strftime('%H:%M:%S')} | CT: {ct.strftime('%I:%M %p')}")
-                    channel = bot.get_channel(BATTLE_SIGNALS_ID)
-                    if channel:
-                        await channel.send(embed=embed)
+            except Exception as inner_e:
+                logger.error("monitor_trade_exits: error on %s: %s", trade_id, inner_e)
 
-                    pnl_pct = _blended_exit_pnl(entry, tp1, tp2, side, tp1_was_hit=tp1_hit)
-                    if trade_tracker:
-                        await trade_tracker.log_trade_exit(
-                            trade_id, tp2, "TP2 HIT" + (" (after TP1)" if tp1_hit else ""), pnl_pct
-                        )
-                    trades_to_close.append(trade_id)
-                    continue
-
-                # TP1: partial
-                if price <= tp1 and not tp1_hit:
-                    trade["tp1_hit"] = True
-                    await log_partial_exit(trade_id, price, "TP1 HIT", entry, side, silent=True)
-                    continue
-
-                # SL: full exit
-                if price >= sl:
-                    now = datetime.now(timezone.utc)
-                    ct = now.astimezone(CENTRAL_TZ)
-                    embed = discord.Embed(
-                        title="📍 ETH Trade Exit Alert – SL HIT",
-                        color=discord.Color.red(),
-                        timestamp=now
-                    )
-                    embed.add_field(name="Type", value=side, inline=True)
-                    embed.add_field(name="Exit Price", value=f"${price:.2f}", inline=True)
-                    embed.add_field(name="Outcome", value="SL HIT", inline=True)
-                    embed.add_field(name="Trade ID", value=trade_id, inline=False)
-                    embed.set_footer(text=f"🕒 UTC: {now.strftime('%H:%M:%S')} | CT: {ct.strftime('%I:%M %p')}")
-                    channel = bot.get_channel(BATTLE_SIGNALS_ID)
-                    if channel:
-                        await channel.send(embed=embed)
-
-                    pnl_pct = _blended_exit_pnl(entry, tp1, sl, side, tp1_was_hit=tp1_hit)
-                    if trade_tracker:
-                        await trade_tracker.log_trade_exit(
-                            trade_id, sl, "SL HIT" + (" (after TP1)" if tp1_hit else ""), pnl_pct
-                        )
-                    trades_to_close.append(trade_id)
-                    continue
-
-        # Remove fully closed trades
+        # Cleanup closed trades
         for tid in trades_to_close:
             active_trades.pop(tid, None)
-            logger.warning(f"Trade {tid} fully closed")
+            if hasattr(trade_tracker, "partial_exits"):
+                trade_tracker.partial_exits.pop(tid, None)
+            logger.warning("Trade %s fully closed", tid)
 
     except Exception as e:
-        logger.error(f"Error in monitor_trade_exits: {e}")
+        logger.error("Error in monitor_trade_exits: %s", e)
 
 @tasks.loop(minutes=5)
 async def memory_cleanup():
