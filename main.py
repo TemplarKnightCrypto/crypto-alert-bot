@@ -26,6 +26,8 @@ from ta.trend import MACD, EMAIndicator
 from datetime import datetime, timezone, timedelta
 import uuid
 from collections import defaultdict
+from flask import request, jsonify
+
 
 # ============================================
 # RENDER FREE TIER OPTIMIZATIONS
