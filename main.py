@@ -3553,6 +3553,29 @@ def diag_sheets_direct():
         logger.exception("diag/sheets_direct error")
         return ({"ok": False, "error": str(e)}, 500)
 
+@app.route("/diag/sheets_exit_direct", methods=["GET"])
+def diag_sheets_exit_direct():
+    trade_id = request.args.get("id")  # e.g. /diag/sheets_exit_direct?id=diag_1723340000
+    if not trade_id:
+        return ({"ok": False, "error": "Pass ?id=<Trade ID from Alerts tab>"}, 400)
+
+    url = os.environ.get("GOOGLE_SHEETS_WEBHOOK")
+    if not url:
+        return ({"ok": False, "error": "GOOGLE_SHEETS_WEBHOOK missing"}, 500)
+
+    payload = {
+        "action": "update",
+        "trade_id": trade_id,
+        "exit_price": 2899.0,
+        "exit_reason": "TP2 hit",
+        "pnl_pct": 1.5,
+        "status": "CLOSED"
+    }
+    r = requests.post(url, json=payload, timeout=12)
+    logger.info(f"/diag/sheets_exit_direct → {r.status_code} {r.text[:400]}")
+    ok = r.status_code < 300
+    return ({"ok": ok, "status": r.status_code, "body": r.text[:400]}, 200 if ok else 500)
+
 @bot.event
 async def on_error(event, *args, **kwargs):
     logger.error(f"Discord event error in {event}: {args}")
