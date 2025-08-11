@@ -181,23 +181,6 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
-@app.route("/diag/sheets", methods=["GET"])
-async def diag_sheets():
-    """Test Google Sheets webhook integration without needing a real trade."""
-    sample = {
-        "id": f"diag_{int(time.time())}",  # matches 'entry' payload's trade_id
-        "direction": "Long",
-        "level_name": "H4",
-        "entry_price": 2800.0,
-        "tp1": 2825.0,
-        "tp2": 2850.0,
-        "sl": 2775.0,
-        "score": 4,
-        "knight": "Sir Leonis Ironhart ⚔️"
-    }
-    ok = await trade_tracker._send_to_sheets(sample, "entry")
-    return ({"ok": True}, 200) if ok else ({"ok": False}, 500)
-
 # ============================================
 # DISCORD BOT INITIALIZATION
 # ============================================
@@ -3519,6 +3502,23 @@ async def on_ready():
 
     except Exception as e:
         logger.error(f"Error during startup: {e}")
+
+@app.route("/diag/sheets", methods=["GET"])
+async def diag_sheets():
+    """Test Google Sheets webhook integration without needing a real trade."""
+    sample = {
+        "id": f"diag_{int(time.time())}",  # matches 'entry' payload's trade_id
+        "direction": "Long",
+        "level_name": "H4",
+        "entry_price": 2800.0,
+        "tp1": 2825.0,
+        "tp2": 2850.0,
+        "sl": 2775.0,
+        "score": 4,
+        "knight": "Sir Leonis Ironhart ⚔️"
+    }
+    ok = await trade_tracker._send_to_sheets(sample, "entry")
+    return ({"ok": True}, 200) if ok else ({"ok": False}, 500)
 
 @bot.event
 async def on_error(event, *args, **kwargs):
