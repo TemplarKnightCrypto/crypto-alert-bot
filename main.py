@@ -948,10 +948,10 @@ class IntegratedTradeTracker:
         }
 
     async def _send_to_sheets(self, data: dict, action: str) -> bool:
-    """Send data to Google Sheets using aiohttp with retries + rich logging."""
-    if not getattr(self, "sheets_webhook", None):
-        logger.warning("Sheets disabled: no GOOGLE_SHEETS_WEBHOOK")
-        return False
+        """Send data to Google Sheets using aiohttp with retries + rich logging."""
+        if not getattr(self, "sheets_webhook", None):
+            logger.warning("Sheets disabled: no GOOGLE_SHEETS_WEBHOOK")
+            return False
 
     # Build payload (keeps your current schema)
     if action == "entry":
