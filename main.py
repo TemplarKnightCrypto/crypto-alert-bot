@@ -947,41 +947,69 @@ class IntegratedTradeTracker:
             'tp_success_rate': tp_success_rate
         }
 
-    async def _send_to_sheets(self, data, action):
-        """Send data to Google Sheets using aiohttp"""
+    async def _send_to_sheets(self, data: dict, action: str) -> bool:
+    """Send data to Google Sheets using aiohttp with retries + rich logging."""
+    if not getattr(self, "sheets_webhook", None):
+        logger.warning("Sheets disabled: no GOOGLE_SHEETS_WEBHOOK")
+        return False
+
+    # Build payload (keeps your current schema)
+    if action == "entry":
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "trade_id": data["id"],
+            "direction": data["direction"],
+            "level_name": data["level_name"],
+            "entry_price": data["entry_price"],
+            "target1": data["tp1"],
+            "target2": data["tp2"],
+            "stop_loss": data["sl"],
+            "score": data["score"],
+            "knight": data["knight"],
+            "status": "OPEN",
+        }
+        # Optional enrich (uncomment if you want these in Sheets)
+        # payload["asset"] = "ETH"
+        # payload["trade_type"] = data.get("trade_type", "Breakout")
+        # payload["confidence"] = data.get("rating")  # S/A/B/C
+    else:  # exit/update
+        payload = {
+            "action": "update",
+            "trade_id": data["trade_id"],
+            "exit_price": data["exit_price"],
+            "exit_reason": data["exit_reason"],
+            "pnl_pct": data["pnl_pct"],
+            "exit_time": datetime.now(timezone.utc).isoformat(),
+            "status": "CLOSED",
+        }
+
+    logger.info(f"Sheets payload[{action}]: {json.dumps(payload)[:300]}")
+
+    # Retry up to 3 times; Apps Script can be slow, so use a 15s total timeout
+    for attempt in range(1, 4):
         try:
-            if action == 'entry':
-                payload = {
-                    'timestamp': datetime.now(timezone.utc).isoformat(),
-                    'trade_id': data['id'],
-                    'direction': data['direction'],
-                    'level_name': data['level_name'],
-                    'entry_price': data['entry_price'],
-                    'target1': data['tp1'],
-                    'target2': data['tp2'],
-                    'stop_loss': data['sl'],
-                    'score': data['score'],
-                    'knight': data['knight'],
-                    'status': 'OPEN'
-                }
-            else:  # exit
-                payload = {
-                    'action': 'update',
-                    'trade_id': data['trade_id'],
-                    'exit_price': data['exit_price'],
-                    'exit_reason': data['exit_reason'],
-                    'pnl_pct': data['pnl_pct'],
-                    'exit_time': datetime.now(timezone.utc).isoformat(),
-                    'status': 'CLOSED'
-                }
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(self.sheets_webhook, json=payload, timeout=5) as response:
-                    return response.status == 200
-                    
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(self.sheets_webhook, json=payload) as resp:
+                    text = await resp.text()
+                    if resp.status < 300:
+                        logger.info(f"Sheets ok: {resp.status} {text[:200]}")
+                        # If your Apps Script returns {"status":"success"}, optionally validate it:
+                        try:
+                            j = json.loads(text)
+                            if isinstance(j, dict) and j.get("status") == "success":
+                                return True
+                        except Exception:
+                            # Non-JSON but 2xx—still accept as success
+                            return True
+                    else:
+                        logger.error(f"Sheets POST failed (try {attempt}/3) {resp.status}: {text[:500]}")
         except Exception as e:
-            logger.error(f"Sheets integration error: {e}")
-            return False
+            logger.error(f"Sheets POST exception (try {attempt}/3): {e}")
+        await asyncio.sleep(0.8 * attempt)
+
+    logger.error("Sheets integration error: exhausted retries")
+    return False
     
     def _update_daily_stats(self, action, pnl=None):
         """Update daily statistics"""
