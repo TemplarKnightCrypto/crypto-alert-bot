@@ -966,9 +966,9 @@ class IntegratedTradeTracker:
                 "status": "OPEN",
             }
             # Optional enrich:
-            # payload["asset"] = "ETH"
-            # payload["trade_type"] = data.get("trade_type", "Breakout")
-            # payload["confidence"] = data.get("rating")  # S/A/B/C
+              payload["asset"] = "ETH"
+              payload["trade_type"] = data.get("trade_type", "Breakout")
+              payload["confidence"] = data.get("rating")  # S/A/B/C
         else:  # exit/update
             payload = {
                 "action": "update",
@@ -3505,78 +3505,6 @@ async def on_ready():
 
     except Exception as e:
         logger.error(f"Error during startup: {e}")
-
-@app.route("/diag/sheets", methods=["GET"])
-async def diag_sheets():
-    """Test Google Sheets webhook integration without needing a real trade."""
-    sample = {
-        "id": f"diag_{int(time.time())}",  # matches 'entry' payload's trade_id
-        "direction": "Long",
-        "level_name": "H4",
-        "entry_price": 2800.0,
-        "tp1": 2825.0,
-        "tp2": 2850.0,
-        "sl": 2775.0,
-        "score": 4,
-        "knight": "Sir Leonis Ironhart ⚔️"
-    }
-    ok = await trade_tracker._send_to_sheets(sample, "entry")
-    return ({"ok": True}, 200) if ok else ({"ok": False}, 500)
-
-@app.route("/diag/sheets_direct", methods=["GET"])
-def diag_sheets_direct():
-    url = os.environ.get("GOOGLE_SHEETS_WEBHOOK")
-    if not url:
-        return ({"ok": False, "error": "GOOGLE_SHEETS_WEBHOOK missing"}, 500)
-
-    payload = {
-        "timestamp": "2025-08-11T00:00:00Z",
-        "trade_id": f"diag_{int(time.time())}",
-        "asset": "ETH",
-        "direction": "Long",
-        "entry_price": 2800.0,
-        "stop_loss": 2775.0,
-        "target1": 2825.0,
-        "target2": 2850.0,
-        "score": 4,
-        "level_name": "H4",
-        "knight": "Sir Leonis Ironhart ⚔️",
-        "trade_type": "Breakout",
-        "confidence": "A"
-    }
-
-    try:
-        r = requests.post(url, json=payload, timeout=12)
-        body = r.text[:400]
-        logger.info(f"/diag/sheets_direct → {r.status_code} {body}")
-        ok = r.status_code < 300
-        return ({"ok": ok, "status": r.status_code, "body": body}, 200 if ok else 500)
-    except Exception as e:
-        logger.exception("diag/sheets_direct error")
-        return ({"ok": False, "error": str(e)}, 500)
-
-@app.route("/diag/sheets_exit_direct", methods=["GET"])
-def diag_sheets_exit_direct():
-    trade_id = request.args.get("id")  # e.g. /diag/sheets_exit_direct?id=diag_1723340000
-    if not trade_id:
-        return ({"ok": False, "error": "Pass ?id=<Trade ID from Alerts tab>"}, 400)
-
-    url = os.environ.get("GOOGLE_SHEETS_WEBHOOK")
-    if not url:
-        return ({"ok": False, "error": "GOOGLE_SHEETS_WEBHOOK missing"}, 500)
-
-    payload = {
-        "action": "update",
-        "trade_id": trade_id,
-        "exit_price": 2899.0,
-        "exit_reason": "TP2 hit",
-        "pnl_pct": 1.5,
-        "status": "CLOSED"
-    }
-    r = requests.post(url, json=payload, timeout=12)
-    logger.info(f"/diag/sheets_exit_direct → {r.status_code} {r.text[:400]}")
-    ok = r.status_code < 300
-    return ({"ok": ok, "status": r.status_code, "body": r.text[:400]}, 200 if ok else 500)
 
 @bot.event
 async def on_error(event, *args, **kwargs):
