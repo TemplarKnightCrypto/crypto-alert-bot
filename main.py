@@ -1,5 +1,5 @@
 # ============================================
-# Control Tower - Fixed v11.1 (H5/L5 + Setup Intel + Rehydrate/BE/Trail)
+# Control Tower - Fixed v11.2 (H5/L5 + Setup Intel + Rehydrate/BE/Trail)
 # ============================================
 # Features:
 # - Class-based core (Config, TradeData, TradeManager, DB, Sheets)
