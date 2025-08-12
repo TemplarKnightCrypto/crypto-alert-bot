@@ -246,6 +246,59 @@ def diag_sheets_enhanced():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
+@app.route("/diag/sim_entry", methods=["GET"])
+def diag_sim_entry():
+    try:
+        # Ensure tracker exists
+        if 'trade_tracker' not in globals() or trade_tracker is None:
+            return jsonify({"ok": False, "error": "trade_tracker not ready"}), 500
+        if 'bot' not in globals() or bot is None:
+            return jsonify({"ok": False, "error": "bot not ready"}), 500
+
+        tid = f"sim_{int(time.time())}"
+        trade_data = {
+            "id": tid,
+            "entry_price": 2800.0,
+            "tp1": 2825.0,
+            "tp2": 2850.0,
+            "sl": 2775.0,
+            "direction": "Long",
+            "level_name": "H4",
+            "score": 4,
+            "knight": "Sir Leonis",
+            "rating": "A",
+            "asset": "ETH",
+            "trade_type": "Breakout",
+            "enhanced_data": {  # include enhanced block so the logger shows it
+                "enhanced_score": 6,
+                "rsi_level": "48→55",
+                "volume_ratio": "1.3x",
+                "market_status": "NORMAL",
+                "vwap_position": "Above",
+                "macd_status": "Bullish",
+                "market_bias": "Neutral",
+                "setup_age_minutes": 7,
+                "breakout_structure": "Present",
+                "confluence_count": 3,
+                "candle_body_strength": "Strong",
+                "market_session": "Mid-day",
+                "distance_from_level_pct": 0.021,
+                "recent_news_events": "No",
+                "volatility_state": "Stable",
+                "trend_strength": "Moderate",
+            },
+        }
+
+        # Run the coroutine on the Discord bot loop (so it hits _send_to_sheets and logs)
+        fut = asyncio.run_coroutine_threadsafe(
+            trade_tracker._send_to_sheets(trade_data, "entry"),
+            bot.loop
+        )
+        ok = bool(fut.result(timeout=20))
+        return jsonify({"ok": ok, "trade_id": tid})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 # ============================================
 # DISCORD BOT INITIALIZATION
 # ============================================
