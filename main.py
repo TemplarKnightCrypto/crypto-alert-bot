@@ -299,6 +299,33 @@ def diag_sim_entry():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
+@app.route("/diag/sim_exit", methods=["GET"])
+def diag_sim_exit():
+    try:
+        if 'trade_tracker' not in globals() or trade_tracker is None:
+            return jsonify({"ok": False, "error": "trade_tracker not ready"}), 500
+        if 'bot' not in globals() or bot is None:
+            return jsonify({"ok": False, "error": "bot not ready"}), 500
+
+        tid = request.args.get("id")
+        if not tid:
+            return jsonify({"ok": False, "error": "pass ?id=<trade_id>"}), 400
+
+        payload = {
+            "trade_id": tid,
+            "exit_price": 2899.0,
+            "exit_reason": "TP2 hit",
+            "pnl_pct": 1.5,
+        }
+        fut = asyncio.run_coroutine_threadsafe(
+            trade_tracker._send_to_sheets(payload, "exit"),
+            bot.loop
+        )
+        ok = bool(fut.result(timeout=20))
+        return jsonify({"ok": ok, "trade_id": tid})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 # ============================================
 # DISCORD BOT INITIALIZATION
 # ============================================
