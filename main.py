@@ -185,22 +185,6 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
-@app.route("/diag/sheets", methods=["GET"])
-async def diag_sheets():
-    """Test Google Sheets webhook integration without needing a real trade."""
-    sample = {
-        "id": f"diag_{int(time.time())}",  # matches 'entry' payload's trade_id
-        "direction": "Long",
-        "level_name": "H4",
-        "entry_price": 2800.0,
-        "tp1": 2825.0,
-        "tp2": 2850.0,
-        "sl": 2775.0,
-        "score": 4,
-        "knight": "Sir Leonis Ironhart ⚔️"
-    }
-    ok = await tracker._send_to_sheets(sample, "entry")
-    return ({"ok": True}, 200) if ok else ({"ok": False}, 500)
 
 # ============================================
 # DISCORD BOT INITIALIZATION
@@ -3661,45 +3645,3 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Bot startup failed: {e}")
         exit(1)
-
-# ============================================
-# END OF ENHANCED CONTROL TOWER SCRIPT v10.3.2
-# ALL CRITICAL FIXES APPLIED + AUTOMATED TRACKING SYSTEM
-# ============================================
-
-
-DEPLOYMENT SUMMARY:
-
-✅ ALL CRITICAL FIXES IMPLEMENTED:
-- H5/L5 continuation logic for breakout scenarios
-- Async HTTP to prevent event loop blocking
-- Multi-trade support with unique trade IDs
-- Setup completion tracking for analytics
-- Retry logic integration for API reliability
-- CSV export BytesIO fix for Discord uploads
-- TP1 alert suppression (only TP2 and SL alerts)
-
-🤖 NEW: AUTOMATED TRACKING SYSTEM:
-- Zero manual entry required
-- 30+ metrics captured automatically per trade
-- SQLite database for professional data storage
-- AI-powered pattern analysis
-- Enhanced scoring system (Score 5 & 6)
-- Automated red flag detection
-- Success pattern identification
-- Complete dataset export capabilities
-
-🎯 IMMEDIATE BENEFITS:
-- Know exactly why Score 4+ trades fail
-- Data-driven insights like "RSI >80 = 90% loss rate"
-- Enhanced scoring to improve trade selection
-- Professional analytics ready for advanced analysis
-- Zero manual work while getting comprehensive insights
-
-📈 READY TO OPTIMIZE YOUR 50% WIN RATE!
-
-Commands to try immediately:
-!status - Check system health
-!analysis - Get AI pattern insights (after a few trades)
-!enhanced_export - Get complete dataset
-!health - Full system diagnostics
