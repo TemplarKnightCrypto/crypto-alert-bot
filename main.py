@@ -1738,46 +1738,50 @@ def detect_significant_market_event(df, current_data):
 # ENHANCED SCANNER TASKS WITH H5/L5 IMPLEMENTATION
 # ============================================
 
+# ---------- UPDATED: H5/L5 continuation ----------
 async def handle_h5_l5_continuation(df, cam_levels, current_price, scenario):
-    """FIXED: Implement H5/L5 continuation logic"""
+    """H5/L5 continuation logic (now passes enhanced metrics to Sheets)."""
     try:
         latest = df.iloc[-1]
         volume = latest["volume"]
         avg_volume = df["volume"].tail(10).mean()
         rsi = latest["rsi"]
-        
-        # Get trend strength for momentum confirmation
+
+        # Momentum / trend
         trend_slope, trend_strength = calculate_trend_strength(df)
-        
+
         # Volume confirmation (must be above average)
         volume_confirmed = volume > avg_volume * 1.3
-        
-        # Momentum confirmation based on scenario
+
         if scenario == "above_H5":
-            # Bullish breakout continuation
+            # Bullish continuation
             momentum_confirmed = (
                 trend_strength in ["STRONG_BULL", "WEAK_BULL"] and
-                rsi > 55  # Above neutral with upward bias
+                rsi > 55
             )
-            
             if volume_confirmed and momentum_confirmed:
                 direction = "Long"
                 level_name = "H5_BREAKOUT"
                 level_price = cam_levels["H5"]
-                
-                # Continuation targets
+
                 entry = round(current_price, 2)
-                sl = round(level_price * 0.995, 2)  # Stop below H5
-                tp1 = round(current_price * 1.02, 2)  # 2% target
-                tp2 = round(current_price * 1.04, 2)  # 4% target
-                
-                # Enhanced scoring for breakouts
-                score = 4  # Base score for confirmed breakout
-                if volume > avg_volume * 2:
-                    score += 1
-                if trend_strength == "STRONG_BULL":
-                    score += 1
-                
+                sl    = round(level_price * 0.995, 2)  # below H5
+                tp1   = round(current_price * 1.02, 2)
+                tp2   = round(current_price * 1.04, 2)
+
+                score = 4
+                if volume > avg_volume * 2: score += 1
+                if trend_strength == "STRONG_BULL": score += 1
+
+                # Build enhanced and pass it
+                enhanced = _make_enhanced_from_df(
+                    df, latest,
+                    level_name=level_name,
+                    level_price=level_price,
+                    score=score,
+                    direction=direction,
+                )
+
                 await send_battle_signal(
                     direction=direction,
                     level_name=level_name,
@@ -1787,34 +1791,38 @@ async def handle_h5_l5_continuation(df, cam_levels, current_price, scenario):
                     targets=[tp1, tp2],
                     confidence=get_tier_label(score),
                     score=score,
-                    trade_type="H5_Breakout"
+                    trade_type="H5_Breakout",
+                    enhanced=enhanced,     # <-- important
                 )
-                
+
         elif scenario == "below_L5":
-            # Bearish breakout continuation
+            # Bearish continuation
             momentum_confirmed = (
                 trend_strength in ["STRONG_BEAR", "WEAK_BEAR"] and
-                rsi < 45  # Below neutral with downward bias
+                rsi < 45
             )
-            
             if volume_confirmed and momentum_confirmed:
                 direction = "Short"
                 level_name = "L5_BREAKOUT"
                 level_price = cam_levels["L5"]
-                
-                # Continuation targets
+
                 entry = round(current_price, 2)
-                sl = round(level_price * 1.005, 2)  # Stop above L5
-                tp1 = round(current_price * 0.98, 2)  # 2% target
-                tp2 = round(current_price * 0.96, 2)  # 4% target
-                
-                # Enhanced scoring for breakouts
-                score = 4  # Base score for confirmed breakout
-                if volume > avg_volume * 2:
-                    score += 1
-                if trend_strength == "STRONG_BEAR":
-                    score += 1
-                
+                sl    = round(level_price * 1.005, 2)  # above L5
+                tp1   = round(current_price * 0.98, 2)
+                tp2   = round(current_price * 0.96, 2)
+
+                score = 4
+                if volume > avg_volume * 2: score += 1
+                if trend_strength == "STRONG_BEAR": score += 1
+
+                enhanced = _make_enhanced_from_df(
+                    df, latest,
+                    level_name=level_name,
+                    level_price=level_price,
+                    score=score,
+                    direction=direction,
+                )
+
                 await send_battle_signal(
                     direction=direction,
                     level_name=level_name,
@@ -1824,34 +1832,41 @@ async def handle_h5_l5_continuation(df, cam_levels, current_price, scenario):
                     targets=[tp1, tp2],
                     confidence=get_tier_label(score),
                     score=score,
-                    trade_type="L5_Breakout"
+                    trade_type="L5_Breakout",
+                    enhanced=enhanced,     # <-- important
                 )
-                
+
     except Exception as e:
         logger.error(f"Error in H5/L5 continuation logic: {e}")
+# ---------------------------------------------------------------------------
 
+
+# ---------- UPDATED: Traditional Camarilla with enhanced alerts ----------
 async def scan_traditional_camarilla_with_enhanced_alerts(df, cam_levels):
-    """Traditional Camarilla scanning with enhanced setup alerts"""
+    """Traditional Camarilla scanning (now passes enhanced metrics on live entries)."""
     try:
         latest = df.iloc[-1]
         price = latest["close"]
         open_ = latest["open"]
         high_ = latest["high"]
-        low_ = latest["low"]
+        low_  = latest["low"]
         volume = latest["volume"]
         avg_volume = df["volume"].tail(10).mean()
         rsi = latest["rsi"]
+
         rsi_trend = "up" if rsi > df["rsi"].iloc[-3] else "down"
         price_trend = price > df["close"].iloc[-3]
 
+        # nearest level
         closest = min(cam_levels.items(), key=lambda x: abs(price - x[1]))
         level_name, level_price = closest
         level_dist_pct = abs(price - level_price) / price * 100
         direction = "Long" if price > level_price else "Short"
 
+        # structure checks
         body = abs(price - open_)
-        range_ = high_ - low_
-        body_ratio = body / range_ if range_ > 0 else 0
+        range_ = max(1e-9, (high_ - low_))
+        body_ratio = body / range_
         volume_ok = volume > avg_volume * 1.2
 
         breakout_confirmed = (
@@ -1864,7 +1879,7 @@ async def scan_traditional_camarilla_with_enhanced_alerts(df, cam_levels):
         reversal_confirmed = (
             level_dist_pct <= 0.2 and
             ((high_ > level_price > price and direction == "Short") or
-             (low_ < level_price < price and direction == "Long")) and
+             (low_  < level_price < price and direction == "Long")) and
             body_ratio > 0.5 and
             volume_ok and
             ((rsi < 40 and direction == "Long") or (rsi > 60 and direction == "Short"))
@@ -1876,13 +1891,13 @@ async def scan_traditional_camarilla_with_enhanced_alerts(df, cam_levels):
         entry = round(price, 2)
         stop_pct = 0.01
         if direction == "Long":
-            sl = round(entry * (1 - stop_pct), 2)
+            sl  = round(entry * (1 - stop_pct), 2)
             tp1 = round(entry * 1.015, 2)
-            tp2 = round(entry * 1.03, 2)
+            tp2 = round(entry * 1.03,  2)
         else:
-            sl = round(entry * (1 + stop_pct), 2)
+            sl  = round(entry * (1 + stop_pct), 2)
             tp1 = round(entry * 0.985, 2)
-            tp2 = round(entry * 0.97, 2)
+            tp2 = round(entry * 0.97,  2)
 
         key = f"{level_name}_{direction}"
         now = datetime.now(timezone.utc)
@@ -1891,10 +1906,18 @@ async def scan_traditional_camarilla_with_enhanced_alerts(df, cam_levels):
             last_alert = CAMARILLA_COOLDOWN.get(key)
             if last_alert and (now - last_alert < timedelta(minutes=CAMARILLA_COOLDOWN_MINUTES)):
                 return
-
             CAMARILLA_COOLDOWN[key] = now
 
             trade_type = "Breakout" if breakout_confirmed else "Reversal"
+
+            # Build enhanced and pass it
+            enhanced = _make_enhanced_from_df(
+                df, latest,
+                level_name=level_name,
+                level_price=level_price,
+                score=score,
+                direction=direction,
+            )
 
             await send_battle_signal(
                 direction=direction,
@@ -1905,14 +1928,15 @@ async def scan_traditional_camarilla_with_enhanced_alerts(df, cam_levels):
                 targets=[tp1, tp2],
                 confidence=confidence,
                 score=score,
-                trade_type=trade_type
+                trade_type=trade_type,
+                enhanced=enhanced,   # <-- important
             )
-            
-            # FIXED: Mark setup completion for tracking
+
+            # Mark setup completion for tracking
             await mark_setup_completion(level_name, direction)
 
         else:
-            # Use enhanced setup alert instead of basic one
+            # Enhanced setup alert for “not ready yet”
             missing = []
             if body_ratio <= 0.5:
                 missing.append("🧱 Weak Candle Body")
@@ -1927,11 +1951,13 @@ async def scan_traditional_camarilla_with_enhanced_alerts(df, cam_levels):
                 level_price=level_price,
                 score=score,
                 missing_items=missing,
-                df=df
+                df=df,
             )
 
     except Exception as e:
         logger.error(f"Error in scan_traditional_camarilla_with_enhanced_alerts: {e}")
+# ---------------------------------------------------------------------------
+
 
 async def mark_setup_completion(level_name, direction):
     """FIXED: Mark setups as completed when signals fire"""
@@ -2595,6 +2621,105 @@ async def send_enhanced_scorecard():
     except Exception as e:
         logger.error(f"Error sending enhanced scorecard: {e}")
 
+# ---------- helper to build enhanced metrics from df/latest ----------
+def _make_enhanced_from_df(
+    df,
+    latest,
+    *,
+    level_name: str,
+    level_price: float,
+    score: int,
+    direction: str,
+):
+    """Create an enhanced metrics dict compatible with your Apps Script columns."""
+    try:
+        price = float(latest.get("close"))
+        open_px = float(latest.get("open", price))
+        high = float(latest.get("high", price))
+        low = float(latest.get("low", price))
+        rng = max(1e-9, high - low)
+
+        # Volume ratio
+        volume = float(latest.get("volume", 0.0))
+        avg_volume = float(df["volume"].tail(10).mean()) if "volume" in df and len(df) >= 10 else max(1.0, volume)
+        volume_ratio = (volume / avg_volume) if avg_volume > 0 else 1.0
+
+        # RSI / status
+        rsi = float(latest.get("rsi", 50.0))
+        market_status = "OVERBOUGHT" if rsi > 75 else ("OVERSOLD" if rsi < 25 else "NORMAL")
+
+        # VWAP position
+        vwap_px = float(latest.get("vwap", price))
+        vwap_position = "Above" if price > vwap_px else "Below"
+
+        # MACD / bias / trend strength
+        macd_hist = float(latest.get("macd_hist", 0.0))
+        macd_status = "Bullish" if macd_hist > 0 else "Bearish"
+
+        _, trend_strength_raw = calculate_trend_strength(df)  # e.g., STRONG_BULL / WEAK_BEAR / etc.
+        if "BULL" in trend_strength_raw:
+            market_bias = "Bullish"
+        elif "BEAR" in trend_strength_raw:
+            market_bias = "Bearish"
+        else:
+            market_bias = "Neutral"
+
+        # Candle body + breakout structure
+        body_ratio = abs(price - open_px) / rng
+        candle_body_strength = "Strong" if body_ratio > 0.7 else ("Moderate" if body_ratio > 0.3 else "Weak")
+        breakout_structure = "Present" if (volume_ratio > 1.0 and body_ratio > 0.5) else "Missing"
+
+        # Simple confluence (cap 4)
+        confluence = 0
+        if volume_ratio > 1.0: confluence += 1
+        if (direction == "Long" and rsi > 50) or (direction == "Short" and rsi < 50): confluence += 1
+        if (direction == "Long" and macd_hist > 0) or (direction == "Short" and macd_hist < 0): confluence += 1
+        if (direction == "Long" and price > vwap_px) or (direction == "Short" and price < vwap_px): confluence += 1
+        confluence = int(min(confluence, 4))
+
+        # Session bucket (simple)
+        hr = datetime.now(timezone.utc).hour
+        if 4 <= hr < 9:      market_session = "Pre-market"
+        elif 9 <= hr < 12:   market_session = "Open"
+        elif 12 <= hr < 16:  market_session = "Mid-day"
+        elif 16 <= hr < 20:  market_session = "Close"
+        else:                market_session = "After-hours"
+
+        # Distance from level (%)
+        distance_from_level_pct = abs(price - float(level_price)) / max(1e-9, price) * 100.0
+
+        # Volatility state (if your helper exists)
+        try:
+            _, volatility_state = calculate_market_volatility(df)
+        except Exception:
+            volatility_state = "Stable"
+
+        # Nudge the enhanced score a bit for good conditions
+        enhanced_score = int(score + (1 if (volume_ratio >= 1.3 and market_status == "NORMAL") else 0))
+
+        return {
+            "enhanced_score":          enhanced_score,
+            "rsi_level":               round(rsi, 2),
+            "volume_ratio":            round(volume_ratio, 4),
+            "market_status":           market_status,
+            "vwap_position":           vwap_position,
+            "macd_status":             macd_status,
+            "market_bias":             market_bias,
+            "setup_age_minutes":       0,
+            "breakout_structure":      breakout_structure,
+            "confluence_count":        confluence,
+            "candle_body_strength":    candle_body_strength,
+            "market_session":          market_session,
+            "distance_from_level_pct": round(distance_from_level_pct, 6),
+            "recent_news_events":      "No",
+            "volatility_state":        volatility_state,
+            "trend_strength":          trend_strength_raw,
+        }
+    except Exception as e:
+        logger.error("make_enhanced_from_df error: %s", e)
+        return {}
+# ---------------------------------------------------------------------------
+
 async def send_battle_signal(
     direction: str,
     level_name: str,
@@ -2616,6 +2741,13 @@ async def send_battle_signal(
         if not targets or len(targets) < 2:
             logger.error("send_battle_signal: expected 2 targets, got %s", targets)
             return
+
+        # ── Debug: did we receive enhanced from caller? ──────────────────────
+        logger.warning(
+            "send_battle_signal: incoming enhanced=%s keys=%s",
+            bool(enhanced),
+            (list(enhanced.keys()) if isinstance(enhanced, dict) else [])
+        )
 
         embed = discord.Embed(
             title=f"⚔️ Battle Signal - ETH {direction} {trade_type}",
@@ -2697,7 +2829,7 @@ async def send_battle_signal(
 
             # ----- enhanced_data support -----
             if enhanced is None:
-                # Try to assemble from available locals (if your pipeline already computed them)
+                # Try to assemble from available locals (only works if you computed them earlier in this function)
                 _locals = locals()
                 enhanced = {
                     "enhanced_score":          _locals.get("enhanced_score"),
@@ -2738,13 +2870,19 @@ async def send_battle_signal(
 
                 if enhanced:
                     trade_data["enhanced_data"] = enhanced
-            # ---------------------------------
 
-            logger.info(f"entry trade_data keys: {list(trade_data.keys())} enhanced? {bool(trade_data.get('enhanced_data'))}")
+            # ── Debug: did we actually attach enhanced_data? ─────────────────
+            logger.warning(
+                "send_battle_signal: attach enhanced_data=%s keys=%s",
+                bool(trade_data.get("enhanced_data")),
+                (list(trade_data["enhanced_data"].keys()) if trade_data.get("enhanced_data") else [])
+            )
+
             await trade_tracker.log_trade_entry(trade_data)
 
     except Exception as e:
         logger.error("Error in send_battle_signal: %s", e)
+
 
 # ============================================
 # REMAINING TASKS & COMMANDS (FIXED)
