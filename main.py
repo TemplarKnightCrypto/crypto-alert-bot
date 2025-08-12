@@ -188,6 +188,64 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
+# --- TEMP DIAGNOSTIC: send an entry with enhanced_data directly to Apps Script ---
+# Place this after: app = Flask(__name__)
+from flask import jsonify
+import os, time, requests, json
+from datetime import datetime, timezone
+
+@app.route("/diag/sheets_enhanced", methods=["GET"])
+def diag_sheets_enhanced():
+    url = os.environ.get("GOOGLE_SHEETS_WEBHOOK")
+    if not url:
+        return jsonify({"ok": False, "error": "GOOGLE_SHEETS_WEBHOOK missing"}), 500
+
+    tid = f"diag_{int(time.time())}"
+    payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "trade_id": tid,
+        "direction": "Long",
+        "level_name": "H4",
+        "entry_price": 2800,
+        "target1": 2825,
+        "target2": 2850,
+        "stop_loss": 2775,
+        "score": 4,
+        "knight": "Sir Leonis",
+        "asset": "ETH",
+        "trade_type": "Breakout",
+        "status": "OPEN",
+        "enhanced_data": {
+            "enhanced_score": 6,
+            "rsi_level": "48→55",
+            "volume_ratio": "1.3x",
+            "market_status": "NORMAL",
+            "vwap_position": "Above",
+            "macd_status": "Bullish",
+            "market_bias": "Neutral",
+            "setup_age_minutes": 7,
+            "breakout_structure": "Present",
+            "confluence_count": 3,
+            "candle_body_strength": "Strong",
+            "market_session": "Mid-day",
+            "distance_from_level_pct": 0.021,
+            "recent_news_events": "No",
+            "volatility_state": "Stable",
+            "trend_strength": "Moderate",
+        },
+    }
+
+    try:
+        r = requests.post(url, json=payload, timeout=20)
+        return jsonify({
+            "ok": r.ok,
+            "status": r.status_code,
+            "body": r.text[:300],
+            "trade_id": tid
+        }), (200 if r.ok else 500)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 # ============================================
 # DISCORD BOT INITIALIZATION
 # ============================================
@@ -929,66 +987,79 @@ class IntegratedTradeTracker:
         }
 
     async def _send_to_sheets(self, data: dict, action: str) -> bool:
-        """Send data to Google Sheets using aiohttp with retries + rich logging."""
-        if not getattr(self, "sheets_webhook", None):
-            logger.warning("Sheets disabled: no GOOGLE_SHEETS_WEBHOOK")
-            return False
-
-        if action == "entry":
-            # base entry fields
-            base = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "trade_id": data["id"],
-                "direction": data["direction"],
-                "level_name": data["level_name"],
-                "entry_price": data["entry_price"],
-                "target1": data["tp1"],
-                "target2": data["tp2"],
-                "stop_loss": data["sl"],
-                "score": data["score"],
-                "knight": data["knight"],
-                "status": "OPEN",
-                "asset": data.get("asset", "ETH"),
-                "trade_type": data.get("trade_type", "Breakout"),
-                "confidence": data.get("rating") or get_tier_label(data["score"]),
-            }
-            # if enhanced metrics exist, forward them
-            payload = {**base, "enhanced_data": data["enhanced_data"]} if data.get("enhanced_data") else base
-        else:  # exit/update
-            payload = {
-                "action": "update",
-                "trade_id": data["trade_id"],
-                "exit_price": data["exit_price"],
-                "exit_reason": data["exit_reason"],
-                "pnl_pct": data["pnl_pct"],
-                "exit_time": datetime.now(timezone.utc).isoformat(),
-                "status": "CLOSED",
-            }
-
-        logger.info(f"Sheets payload[{action}]: {json.dumps(payload)[:300]}")
-
-        for attempt in range(1, 4):
-            try:
-                timeout = aiohttp.ClientTimeout(total=15)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.post(self.sheets_webhook, json=payload) as resp:
-                        text = await resp.text()
-                        if resp.status < 300:
-                            logger.info(f"Sheets ok: {resp.status} {text[:200]}")
-                            try:
-                                j = json.loads(text)
-                                if isinstance(j, dict) and j.get("status") == "success":
-                                    return True
-                            except Exception:
-                                return True
-                        else:
-                            logger.error(f"Sheets POST failed (try {attempt}/3) {resp.status}: {text[:500]}")
-            except Exception as e:
-                logger.error(f"Sheets POST exception (try {attempt}/3): {e}")
-            await asyncio.sleep(0.8 * attempt)
-
-        logger.error("Sheets integration error: exhausted retries")
+    """Send data to Google Sheets using aiohttp with retries + rich logging."""
+    if not getattr(self, "sheets_webhook", None):
+        logger.warning("Sheets disabled: no GOOGLE_SHEETS_WEBHOOK")
         return False
+
+    # ---- build payload -------------------------------------------------------
+    if action == "entry":
+        base = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "trade_id": data["id"],
+            "direction": data["direction"],
+            "level_name": data["level_name"],
+            "entry_price": data["entry_price"],
+            "target1": data["tp1"],
+            "target2": data["tp2"],
+            "stop_loss": data["sl"],
+            "score": data["score"],
+            "knight": data["knight"],
+            "status": "OPEN",
+            "asset": data.get("asset", "ETH"),
+            "trade_type": data.get("trade_type", "Breakout"),
+            "confidence": data.get("rating") or get_tier_label(data["score"]),
+        }
+        # forward enhanced metrics if present
+        payload = {**base, "enhanced_data": data["enhanced_data"]} if data.get("enhanced_data") else base
+    else:  # exit/update
+        payload = {
+            "action": "update",
+            "trade_id": data["trade_id"],
+            "exit_price": data["exit_price"],
+            "exit_reason": data["exit_reason"],
+            "pnl_pct": data["pnl_pct"],
+            "exit_time": datetime.now(timezone.utc).isoformat(),
+            "status": "CLOSED",
+        }
+
+    # ---- debug logging (key line you asked about) ---------------------------
+    if action == "entry":
+        enh = payload.get("enhanced_data")
+        enh_keys = list(enh.keys()) if isinstance(enh, dict) else []
+        logger.info(
+            "Sheets[entry]: has_enhanced=%s enh_keys=%s keys=%s",
+            bool(enh_keys),
+            enh_keys,
+            list(payload.keys()),
+        )
+    else:
+        logger.info("Sheets[exit]: payload=%s", json.dumps(payload, default=str)[:300] + "...")
+
+    # ---- POST with retries ---------------------------------------------------
+    for attempt in range(1, 4):
+        try:
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(self.sheets_webhook, json=payload) as resp:
+                    text = await resp.text()
+                    if resp.status < 300:
+                        logger.info("Sheets ok: %s %s", resp.status, text[:200])
+                        # Accept success JSON or any 2xx
+                        try:
+                            j = json.loads(text)
+                            if isinstance(j, dict) and j.get("status") == "success":
+                                return True
+                        except Exception:
+                            return True
+                    else:
+                        logger.error("Sheets POST failed (try %d/3) %s: %s", attempt, resp.status, text[:500])
+        except Exception as e:
+            logger.error("Sheets POST exception (try %d/3): %s", attempt, e)
+        await asyncio.sleep(0.8 * attempt)
+
+    logger.error("Sheets integration error: exhausted retries")
+    return False
 
     def _update_daily_stats(self, action, pnl=None):
         """Update daily statistics."""
