@@ -1131,6 +1131,67 @@ class IntegratedTradeTracker:
             pass
         return "Unknown"
 
+# ---------------------------------------------------------------------
+# Enhanced IntegratedTradeTracker with automated capture (drop-in)
+# Paste this IMMEDIATELY AFTER the IntegratedTradeTracker class.
+# ---------------------------------------------------------------------
+class EnhancedIntegratedTradeTracker(IntegratedTradeTracker):
+    def __init__(self, bot):
+        super().__init__(bot)
+        self.auto_tracker = None
+        try:
+            # If AutomatedTradingTracker is defined elsewhere, make sure it’s imported.
+            # Otherwise this try/except prevents startup crashes and simply disables auto-capture.
+            self.auto_tracker = AutomatedTradingTracker(bot)  # noqa: F821 if not defined yet
+            logger.info("EnhancedIntegratedTradeTracker: automated capture enabled")
+        except Exception as e:
+            logger.error("EnhancedIntegratedTradeTracker: auto-capture disabled (%s)", e)
+            self.auto_tracker = None
+
+    async def log_trade_entry(self, trade_data):
+        """Log entry via base tracker; then try to enrich with market metrics."""
+        try:
+            ok = await super().log_trade_entry(trade_data)
+            if ok and self.auto_tracker is not None:
+                try:
+                    # These helpers must exist in your script; if not, we catch and continue.
+                    df = await retry_api_call_async(fetch_ohlc_async, "ETH", 5)  # noqa: F821
+                    if df is not None:
+                        df = calculate_indicators(df)  # noqa: F821
+                        if df is not None and len(df) > 0:
+                            await self.auto_tracker.auto_capture_trade_entry(trade_data, df)
+                except Exception as e:
+                    logger.error("auto_capture_entry failed: %s", e)
+            return ok
+        except Exception as e:
+            logger.error("Error in enhanced trade entry logging: %s", e)
+            return False
+
+    async def log_trade_exit(self, trade_id, exit_price, exit_reason, pnl_pct):
+        """Log exit via base tracker; then try to capture exit metrics."""
+        try:
+            ok = await super().log_trade_exit(trade_id, exit_price, exit_reason, pnl_pct)
+            if ok and self.auto_tracker is not None:
+                try:
+                    # Use the recorded side if available; default safely to Long
+                    side = "Long"
+                    try:
+                        if trade_id in active_trades:  # noqa: F821
+                            side = active_trades[trade_id].get("side", "Long")
+                    except Exception:
+                        pass
+
+                    await self.auto_tracker.auto_capture_trade_exit(
+                        trade_id, exit_price, exit_reason, exit_price, side
+                    )
+                except Exception as e:
+                    logger.error("auto_capture_exit failed: %s", e)
+            return ok
+        except Exception as e:
+            logger.error("Error in enhanced trade exit logging: %s", e)
+            return False
+
+
 # ============================================
 # ENHANCED MARKET DATA & ANALYSIS FUNCTIONS (FIXED ASYNC HTTP)
 # ============================================
@@ -3391,16 +3452,44 @@ def _safe_start(loop_task, name: str) -> None:
     except Exception as e:
         logger.error("Failed to start task %s: %s", name, e)
 
+# ============================================
+# BOT STARTUP AND EVENTS (FIXED + AUTOMATED TRACKING)
+# ============================================
+
+def _safe_start(loop_task, name: str) -> None:
+    """Start a discord.ext.tasks loop safely if it exists and isn't running."""
+    try:
+        if not loop_task:
+            logger.debug("Task %s not found (None). Skipping.", name)
+            return
+        if hasattr(loop_task, "is_running"):
+            if not loop_task.is_running():
+                loop_task.start()
+                logger.info("Started task: %s", name)
+            else:
+                logger.info("Task already running: %s", name)
+        else:
+            logger.debug("Task %s has no is_running(); skipping guarded start.", name)
+    except Exception as e:
+        logger.error("Failed to start task %s: %s", name, e)
+
 @bot.event
 async def on_ready():
     global trade_tracker, bot_start_time
     bot_start_time = datetime.now(timezone.utc)
 
-    # Initialize ENHANCED tracking system with automated capture
-    trade_tracker = EnhancedIntegratedTradeTracker(bot)
-    logger.warning(f"🟢 Bot logged in as {bot.user}")
+    # Prefer enhanced; if it throws, fall back to basic
+    try:
+        trade_tracker = EnhancedIntegratedTradeTracker(bot)
+        tracker_mode = "Enhanced"
+    except Exception:
+        logger.exception("Enhanced tracker init failed, falling back")
+        trade_tracker = IntegratedTradeTracker(bot)
+        tracker_mode = "Basic"
 
-    # (optional but recommended) install HTTP session shutdown hooks
+    logger.warning(f"🟢 Bot logged in as {bot.user} (Tracker mode: {tracker_mode})")
+
+    # (optional) install HTTP session shutdown hooks
     try:
         _install_shutdown_hooks()  # no-op if you didn't add it
     except Exception as e:
@@ -3519,25 +3608,10 @@ async def on_ready():
             inline=True
         )
 
-        # Performance guarantee
-        embed.add_field(
-            name="🎯 What You Get Now",
-            value=(
-                "• **Zero Manual Work**: Every trade automatically analyzed\n"
-                "• **Instant Insights**: Know why Score 4+ trades fail\n"
-                "• **Pattern Recognition**: 'RSI >80 = 90% loss rate' alerts\n"
-                "• **Enhanced Scoring**: Score 5 & 6 for better trade selection\n"
-                "• **Data-Driven Optimization**: Improve your 50% win rate\n"
-                "• **Professional Analytics**: Export for advanced analysis"
-            ),
-            inline=False
-        )
-
         channel = bot.get_channel(SCROLLS_ORDER_ID)
         if channel:
             await channel.send(embed=embed)
 
-        # Log all improvements
         logger.warning("🎯 ALL CRITICAL FIXES + AUTOMATED TRACKING DEPLOYED!")
         logger.warning("✅ H5/L5 continuation logic implemented")
         logger.warning("✅ Async HTTP replaces blocking requests")
