@@ -299,31 +299,52 @@ def diag_sim_entry():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
-@app.route("/diag/sim_exit", methods=["GET"])
+@app.get("/diag/sim_exit")
 def diag_sim_exit():
     try:
-        if 'trade_tracker' not in globals() or trade_tracker is None:
-            return jsonify({"ok": False, "error": "trade_tracker not ready"}), 500
-        if 'bot' not in globals() or bot is None:
-            return jsonify({"ok": False, "error": "bot not ready"}), 500
-
         tid = request.args.get("id")
         if not tid:
             return jsonify({"ok": False, "error": "pass ?id=<trade_id>"}), 400
 
         payload = {
+            "action": "update",
             "trade_id": tid,
             "exit_price": 2899.0,
             "exit_reason": "TP2 hit",
             "pnl_pct": 1.5,
+            "exit_time": datetime.now(timezone.utc).isoformat(),
+            "status": "CLOSED",
         }
-        fut = asyncio.run_coroutine_threadsafe(
-            trade_tracker._send_to_sheets(payload, "exit"),
-            bot.loop
-        )
-        ok = bool(fut.result(timeout=20))
-        return jsonify({"ok": ok, "trade_id": tid})
+
+        # 1) Try the normal tracker path (uses your aiohttp sender)
+        try:
+            if 'trade_tracker' in globals() and trade_tracker and 'bot' in globals() and bot and bot.loop.is_running():
+                fut = asyncio.run_coroutine_threadsafe(
+                    trade_tracker._send_to_sheets(payload, "exit"),
+                    bot.loop
+                )
+                ok = bool(fut.result(timeout=20))
+                if ok:
+                    return jsonify({"ok": True, "path": "tracker", "trade_id": tid})
+        except Exception as e:
+            logger.error(f"/diag/sim_exit tracker path failed: {e}")
+
+        # 2) Fallback: hit Apps Script directly (bypasses Discord loop entirely)
+        url = os.environ.get("GOOGLE_SHEETS_WEBHOOK")
+        if not url:
+            return jsonify({"ok": False, "error": "GOOGLE_SHEETS_WEBHOOK not set"}), 500
+
+        r = requests.post(url, json=payload, timeout=20)
+        return jsonify({
+            "ok": r.ok,
+            "status": r.status_code,
+            "body": r.text[:400],
+            "path": "direct",
+            "trade_id": tid
+        }), (200 if r.ok else 502)
+
     except Exception as e:
+        logger.error(f"/diag/sim_exit error: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # ============================================
