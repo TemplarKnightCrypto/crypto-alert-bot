@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================
-# Control Tower - Clean v11.2 (Syntax Error Fixed)
+# Control Tower - Clean v11.3 (Syntax Error Fixed)
 # ============================================
 
 import os
@@ -9,6 +9,7 @@ import json
 import sqlite3
 import logging
 import threading
+from io import BytesIO
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from datetime import datetime, timezone, timedelta
@@ -291,25 +292,33 @@ class GoogleSheetsIntegration:
 
     async def _post(self, session: aiohttp.ClientSession, payload: Dict[str, Any]) -> Dict[str, Any]:
         if not self.url or not self.token:
+            log.warning("Sheets not configured - skipping POST")
             return {"status": "skipped", "reason": "no_config"}
         
         headers = {"x-app-secret": self.token, "content-type": "application/json"}
+        
+        log.info(f"Posting to sheets URL: {self.url}")
+        log.info(f"Headers: x-app-secret: {self.token[:10]}...")
         
         for attempt in range(1, 4):
             try:
                 timeout = aiohttp.ClientTimeout(total=15)
                 async with session.post(self.url, headers=headers, json=payload, timeout=timeout) as resp:
                     txt = await resp.text()
+                    log.info(f"Sheets attempt {attempt}: status={resp.status}, response={txt[:200]}")
+                    
                     if resp.status < 300:
                         return {"status": "success", "response": txt}
                     else:
-                        log.warning(f"Sheets POST attempt {attempt}: {resp.status}")
+                        log.warning(f"Sheets POST attempt {attempt}: {resp.status} - {txt[:200]}")
                         return {"status": resp.status, "body": txt}
             except Exception as e:
                 log.warning(f"Sheets POST attempt {attempt} error: {e}")
                 if attempt == 3:
                     return {"status": "error", "error": str(e)}
             await asyncio.sleep(1.0 * attempt)
+
+        return {"status": "failed", "reason": "max_retries_exceeded"}
 
     async def send_trade_entry(self, session: aiohttp.ClientSession, t):
         payload = {
@@ -329,9 +338,15 @@ class GoogleSheetsIntegration:
             "confidence": t.rating or "",
             "enhanced_data": t.enhanced_data or {},
         }
+        
+        log.info(f"Sending to sheets: {payload}")
         result = await self._post(session, payload)
+        log.info(f"Sheets response: {result}")
+        
         if result.get("status") == "success":
             log.info(f"Trade entry sent to sheets: {t.id}")
+        else:
+            log.warning(f"Sheets entry failed for {t.id}: {result}")
         return result
 
     async def send_trade_exit(self, session: aiohttp.ClientSession, trade_id: str, reason: str, price: float, time_iso: str, pnl_pct: float):
@@ -591,6 +606,174 @@ def create_bot():
         except Exception as e:
             await ctx.send(f"Status error: {e}")
 
+    @bot.command(name="config")
+    async def _config(ctx):
+        try:
+            e = discord.Embed(title="⚙️ Bot Configuration", color=discord.Color.blue())
+            e.add_field(name="Pair", value=cfg.pair, inline=True)
+            e.add_field(name="Interval", value=f"{cfg.interval_min}m", inline=True)
+            e.add_field(name="Trail Mode", value=cfg.trail_mode.value, inline=True)
+            e.add_field(name="Sheets", value="✅ Configured" if cfg.sheets_url else "❌ Not configured", inline=True)
+            e.add_field(name="Active Trades", value=str(len(trade_manager.active)), inline=True)
+            await ctx.send(embed=e)
+        except Exception as e:
+            await ctx.send(f"Config error: {e}")
+
+    @bot.command(name="trades")
+    async def _trades(ctx):
+        try:
+            if not trade_manager.active:
+                await ctx.send("📊 No active trades currently")
+                return
+            
+            e = discord.Embed(
+                title="📊 Active Trades", 
+                description=f"Currently tracking {len(trade_manager.active)} trade(s)",
+                color=discord.Color.green()
+            )
+            
+            for trade_id, trade in list(trade_manager.active.items())[:10]:  # Limit to 10
+                trade_info = (
+                    f"**Direction:** {trade.direction.name}\n"
+                    f"**Entry:** ${trade.entry_price:.2f}\n"
+                    f"**TP1/TP2:** ${trade.tp1:.2f} / ${trade.tp2:.2f}\n"
+                    f"**Stop:** ${trade.sl:.2f}"
+                )
+                e.add_field(name=f"🎯 {trade_id[:8]}", value=trade_info, inline=True)
+            
+            await ctx.send(embed=e)
+        except Exception as e:
+            await ctx.send(f"Trades error: {e}")
+
+    @bot.command(name="export")
+    async def _export(ctx):
+        try:
+            # Export DB to CSV
+            path = "trades_export.csv"
+            with sqlite3.connect(db.path) as conn:
+                df_trades = pd.read_sql_query("SELECT * FROM trades", conn)
+                df_partials = pd.read_sql_query("SELECT * FROM partial_exits", conn)
+            
+            # Create export file
+            with open(path, 'w', newline='') as csvfile:
+                df_trades.to_csv(csvfile, index=False)
+            
+            await ctx.send("📊 Database Export", file=discord.File(path))
+            
+            # Clean up
+            if os.path.exists(path):
+                os.remove(path)
+                
+        except Exception as e:
+            await ctx.send(f"Export error: {e}")
+
+    @bot.command(name="enhanced_export")
+    async def _enhanced_export(ctx, days: int = 30):
+        """Export enhanced trading data"""
+        try:
+            # Calculate date filter
+            since_date = datetime.now(timezone.utc) - timedelta(days=days)
+            
+            with sqlite3.connect(db.path) as conn:
+                query = """
+                SELECT 
+                    id, asset, direction, entry, sl, tp1, tp2, status,
+                    opened_at, closed_at, be_active, trail_mode, extra
+                FROM trades 
+                WHERE opened_at >= ?
+                ORDER BY opened_at DESC
+                """
+                df = pd.read_sql_query(query, conn, params=(since_date.isoformat(),))
+            
+            if df.empty:
+                await ctx.send(f"❌ No trades found in the last {days} days")
+                return
+            
+            # Create CSV content
+            csv_content = df.to_csv(index=False)
+            
+            # Create file
+            filename = f"enhanced_trading_data_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
+            
+            # Send as Discord file
+            file_obj = discord.File(
+                fp=BytesIO(csv_content.encode()),
+                filename=filename
+            )
+            
+            embed = discord.Embed(
+                title="📊 Enhanced Trading Data Export",
+                description=f"Complete dataset - Last {days} days",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Records", value=str(len(df)), inline=True)
+            embed.add_field(name="Period", value=f"{days} days", inline=True)
+            
+            await ctx.send(embed=embed, file=file_obj)
+            
+        except Exception as e:
+            log.error(f"Enhanced export error: {e}")
+            await ctx.send(f"❌ Enhanced export failed: {e}")
+
+    @bot.command(name="rehydrate")
+    async def _rehydrate(ctx):
+        try:
+            before_count = len(trade_manager.active)
+            await trade_manager.rehydrate()
+            after_count = len(trade_manager.active)
+            rehydrated = after_count - before_count
+            
+            embed = discord.Embed(
+                title="🔄 Manual Rehydration Complete",
+                color=discord.Color.blue(),
+                timestamp=datetime.now(timezone.utc)
+            )
+            embed.add_field(name="Before", value=str(before_count), inline=True)
+            embed.add_field(name="After", value=str(after_count), inline=True)
+            embed.add_field(name="Rehydrated", value=str(rehydrated), inline=True)
+            
+            await ctx.send(embed=embed)
+        except Exception as e:
+            await ctx.send(f"Rehydration error: {e}")
+
+    @bot.command(name="sheets_debug")
+    async def _sheets_debug(ctx):
+        """Debug Google Sheets integration"""
+        try:
+            embed = discord.Embed(title="🔍 Sheets Debug Info", color=discord.Color.orange())
+            
+            # Check configuration
+            embed.add_field(name="URL Configured", value="✅ Yes" if cfg.sheets_url else "❌ No", inline=True)
+            embed.add_field(name="Token Configured", value="✅ Yes" if cfg.sheets_token else "❌ No", inline=True)
+            
+            if cfg.sheets_url:
+                embed.add_field(name="Webhook URL", value=f"{cfg.sheets_url[:50]}...", inline=False)
+            
+            # Test connection
+            if cfg.sheets_url and cfg.sheets_token:
+                try:
+                    await trade_manager.start()
+                    params = {"action": "open", "key": cfg.sheets_token}
+                    timeout = aiohttp.ClientTimeout(total=10)
+                    
+                    async with trade_manager.session.get(cfg.sheets_url, params=params, timeout=timeout) as resp:
+                        status_text = f"{resp.status} - {'✅ OK' if resp.status == 200 else '❌ Error'}"
+                        embed.add_field(name="Connection Test", value=status_text, inline=True)
+                        
+                        if resp.status == 200:
+                            text = await resp.text()
+                            embed.add_field(name="Response Preview", value=text[:100] + "...", inline=False)
+                        
+                except Exception as e:
+                    embed.add_field(name="Connection Error", value=str(e), inline=False)
+            else:
+                embed.add_field(name="Connection Test", value="❌ Cannot test - missing config", inline=True)
+            
+            await ctx.send(embed=embed)
+            
+        except Exception as e:
+            await ctx.send(f"Sheets debug error: {e}")
+
     @bot.command(name="sheets_test")
     async def _sheets_test(ctx):
         try:
@@ -602,8 +785,24 @@ def create_bot():
                 entry_price=2500.0, sl=2450.0, tp1=2525.0, tp2=2550.0,
                 rating="A", score=5, level_name="H4"
             )
-            await trade_manager.open_trade(t)
-            await ctx.send("✅ Posted test entry to Google Sheets")
+            
+            # Show what we're sending
+            embed = discord.Embed(title="🧪 Testing Sheets Integration", color=discord.Color.blue())
+            embed.add_field(name="Trade ID", value=t.id, inline=True)
+            embed.add_field(name="Direction", value=t.direction.name, inline=True)
+            embed.add_field(name="Entry", value=f"${t.entry_price:.2f}", inline=True)
+            
+            await ctx.send(embed=embed)
+            
+            # Send to sheets
+            result = await trade_manager.open_trade(t)
+            
+            # Report result
+            if "success" in str(result).lower():
+                await ctx.send("✅ Posted test entry to Google Sheets successfully!")
+            else:
+                await ctx.send(f"⚠️ Sheets result: {result}")
+                
         except Exception as e:
             await ctx.send(f"Sheets test error: {e}")
 
