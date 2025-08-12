@@ -742,6 +742,8 @@ class IntegratedTradeTracker:
         }
         # Google Sheets integration (if webhook provided)
         self.sheets_webhook = os.environ.get('GOOGLE_SHEETS_WEBHOOK')
+        # store partial exits by trade_id
+        self.partial_exits = {}
 
     async def log_trade_entry(self, trade_data):
         """Log new trade entry to Discord and (optionally) Google Sheets."""
@@ -788,9 +790,20 @@ class IntegratedTradeTracker:
             logger.error(f"Error logging trade entry: {e}")
             return False
 
-    async def log_partial_exit(self, trade_id, exit_price, exit_reason, pnl_pct):
-        """Log partial exits (e.g., TP1) while keeping trade active for TP2."""
+    async def log_partial_exit(self, trade_id, exit_price, exit_reason, pnl_pct, *, fraction: float = 0.5, silent: bool = True):
+        """Log partial exits (e.g., TP1) while keeping trade active for TP2.
+
+        fraction: portion of position closed on this partial (0..1)
+        silent:   if True, do not post a Discord embed (still store for analytics)
+        """
         try:
+            # Store partial (used for analytics / blended math if you need it later)
+            self._store_partial_exit(trade_id, exit_price, exit_reason, pnl_pct, fraction)
+
+            if silent:
+                logger.warning("TP1 logged silently for %s (%.0f%%)", trade_id, fraction * 100)
+                return True
+
             channel = self.bot.get_channel(SCROLLS_ORDER_ID)
             if not channel:
                 return False
@@ -801,16 +814,15 @@ class IntegratedTradeTracker:
                 color=discord.Color.gold(),
                 timestamp=datetime.now(timezone.utc)
             )
-            embed.add_field(name="Exit Price", value=f"${exit_price:.2f}", inline=True)
-            embed.add_field(name="Reason", value=exit_reason, inline=True)
-            embed.add_field(name="Partial PnL", value=f"{pnl_pct:+.2f}%", inline=True)
+            embed.add_field(name="Exit Price", value=f"${float(exit_price):.2f}", inline=True)
+            embed.add_field(name="Reason", value=str(exit_reason), inline=True)
+            embed.add_field(name="Partial PnL", value=f"{float(pnl_pct):+.2f}%", inline=True)
+            embed.add_field(name="Size", value=f"{fraction:.0%}", inline=True)
 
-            if exit_reason.upper().startswith("TP1"):
+            if str(exit_reason).upper().startswith("TP1"):
                 embed.add_field(name="Status", value="🔄 Monitoring for TP2", inline=False)
 
             await channel.send(embed=embed)
-            self._store_partial_exit(trade_id, exit_price, exit_reason, pnl_pct)
-
             logger.warning(f"✅ Partial exit logged: {trade_id} - {exit_reason}")
             return True
 
@@ -818,16 +830,14 @@ class IntegratedTradeTracker:
             logger.error(f"Error logging partial exit: {e}")
             return False
 
-    def _store_partial_exit(self, trade_id, exit_price, exit_reason, pnl_pct):
+    def _store_partial_exit(self, trade_id, exit_price, exit_reason, pnl_pct, fraction: float = 0.5):
         """Store partial exit data for enhanced analytics."""
-        if not hasattr(self, 'partial_exits'):
-            self.partial_exits = {}
-        if trade_id not in self.partial_exits:
-            self.partial_exits[trade_id] = []
+        self.partial_exits.setdefault(trade_id, [])
         self.partial_exits[trade_id].append({
-            'exit_price': exit_price,
-            'exit_reason': exit_reason,
-            'pnl_pct': pnl_pct,
+            'exit_price': float(exit_price),
+            'exit_reason': str(exit_reason),
+            'pnl_pct': float(pnl_pct),
+            'fraction': float(fraction),
             'timestamp': datetime.now(timezone.utc).isoformat()
         })
 
@@ -940,7 +950,6 @@ class IntegratedTradeTracker:
                 'message': 'No closed trades in this period'
             }
 
-        # Standard calculations
         winning_trades = [t for t in closed_trades if t.get('pnl', 0) > 0]
         losing_trades = [t for t in closed_trades if t.get('pnl', 0) <= 0]
         total_pnl = sum(t.get('pnl', 0) for t in closed_trades)
@@ -952,7 +961,6 @@ class IntegratedTradeTracker:
         scores = [t.get('score', 0) for t in trades if t.get('score')]
         avg_score = sum(scores) / len(scores) if scores else 0
 
-        # Enhanced: TP1/TP2/SL breakdown
         exit_reasons = {}
         tp_breakdown = {'TP1_ONLY': 0, 'TP2': 0, 'SL': 0}
         for trade in closed_trades:
@@ -987,79 +995,79 @@ class IntegratedTradeTracker:
         }
 
     async def _send_to_sheets(self, data: dict, action: str) -> bool:
-    """Send data to Google Sheets using aiohttp with retries + rich logging."""
-    if not getattr(self, "sheets_webhook", None):
-        logger.warning("Sheets disabled: no GOOGLE_SHEETS_WEBHOOK")
-        return False
+        """Send data to Google Sheets using aiohttp with retries + rich logging."""
+        if not getattr(self, "sheets_webhook", None):
+            logger.warning("Sheets disabled: no GOOGLE_SHEETS_WEBHOOK")
+            return False
 
-    # ---- build payload -------------------------------------------------------
-    if action == "entry":
-        base = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "trade_id": data["id"],
-            "direction": data["direction"],
-            "level_name": data["level_name"],
-            "entry_price": data["entry_price"],
-            "target1": data["tp1"],
-            "target2": data["tp2"],
-            "stop_loss": data["sl"],
-            "score": data["score"],
-            "knight": data["knight"],
-            "status": "OPEN",
-            "asset": data.get("asset", "ETH"),
-            "trade_type": data.get("trade_type", "Breakout"),
-            "confidence": data.get("rating") or get_tier_label(data["score"]),
-        }
-        # forward enhanced metrics if present
-        payload = {**base, "enhanced_data": data["enhanced_data"]} if data.get("enhanced_data") else base
-    else:  # exit/update
-        payload = {
-            "action": "update",
-            "trade_id": data["trade_id"],
-            "exit_price": data["exit_price"],
-            "exit_reason": data["exit_reason"],
-            "pnl_pct": data["pnl_pct"],
-            "exit_time": datetime.now(timezone.utc).isoformat(),
-            "status": "CLOSED",
-        }
+        # ---- build payload ---------------------------------------------------
+        if action == "entry":
+            base = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "trade_id": data["id"],
+                "direction": data["direction"],
+                "level_name": data["level_name"],
+                "entry_price": data["entry_price"],
+                "target1": data["tp1"],
+                "target2": data["tp2"],
+                "stop_loss": data["sl"],
+                "score": data["score"],
+                "knight": data["knight"],
+                "status": "OPEN",
+                "asset": data.get("asset", "ETH"),
+                "trade_type": data.get("trade_type", "Breakout"),
+                "confidence": data.get("rating") or get_tier_label(data["score"]),
+            }
+            # forward enhanced metrics if present
+            payload = {**base, "enhanced_data": data["enhanced_data"]} if data.get("enhanced_data") else base
+        else:  # exit/update
+            payload = {
+                "action": "update",
+                "trade_id": data["trade_id"],
+                "exit_price": data["exit_price"],
+                "exit_reason": data["exit_reason"],
+                "pnl_pct": data["pnl_pct"],
+                "exit_time": datetime.now(timezone.utc).isoformat(),
+                "status": "CLOSED",
+            }
 
-    # ---- debug logging (key line you asked about) ---------------------------
-    if action == "entry":
-        enh = payload.get("enhanced_data")
-        enh_keys = list(enh.keys()) if isinstance(enh, dict) else []
-        logger.info(
-            "Sheets[entry]: has_enhanced=%s enh_keys=%s keys=%s",
-            bool(enh_keys),
-            enh_keys,
-            list(payload.keys()),
-        )
-    else:
-        logger.info("Sheets[exit]: payload=%s", json.dumps(payload, default=str)[:300] + "...")
+        # ---- debug logging ---------------------------------------------------
+        if action == "entry":
+            enh = payload.get("enhanced_data")
+            enh_keys = list(enh.keys()) if isinstance(enh, dict) else []
+            logger.warning(
+                "Sheets[entry]: has_enhanced=%s enh_keys=%s keys=%s",
+                bool(enh_keys),
+                enh_keys,
+                list(payload.keys()),
+            )
+        else:
+            logger.warning("Sheets[exit]: payload=%s", json.dumps(payload, default=str)[:300] + "...")
 
-    # ---- POST with retries ---------------------------------------------------
-    for attempt in range(1, 4):
-        try:
-            timeout = aiohttp.ClientTimeout(total=15)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(self.sheets_webhook, json=payload) as resp:
-                    text = await resp.text()
-                    if resp.status < 300:
-                        logger.info("Sheets ok: %s %s", resp.status, text[:200])
-                        # Accept success JSON or any 2xx
-                        try:
-                            j = json.loads(text)
-                            if isinstance(j, dict) and j.get("status") == "success":
+        # ---- POST with retries ----------------------------------------------
+        for attempt in range(1, 4):
+            try:
+                timeout = aiohttp.ClientTimeout(total=15)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(self.sheets_webhook, json=payload) as resp:
+                        text = await resp.text()
+                        if resp.status < 300:
+                            logger.warning("Sheets ok: %s %s", resp.status, text[:200])
+                            # Accept success JSON or any 2xx
+                            try:
+                                j = json.loads(text)
+                                if isinstance(j, dict) and j.get("status") == "success":
+                                    return True
+                            except Exception:
                                 return True
-                        except Exception:
-                            return True
-                    else:
-                        logger.error("Sheets POST failed (try %d/3) %s: %s", attempt, resp.status, text[:500])
-        except Exception as e:
-            logger.error("Sheets POST exception (try %d/3): %s", attempt, e)
-        await asyncio.sleep(0.8 * attempt)
+                        else:
+                            logger.error("Sheets POST failed (try %d/3) %s: %s", attempt, resp.status, text[:500])
+            except Exception as e:
+                logger.error("Sheets POST exception (try %d/3): %s", attempt, e)
+            await asyncio.sleep(0.8 * attempt)
 
-    logger.error("Sheets integration error: exhausted retries")
-    return False
+        logger.error("Sheets integration error: exhausted retries")
+        return False
 
     def _update_daily_stats(self, action, pnl=None):
         """Update daily statistics."""
@@ -1150,46 +1158,45 @@ class IntegratedTradeTracker:
             pass
         return "Unknown"
 
+
 # Enhanced IntegratedTradeTracker with automated capture
 class EnhancedIntegratedTradeTracker(IntegratedTradeTracker):
     def __init__(self, bot):
         super().__init__(bot)
         self.auto_tracker = AutomatedTradingTracker(bot)
-        
+
     async def log_trade_entry(self, trade_data):
         """Enhanced trade entry logging with automated data capture"""
         try:
-            # Call original method
             result = await super().log_trade_entry(trade_data)
-            
-            # Get current market data for auto-capture
+
+            # Auto-capture: enrich to Sheets if available
             df = await retry_api_call_async(fetch_ohlc_async, "ETH", 5)
             if df is not None:
                 df = calculate_indicators(df)
                 if df is not None and len(df) > 0:
                     await self.auto_tracker.auto_capture_trade_entry(trade_data, df)
-            
+
             return result
-            
+
         except Exception as e:
             logger.error(f"Error in enhanced trade entry logging: {e}")
             return False
-    
+
     async def log_trade_exit(self, trade_id, exit_price, exit_reason, pnl_pct):
         """Enhanced trade exit logging with automated capture"""
         try:
-            # Call original method
             result = await super().log_trade_exit(trade_id, exit_price, exit_reason, pnl_pct)
-            
-            # Auto-capture exit data
+
+            # Auto-capture exit data (best-effort)
             if trade_id in active_trades:
                 direction = active_trades[trade_id]['side']
                 await self.auto_tracker.auto_capture_trade_exit(
                     trade_id, exit_price, exit_reason, exit_price, direction
                 )
-            
+
             return result
-            
+
         except Exception as e:
             logger.error(f"Error in enhanced trade exit logging: {e}")
             return False
