@@ -299,52 +299,35 @@ def diag_sim_entry():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
-@app.get("/diag/sim_exit")
-def diag_sim_exit():
+@app.get("/diag/sheets_exit_direct")
+def diag_sheets_exit_direct():
     try:
         tid = request.args.get("id")
         if not tid:
             return jsonify({"ok": False, "error": "pass ?id=<trade_id>"}), 400
 
-        payload = {
-            "action": "update",
-            "trade_id": tid,
-            "exit_price": 2899.0,
-            "exit_reason": "TP2 hit",
-            "pnl_pct": 1.5,
-            "exit_time": datetime.now(timezone.utc).isoformat(),
-            "status": "CLOSED",
-        }
+        # Optional query params
+        exit_price = float(request.args.get("price", 2899.0))
+        pnl_pct    = float(request.args.get("pnl",   1.5))
+        reason     = request.args.get("reason", "TP2 hit")
 
-        # 1) Try the normal tracker path (uses your aiohttp sender)
-        try:
-            if 'trade_tracker' in globals() and trade_tracker and 'bot' in globals() and bot and bot.loop.is_running():
-                fut = asyncio.run_coroutine_threadsafe(
-                    trade_tracker._send_to_sheets(payload, "exit"),
-                    bot.loop
-                )
-                ok = bool(fut.result(timeout=20))
-                if ok:
-                    return jsonify({"ok": True, "path": "tracker", "trade_id": tid})
-        except Exception as e:
-            logger.error(f"/diag/sim_exit tracker path failed: {e}")
-
-        # 2) Fallback: hit Apps Script directly (bypasses Discord loop entirely)
         url = os.environ.get("GOOGLE_SHEETS_WEBHOOK")
         if not url:
             return jsonify({"ok": False, "error": "GOOGLE_SHEETS_WEBHOOK not set"}), 500
 
-        r = requests.post(url, json=payload, timeout=20)
-        return jsonify({
-            "ok": r.ok,
-            "status": r.status_code,
-            "body": r.text[:400],
-            "path": "direct",
-            "trade_id": tid
-        }), (200 if r.ok else 502)
+        payload = {
+            "action": "update",
+            "trade_id": tid,
+            "exit_price": exit_price,
+            "exit_reason": reason,
+            "pnl_pct": pnl_pct,
+            "exit_time": datetime.now(timezone.utc).isoformat(),
+            "status": "CLOSED",
+        }
 
+        r = requests.post(url, json=payload, timeout=20)
+        return jsonify({"ok": r.ok, "status": r.status_code, "body": r.text[:400], "trade_id": tid})
     except Exception as e:
-        logger.error(f"/diag/sim_exit error: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # ============================================
