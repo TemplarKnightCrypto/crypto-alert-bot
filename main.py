@@ -17,6 +17,7 @@ import gc
 import json
 import csv
 import sqlite3
+import signal
 from io import StringIO, BytesIO
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
@@ -2663,6 +2664,47 @@ async def rehydrate_active_trades():
 
     logger.warning("rehydrate: loaded %d open trades from Sheets", count)
 
+async def close_http_session() -> None:
+    """Close a shared aiohttp session if you create one elsewhere."""
+    global AIOHTTP_SESSION
+    try:
+        if AIOHTTP_SESSION and not AIOHTTP_SESSION.closed:
+            await AIOHTTP_SESSION.close()
+    except Exception as e:
+        logger.error("close_http_session error: %s", e)
+
+async def _graceful_shutdown(sig_name: str) -> None:
+    """Put all async cleanup here."""
+    logger.warning("Graceful shutdown triggered (%s)", sig_name)
+    await close_http_session()
+    # add other async cleanup here if needed
+
+def _install_shutdown_hooks() -> None:
+    """
+    Install SIGINT/SIGTERM handlers to run graceful cleanup.
+    Safe to call multiple times; safe no-op on unsupported platforms.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # Not in an event loop yet; nothing to install
+        return
+
+    def _cb(sig):
+        try:
+            loop.create_task(_graceful_shutdown(getattr(sig, "name", str(sig))))
+        except Exception as e:
+            logger.error("failed to schedule graceful shutdown: %s", e)
+
+    for sig in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None)):
+        if sig is None:
+            continue
+        try:
+            loop.add_signal_handler(sig, _cb, sig)
+        except (NotImplementedError, RuntimeError):
+            # Not supported on this platform/thread; ignore
+            pass
+# -------------------------------------------------------------------------------------
 
 # ============================================
 # REMAINING TASKS & COMMANDS (FIXED)
