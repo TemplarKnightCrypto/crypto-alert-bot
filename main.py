@@ -1,5 +1,5 @@
 # ============================================
-# The Control Tower - Templar Knight Crypto - v10.2.1 FIXED + AUTOMATED TRACKING
+# The Control Tower - Templar Knight Crypto - v10.3
 # ============================================
 
 import os
@@ -27,7 +27,7 @@ from datetime import datetime, timezone, timedelta
 import uuid
 from collections import defaultdict
 from flask import request, jsonify
-
+import signal
 
 # ============================================
 # RENDER FREE TIER OPTIMIZATIONS
@@ -54,6 +54,103 @@ TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     logger.error("Discord TOKEN not found")
     exit(1)
+
+# --- Shared HTTP session for Sheets/HTTP calls ---
+AIOHTTP_SESSION: aiohttp.ClientSession | None = None
+
+async def get_http_session() -> aiohttp.ClientSession:
+    """Reuse one aiohttp session for lower overhead and socket stability."""
+    global AIOHTTP_SESSION
+    if AIOHTTP_SESSION is None or AIOHTTP_SESSION.closed:
+        AIOHTTP_SESSION = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=15)
+        )
+    return AIOHTTP_SESSION
+
+async def close_http_session():
+    global AIOHTTP_SESSION
+    if AIOHTTP_SESSION and not AIOHTTP_SESSION.closed:
+        await AIOHTTP_SESSION.close()
+
+def _install_shutdown_hooks():
+    loop = asyncio.get_running_loop()
+
+    async def _shutdown():
+        try:
+            await close_http_session()
+        except Exception:
+            pass
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(_shutdown()))
+
+async def rehydrate_active_trades():
+    """
+    Pull OPEN trades from Apps Script (doGet) and rebuild minimal active_trades
+    so BE/trailing/watchers keep working after restarts.
+    """
+    try:
+        url   = os.environ.get("GOOGLE_SHEETS_WEBHOOK")  # your Apps Script /exec URL
+        token = os.environ.get("SHEETS_TOKEN")           # must match Script Property
+        if not url or not token:
+            logger.warning("rehydrate_active_trades: missing GOOGLE_SHEETS_WEBHOOK or SHEETS_TOKEN")
+            return
+
+        params  = {"action": "open", "key": token}
+        session = await get_http_session()
+        async with session.get(url, params=params) as resp:
+            if resp.status != 200:
+                txt = await resp.text()
+                logger.error("rehydrate_active_trades: HTTP %s body=%s", resp.status, txt[:300])
+                return
+            data = await resp.json()
+
+        rows = data.get("rows", [])
+        if not rows:
+            logger.info("rehydrate_active_trades: no open rows")
+            return
+
+        restored = 0
+        for r in rows:
+            try:
+                tid   = r["trade_id"]
+                side  = r.get("direction", "Long")
+                entry = float(r["entry_price"])
+                tp1   = float(r["tp1"])
+                tp2   = float(r["tp2"])
+                sl    = float(r["stop_loss"])
+
+                active_trades[tid] = {
+                    "id": tid,
+                    "entry": entry,
+                    "tp1": tp1,
+                    "tp2": tp2,
+                    "sl": sl,
+                    "side": side,
+                    "symbol": "ETH",
+                    "thread_id": None,
+                    "knight": r.get("knight", "—"),
+                    "rating": r.get("confidence", "—"),
+                    # watcher state defaults
+                    "tp1_hit": False,
+                    "partial_frac": float(os.getenv("PARTIAL_FRACTION", "0.5")),
+                    "be_active": False,
+                    "be_stop": None,
+                    "trail_mode": os.getenv("TRAIL_MODE", "OFF").upper(),
+                    "trail_active": False,
+                    "trail_stop": None,
+                }
+                # Helpful for EnhancedIntegratedTradeTracker fallbacks
+                if 'trade_tracker' in globals() and isinstance(trade_tracker, EnhancedIntegratedTradeTracker):
+                    trade_tracker.last_side[tid] = side
+                restored += 1
+            except Exception as row_err:
+                logger.error("rehydrate row error: %s (row=%s)", row_err, r)
+
+        logger.warning("Rehydrated %d open trades from Sheets", restored)
+
+    except Exception as e:
+        logger.error("rehydrate_active_trades error: %s", e)
 
 # === Discord Channel IDs ===
 SCRIBES_KEEP_ID = 1398691425347961016          # 📜 Market scorecard
@@ -99,6 +196,11 @@ last_significant_event = None
 PARTIAL_FRACTION = float(os.getenv("PARTIAL_FRACTION", "0.5"))   # portion closed at TP1
 BE_AFTER_TP1     = os.getenv("BE_AFTER_TP1", "1") == "1"         # enable BE on remainder
 BE_OFFSET_PCT    = float(os.getenv("BE_OFFSET_PCT", "0.0005"))   # +5 bps to cover fees/slippage
+TRAIL_MODE        = os.getenv("TRAIL_MODE", "OFF").upper()  # OFF, ATR, CHANDELIER
+TRAIL_ATR_PERIOD  = int(os.getenv("TRAIL_ATR_PERIOD", "14"))
+TRAIL_ATR_MULT    = float(os.getenv("TRAIL_ATR_MULT", "2.0"))
+CHAN_LOOKBACK     = int(os.getenv("CHAN_LOOKBACK", "22"))
+
 
 # ============================================
 # MEMORY-OPTIMIZED CACHE SYSTEM
@@ -194,141 +296,6 @@ from flask import jsonify
 import os, time, requests, json
 from datetime import datetime, timezone
 
-@app.route("/diag/sheets_enhanced", methods=["GET"])
-def diag_sheets_enhanced():
-    url = os.environ.get("GOOGLE_SHEETS_WEBHOOK")
-    if not url:
-        return jsonify({"ok": False, "error": "GOOGLE_SHEETS_WEBHOOK missing"}), 500
-
-    tid = f"diag_{int(time.time())}"
-    payload = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "trade_id": tid,
-        "direction": "Long",
-        "level_name": "H4",
-        "entry_price": 2800,
-        "target1": 2825,
-        "target2": 2850,
-        "stop_loss": 2775,
-        "score": 4,
-        "knight": "Sir Leonis",
-        "asset": "ETH",
-        "trade_type": "Breakout",
-        "status": "OPEN",
-        "enhanced_data": {
-            "enhanced_score": 6,
-            "rsi_level": "48→55",
-            "volume_ratio": "1.3x",
-            "market_status": "NORMAL",
-            "vwap_position": "Above",
-            "macd_status": "Bullish",
-            "market_bias": "Neutral",
-            "setup_age_minutes": 7,
-            "breakout_structure": "Present",
-            "confluence_count": 3,
-            "candle_body_strength": "Strong",
-            "market_session": "Mid-day",
-            "distance_from_level_pct": 0.021,
-            "recent_news_events": "No",
-            "volatility_state": "Stable",
-            "trend_strength": "Moderate",
-        },
-    }
-
-    try:
-        r = requests.post(url, json=payload, timeout=20)
-        return jsonify({
-            "ok": r.ok,
-            "status": r.status_code,
-            "body": r.text[:300],
-            "trade_id": tid
-        }), (200 if r.ok else 500)
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-@app.route("/diag/sim_entry", methods=["GET"])
-def diag_sim_entry():
-    try:
-        # Ensure tracker exists
-        if 'trade_tracker' not in globals() or trade_tracker is None:
-            return jsonify({"ok": False, "error": "trade_tracker not ready"}), 500
-        if 'bot' not in globals() or bot is None:
-            return jsonify({"ok": False, "error": "bot not ready"}), 500
-
-        tid = f"sim_{int(time.time())}"
-        trade_data = {
-            "id": tid,
-            "entry_price": 2800.0,
-            "tp1": 2825.0,
-            "tp2": 2850.0,
-            "sl": 2775.0,
-            "direction": "Long",
-            "level_name": "H4",
-            "score": 4,
-            "knight": "Sir Leonis",
-            "rating": "A",
-            "asset": "ETH",
-            "trade_type": "Breakout",
-            "enhanced_data": {  # include enhanced block so the logger shows it
-                "enhanced_score": 6,
-                "rsi_level": "48→55",
-                "volume_ratio": "1.3x",
-                "market_status": "NORMAL",
-                "vwap_position": "Above",
-                "macd_status": "Bullish",
-                "market_bias": "Neutral",
-                "setup_age_minutes": 7,
-                "breakout_structure": "Present",
-                "confluence_count": 3,
-                "candle_body_strength": "Strong",
-                "market_session": "Mid-day",
-                "distance_from_level_pct": 0.021,
-                "recent_news_events": "No",
-                "volatility_state": "Stable",
-                "trend_strength": "Moderate",
-            },
-        }
-
-        # Run the coroutine on the Discord bot loop (so it hits _send_to_sheets and logs)
-        fut = asyncio.run_coroutine_threadsafe(
-            trade_tracker._send_to_sheets(trade_data, "entry"),
-            bot.loop
-        )
-        ok = bool(fut.result(timeout=20))
-        return jsonify({"ok": ok, "trade_id": tid})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-@app.get("/diag/sheets_exit_direct")
-def diag_sheets_exit_direct():
-    try:
-        tid = request.args.get("id")
-        if not tid:
-            return jsonify({"ok": False, "error": "pass ?id=<trade_id>"}), 400
-
-        # Optional query params
-        exit_price = float(request.args.get("price", 2899.0))
-        pnl_pct    = float(request.args.get("pnl",   1.5))
-        reason     = request.args.get("reason", "TP2 hit")
-
-        url = os.environ.get("GOOGLE_SHEETS_WEBHOOK")
-        if not url:
-            return jsonify({"ok": False, "error": "GOOGLE_SHEETS_WEBHOOK not set"}), 500
-
-        payload = {
-            "action": "update",
-            "trade_id": tid,
-            "exit_price": exit_price,
-            "exit_reason": reason,
-            "pnl_pct": pnl_pct,
-            "exit_time": datetime.now(timezone.utc).isoformat(),
-            "status": "CLOSED",
-        }
-
-        r = requests.post(url, json=payload, timeout=20)
-        return jsonify({"ok": r.ok, "status": r.status_code, "body": r.text[:400], "trade_id": tid})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
 
 # ============================================
 # DISCORD BOT INITIALIZATION
@@ -826,8 +793,9 @@ class IntegratedTradeTracker:
         }
         # Google Sheets integration (if webhook provided)
         self.sheets_webhook = os.environ.get('GOOGLE_SHEETS_WEBHOOK')
-        # store partial exits by trade_id
-        self.partial_exits = {}
+        # NEW: entry times & partial exits
+        self.entry_times = {}      # trade_id -> datetime
+        self.partial_exits = {}    # trade_id -> list of {exit_price, exit_reason, pnl_pct, fraction, timestamp}
 
     async def log_trade_entry(self, trade_data):
         """Log new trade entry to Discord and (optionally) Google Sheets."""
@@ -842,15 +810,15 @@ class IntegratedTradeTracker:
                 color=discord.Color.blue(),
                 timestamp=datetime.now(timezone.utc)
             )
-            embed.add_field(name="🎯 Entry", value=f"${trade_data['entry_price']:.2f}", inline=True)
-            embed.add_field(name="🛑 Stop Loss", value=f"${trade_data['sl']:.2f}", inline=True)
-            embed.add_field(name="🎪 Targets", value=f"${trade_data['tp1']:.2f} / ${trade_data['tp2']:.2f}", inline=True)
-            embed.add_field(name="⚔️ Knight", value=trade_data['knight'], inline=True)
-            embed.add_field(name="📊 Score", value=f"{trade_data['score']}/6", inline=True)
-            embed.add_field(name="🏆 Tier", value=get_tier_label(trade_data['score']), inline=True)
+            embed.add_field(name="🎯 Entry", value=f"${float(trade_data['entry_price']):.2f}", inline=True)
+            embed.add_field(name="🛑 Stop Loss", value=f"${float(trade_data['sl']):.2f}", inline=True)
+            embed.add_field(name="🎪 Targets", value=f"${float(trade_data['tp1']):.2f} / ${float(trade_data['tp2']):.2f}", inline=True)
+            embed.add_field(name="⚔️ Knight", value=str(trade_data['knight']), inline=True)
+            embed.add_field(name="📊 Score", value=f"{int(trade_data['score'])}/6", inline=True)
+            embed.add_field(name="🏆 Tier", value=get_tier_label(int(trade_data['score'])), inline=True)
 
-            risk_pct = abs((trade_data['entry_price'] - trade_data['sl']) / trade_data['entry_price']) * 100
-            reward1_pct = abs((trade_data['tp1'] - trade_data['entry_price']) / trade_data['entry_price']) * 100
+            risk_pct = abs((float(trade_data['entry_price']) - float(trade_data['sl'])) / float(trade_data['entry_price'])) * 100
+            reward1_pct = abs((float(trade_data['tp1']) - float(trade_data['entry_price'])) / float(trade_data['entry_price'])) * 100
             rr = (reward1_pct / risk_pct) if risk_pct else 0.0
             embed.add_field(
                 name="⚖️ Risk/Reward",
@@ -861,6 +829,9 @@ class IntegratedTradeTracker:
 
             message = await channel.send(embed=embed)
             self.trade_messages[trade_data['id']] = message.id
+            # NEW: remember when the trade started
+            self.entry_times[trade_data['id']] = datetime.now(timezone.utc)
+
             self._update_daily_stats('entry')
 
             # Send to Google Sheets if configured
@@ -881,7 +852,7 @@ class IntegratedTradeTracker:
         silent:   if True, do not post a Discord embed (still store for analytics)
         """
         try:
-            # Store partial (used for analytics / blended math if you need it later)
+            # Store partial (used for analytics / blended math)
             self._store_partial_exit(trade_id, exit_price, exit_reason, pnl_pct, fraction)
 
             if silent:
@@ -926,25 +897,62 @@ class IntegratedTradeTracker:
         })
 
     async def log_trade_exit(self, trade_id, exit_price, exit_reason, pnl_pct):
-        """Update trade with exit information."""
+        """Update trade with exit information (blended breakdown + duration)."""
         try:
             channel = self.bot.get_channel(SCROLLS_ORDER_ID)
             if not channel:
                 return False
 
-            message_id = self.trade_messages.get(trade_id)
+            # Gather partials & duration
+            parts = self.partial_exits.get(trade_id, [])
+            size_closed = sum(p.get("fraction", 0.0) for p in parts)
+            tp1_part = next((p for p in parts if "TP1" in (p.get("exit_reason", "")).upper()), None)
+
+            # Duration in trade
+            started = self.entry_times.get(trade_id)
+            dur_str = "—"
+            if started:
+                delta = datetime.now(timezone.utc) - started
+                mins = int(delta.total_seconds() // 60)
+                if mins < 60:
+                    dur_str = f"{mins}m"
+                else:
+                    hrs = mins // 60
+                    rem = mins % 60
+                    dur_str = f"{hrs}h {rem}m"
+
+            # Outcome styling
+            win = float(pnl_pct) > 0
+            color = discord.Color.green() if win else discord.Color.red()
+            tag = "🟢" if win else "🔴"
+
+            # Build breakdown text for final embed
+            breakdown_lines = []
+            if tp1_part:
+                breakdown_lines.append(
+                    f"TP1: {tp1_part['fraction']*100:.0f}% at ${tp1_part['exit_price']:.2f} ({tp1_part['pnl_pct']:+.2f}%)"
+                )
+            if size_closed > 0 and size_closed < 1.0:
+                remaining = 1.0 - size_closed
+                breakdown_lines.append(f"Remainder {remaining*100:.0f}% closed at ${float(exit_price):.2f}")
+            breakdown = "\n".join(breakdown_lines) if breakdown_lines else "Full size closed"
+
+            # Try to edit original message; else post a new one
             updated_original = False
+            message_id = self.trade_messages.get(trade_id)
 
             if message_id:
                 try:
                     message = await channel.fetch_message(message_id)
                     embed = message.embeds[0]
-                    embed.color = discord.Color.green() if pnl_pct > 0 else discord.Color.red()
-                    embed.add_field(name="🏁 Exit Price", value=f"${exit_price:.2f}", inline=True)
-                    embed.add_field(name="📋 Exit Reason", value=exit_reason, inline=True)
-                    embed.add_field(name="💰 PnL", value=f"{pnl_pct:+.2f}%", inline=True)
-                    result_emoji = "🟢" if pnl_pct > 0 else "🔴"
-                    embed.title = f"{result_emoji} Trade Complete - {trade_id}"
+                    embed.color = color
+                    embed.add_field(name="🏁 Exit Price", value=f"${float(exit_price):.2f}", inline=True)
+                    embed.add_field(name="📋 Exit Reason", value=str(exit_reason), inline=True)
+                    embed.add_field(name="💰 Blended PnL", value=f"{float(pnl_pct):+.2f}%", inline=True)
+                    embed.add_field(name="📐 Breakdown", value=breakdown, inline=False)
+                    embed.add_field(name="⏱️ Duration", value=dur_str, inline=True)
+                    embed.title = f"{tag} Trade Complete - {trade_id}"
+                    embed.set_footer(text=f"ID:{trade_id} • Closed")
                     await message.edit(embed=embed)
                     updated_original = True
                 except discord.NotFound:
@@ -952,28 +960,30 @@ class IntegratedTradeTracker:
 
             if not updated_original:
                 embed = discord.Embed(
-                    title=f"🏁 Trade Exit - {trade_id}",
+                    title=f"{tag} Trade Complete - {trade_id}",
                     description="Trade completed",
-                    color=discord.Color.green() if pnl_pct > 0 else discord.Color.red(),
+                    color=color,
                     timestamp=datetime.now(timezone.utc)
                 )
-                embed.add_field(name="Exit Price", value=f"${exit_price:.2f}", inline=True)
-                embed.add_field(name="Reason", value=exit_reason, inline=True)
-                embed.add_field(name="PnL", value=f"{pnl_pct:+.2f}%", inline=True)
+                embed.add_field(name="Exit Price", value=f"${float(exit_price):.2f}", inline=True)
+                embed.add_field(name="Exit Reason", value=str(exit_reason), inline=True)
+                embed.add_field(name="Blended PnL", value=f"{float(pnl_pct):+.2f}%", inline=True)
+                embed.add_field(name="Breakdown", value=breakdown, inline=False)
+                embed.add_field(name="Duration", value=dur_str, inline=True)
                 await channel.send(embed=embed)
 
-            self._update_daily_stats('exit', pnl_pct)
+            self._update_daily_stats('exit', float(pnl_pct))
 
             # Update Google Sheets
             if self.sheets_webhook:
                 await self._send_to_sheets({
                     'trade_id': trade_id,
-                    'exit_price': exit_price,
-                    'exit_reason': exit_reason,
-                    'pnl_pct': pnl_pct
+                    'exit_price': float(exit_price),
+                    'exit_reason': str(exit_reason),
+                    'pnl_pct': float(pnl_pct)
                 }, 'exit')
 
-            logger.warning(f"✅ Trade exit {trade_id}: {pnl_pct:+.2f}%")
+            logger.warning(f"✅ Trade exit {trade_id}: {float(pnl_pct):+.2f}%")
             return True
 
         except Exception as e:
@@ -1131,7 +1141,7 @@ class IntegratedTradeTracker:
         # ---- POST with retries ----------------------------------------------
         for attempt in range(1, 4):
             try:
-                timeout = aiohttp.ClientTimeout(total=15)
+                session = await get_http_session()
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.post(self.sheets_webhook, json=payload) as resp:
                         text = await resp.text()
@@ -1242,24 +1252,33 @@ class IntegratedTradeTracker:
             pass
         return "Unknown"
 
-
 # Enhanced IntegratedTradeTracker with automated capture
 class EnhancedIntegratedTradeTracker(IntegratedTradeTracker):
     def __init__(self, bot):
         super().__init__(bot)
         self.auto_tracker = AutomatedTradingTracker(bot)
+        self.last_side: dict[str, str] = {}   # trade_id -> "Long"/"Short"
 
     async def log_trade_entry(self, trade_data):
-        """Enhanced trade entry logging with automated data capture"""
+        """Enhanced trade entry logging with automated data capture."""
         try:
+            # Call base to post Discord + send to Sheets
             result = await super().log_trade_entry(trade_data)
 
+            # Cache side so we can reference it even if active_trades gets cleaned up
+            tid = trade_data.get("id")
+            if tid and trade_data.get("direction"):
+                self.last_side[tid] = trade_data["direction"]
+
             # Auto-capture: enrich to Sheets if available
-            df = await retry_api_call_async(fetch_ohlc_async, "ETH", 5)
-            if df is not None:
-                df = calculate_indicators(df)
-                if df is not None and len(df) > 0:
-                    await self.auto_tracker.auto_capture_trade_entry(trade_data, df)
+            try:
+                df = await retry_api_call_async(fetch_ohlc_async, "ETH", 5)
+                if df is not None:
+                    df = calculate_indicators(df)
+                    if df is not None and len(df) > 0:
+                        await self.auto_tracker.auto_capture_trade_entry(trade_data, df)
+            except Exception as cap_err:
+                logger.error(f"auto_capture_trade_entry failed: {cap_err}")
 
             return result
 
@@ -1268,16 +1287,25 @@ class EnhancedIntegratedTradeTracker(IntegratedTradeTracker):
             return False
 
     async def log_trade_exit(self, trade_id, exit_price, exit_reason, pnl_pct):
-        """Enhanced trade exit logging with automated capture"""
+        """Enhanced trade exit logging with automated capture."""
         try:
+            # Call base to update Discord + Sheets
             result = await super().log_trade_exit(trade_id, exit_price, exit_reason, pnl_pct)
 
-            # Auto-capture exit data (best-effort)
-            if trade_id in active_trades:
-                direction = active_trades[trade_id]['side']
+            # Determine direction for capture even if trade was already removed from active_trades
+            try:
+                side = None
+                if 'active_trades' in globals() and trade_id in active_trades:
+                    side = active_trades[trade_id].get('side')
+                if not side:
+                    side = self.last_side.get(trade_id)
+
+                # Best-effort auto-capture exit
                 await self.auto_tracker.auto_capture_trade_exit(
-                    trade_id, exit_price, exit_reason, exit_price, direction
+                    trade_id, float(exit_price), str(exit_reason), float(exit_price), side
                 )
+            except Exception as cap_err:
+                logger.error(f"auto_capture_trade_exit failed: {cap_err}")
 
             return result
 
@@ -1547,6 +1575,36 @@ def calculate_dynamic_levels(df, current_price):
     except Exception as e:
         logger.error(f"Dynamic levels calculation error: {e}")
         return {}
+
+def compute_trailing_stop(df, price: float, side: str) -> float | None:
+    """
+    Return a candidate trailing stop for the *remainder* after TP1,
+    using the configured TRAIL_MODE (ATR / CHANDELIER).
+    """
+    try:
+        mode = TRAIL_MODE
+        if mode == "OFF" or df is None or len(df) < max(TRAIL_ATR_PERIOD, CHAN_LOOKBACK) + 2:
+            return None
+
+        side_is_long = (side or "").lower().startswith("long")
+        atr = calculate_atr(df, TRAIL_ATR_PERIOD)
+        if atr is None or atr.empty:
+            return None
+        atr_last = float(atr.iloc[-1])
+
+        if mode == "ATR":
+            # Simple ATR trail from current price
+            return price - TRAIL_ATR_MULT * atr_last if side_is_long else price + TRAIL_ATR_MULT * atr_last
+
+        # CHANDELIER: extreme over lookback ± ATR*mult
+        hh = float(df["high"].tail(CHAN_LOOKBACK).max())
+        ll = float(df["low"].tail(CHAN_LOOKBACK).min())
+        if side_is_long:
+            return hh - TRAIL_ATR_MULT * atr_last
+        else:
+            return ll + TRAIL_ATR_MULT * atr_last
+    except Exception:
+        return None
 
 def detect_breakout_scenario(df, cam_levels, current_price):
     """Detect if we're in a breakout scenario beyond H5/L5"""
@@ -2838,6 +2896,13 @@ async def send_battle_signal(
             "thread_id": None,
             "knight": knight,
             "rating": confidence,
+	    "tp1_hit": False,
+	    "partial_frac": PARTIAL_FRACTION,
+	    "be_active": False,
+	    "be_stop": None,
+	    "trail_mode": TRAIL_MODE,
+	    "trail_active": False,
+	    "trail_stop": None,
         }
 
         # Log to tracking system (Google Sheets via tracker)
@@ -2971,32 +3036,44 @@ from discord.ext import tasks
 from datetime import datetime, timezone
 import os
 
+from discord.ext import tasks
+
 @tasks.loop(seconds=30)
 async def monitor_trade_exits():
     """
-    Watches active_trades for TP1/TP2/SL.
-    - On TP1: logs a partial (fraction=PARTIAL_FRACTION) and arms a BE stop on the remainder (optional).
-    - On TP2/SL/BE: computes blended PnL and closes via trade_tracker.log_trade_exit(...)
+    Watches active_trades for TP1/TP2/SL/BE and optional trailing after TP1.
+
+    Behavior
+    --------
+    • On TP1:
+        - log partial (fraction=PARTIAL_FRACTION) silently to the tracker
+        - move SL to BE (+/- BE_OFFSET_PCT) on the remainder if BE_AFTER_TP1
+        - optionally start a trailing stop (ATR/Chandelier) on the remainder
+    • On TP2/SL/BE:
+        - compute blended PnL and close via trade_tracker.log_trade_exit(...)
+
     Requires:
-      - active_trades: {trade_id: {entry,tp1,tp2,sl,side,...}}
-      - bot, BATTLE_SIGNALS_ID, CENTRAL_TZ
-      - retry_api_call_async(fetch_ohlc_async, "ETH", 1) -> DataFrame with 'close'
-      - trade_tracker with log_partial_exit(...) and log_trade_exit(...)
+      active_trades[tid] = {
+        entry,tp1,tp2,sl,side, ... (we also read/write: tp1_hit, be_active, be_stop,
+        trail_stop, trail_mode, partial_frac)
+      }
     """
     try:
         if not active_trades:
             return
 
-        df = await retry_api_call_async(fetch_ohlc_async, "ETH", 1)
-        if df is None or len(df) < 1:
+        # 1-min feed for responsiveness, 5-min for trail math
+        df_1 = await retry_api_call_async(fetch_ohlc_async, "ETH", 1)
+        df_5 = await retry_api_call_async(fetch_ohlc_async, "ETH", 5)
+        if df_1 is None or len(df_1) == 0:
             return
 
-        price = float(df.iloc[-1]["close"])
+        price = float(df_1.iloc[-1]["close"])
         trades_to_close = []
 
         for trade_id, trade in list(active_trades.items()):
             try:
-                side  = trade["side"]                  # "Long" / "Short"
+                side  = trade["side"]                  # "Long" or "Short"
                 entry = float(trade["entry"])
                 tp1   = float(trade["tp1"])
                 tp2   = float(trade["tp2"])
@@ -3004,128 +3081,133 @@ async def monitor_trade_exits():
 
                 tp1_hit = bool(trade.get("tp1_hit", False))
 
-                # ---------- TP2 (win) ----------
+                # ---------------- TP2 (win) ----------------
                 if side == "Long":
                     if price >= tp2:
                         if not tp1_hit:
-                            tp1_hit = True
                             trade["tp1_hit"] = True
-                        now = datetime.now(timezone.utc); ct = now.astimezone(CENTRAL_TZ)
-                        embed = discord.Embed(title="📍 ETH Trade Exit Alert – TP2 HIT",
-                                              color=discord.Color.green(), timestamp=now)
-                        embed.add_field(name="Type", value=side, inline=True)
-                        embed.add_field(name="Exit Price", value=f"${price:.2f}", inline=True)
-                        embed.add_field(name="Outcome", value="TP2 HIT", inline=True)
-                        embed.add_field(name="Trade ID", value=trade_id, inline=False)
-                        embed.set_footer(text=f"🕒 UTC: {now.strftime('%H:%M:%S')} | CT: {ct.strftime('%I:%M %p')}")
-                        ch = bot.get_channel(BATTLE_SIGNALS_ID)
-                        if ch: await ch.send(embed=embed)
-
+                            tp1_hit = True
                         pnl_pct = _blended_exit_pnl(entry, tp1, price, side, tp1_hit, PARTIAL_FRACTION)
                         if trade_tracker:
-                            await trade_tracker.log_trade_exit(trade_id, float(price), "TP2 HIT" + (" (after TP1)" if tp1_hit else ""), float(pnl_pct))
+                            await trade_tracker.log_trade_exit(
+                                trade_id, float(price), "TP2 HIT" + (" (after TP1)" if tp1_hit else ""), float(pnl_pct)
+                            )
                         trades_to_close.append(trade_id)
                         continue
                 else:  # Short
                     if price <= tp2:
                         if not tp1_hit:
-                            tp1_hit = True
                             trade["tp1_hit"] = True
-                        now = datetime.now(timezone.utc); ct = now.astimezone(CENTRAL_TZ)
-                        embed = discord.Embed(title="📍 ETH Trade Exit Alert – TP2 HIT",
-                                              color=discord.Color.green(), timestamp=now)
-                        embed.add_field(name="Type", value=side, inline=True)
-                        embed.add_field(name="Exit Price", value=f"${price:.2f}", inline=True)
-                        embed.add_field(name="Outcome", value="TP2 HIT", inline=True)
-                        embed.add_field(name="Trade ID", value=trade_id, inline=False)
-                        embed.set_footer(text=f"🕒 UTC: {now.strftime('%H:%M:%S')} | CT: {ct.strftime('%I:%M %p')}")
-                        ch = bot.get_channel(BATTLE_SIGNALS_ID)
-                        if ch: await ch.send(embed=embed)
-
+                            tp1_hit = True
                         pnl_pct = _blended_exit_pnl(entry, tp1, price, side, tp1_hit, PARTIAL_FRACTION)
                         if trade_tracker:
-                            await trade_tracker.log_trade_exit(trade_id, float(price), "TP2 HIT" + (" (after TP1)" if tp1_hit else ""), float(pnl_pct))
+                            await trade_tracker.log_trade_exit(
+                                trade_id, float(price), "TP2 HIT" + (" (after TP1)" if tp1_hit else ""), float(pnl_pct)
+                            )
                         trades_to_close.append(trade_id)
                         continue
 
-                # ---------- TP1 (partial + arm BE) ----------
+                # ---------------- TP1 (partial + arm BE + start trailing) ----------------
                 if not tp1_hit:
-                    tp1_touched = (side == "Long" and price >= tp1) or (side != "Long" and price <= tp1)
-                    if tp1_touched:
+                    hit_tp1 = (side == "Long" and price >= tp1) or (side != "Long" and price <= tp1)
+                    if hit_tp1:
                         trade["tp1_hit"] = True
-                        pnl_tp1 = _pnl_pct(entry, price, side)
-                        if trade_tracker:
-                            await trade_tracker.log_partial_exit(trade_id, float(price), "TP1 HIT", float(pnl_tp1), fraction=PARTIAL_FRACTION)
+                        tp1_hit = True
 
+                        # log partial silently
+                        pnl_tp1 = _pnl_pct(entry, tp1, side)
+                        if trade_tracker:
+                            await trade_tracker.log_partial_exit(
+                                trade_id, float(tp1), "TP1 HIT", float(pnl_tp1), fraction=PARTIAL_FRACTION
+                            )
+
+                        # move stop to BE on the remainder
                         if BE_AFTER_TP1:
                             be = entry * (1.0 + BE_OFFSET_PCT) if side == "Long" else entry * (1.0 - BE_OFFSET_PCT)
-                            trade["be_stop"] = float(be)
+                            trade["be_stop"]   = float(be)
                             trade["be_active"] = True
-                            logger.info("BE activated %s: stop=%.2f (entry=%.2f)", trade_id, be, entry)
 
-                        continue  # do not close yet
+                            # do not lower the stop; adjust stored sl if BE > old sl (long) / BE < old sl (short)
+                            if side == "Long":
+                                trade["sl"] = float(max(sl, be))
+                            else:
+                                trade["sl"] = float(min(sl, be))
 
-                # ---------- BE stop (if armed) ----------
+                        # optionally start trailing the remainder
+                        trade["trail_mode"] = TRAIL_MODE
+                        if TRAIL_MODE != "OFF" and df_5 is not None and len(df_5) > 30:
+                            cand = compute_trailing_stop(df_5, price, side)
+                            if cand is not None:
+                                if side == "Long":
+                                    new_sl = max(float(trade.get("sl", sl)), float(cand), float(trade.get("be_stop", -1e18)))
+                                else:
+                                    new_sl = min(float(trade.get("sl", sl)), float(cand), float(trade.get("be_stop", 1e18)))
+                                trade["sl"] = float(new_sl)
+                                trade["trail_stop"] = float(new_sl)
+                                trade["trail_active"] = True
+
+                        continue  # wait for next checks
+
+                # ---------------- BE stop (if armed) ----------------
                 if trade.get("be_active"):
                     be = float(trade["be_stop"])
                     hit_be = (side == "Long" and price <= be) or (side != "Long" and price >= be)
                     if hit_be:
-                        pnl_pct = _blended_exit_pnl(entry, tp1, price, side, True, PARTIAL_FRACTION)
+                        pnl_pct = _blended_exit_pnl(entry, tp1, be, side, True, PARTIAL_FRACTION)
                         if trade_tracker:
-                            await trade_tracker.log_trade_exit(trade_id, float(price), "BREAKEVEN (after TP1)", float(pnl_pct))
+                            await trade_tracker.log_trade_exit(
+                                trade_id, float(be), "BREAKEVEN (after TP1)", float(pnl_pct)
+                            )
                         trades_to_close.append(trade_id)
                         continue
 
-                # ---------- SL (loss) ----------
-                if side == "Long":
-                    if price <= sl:
-                        now = datetime.now(timezone.utc); ct = now.astimezone(CENTRAL_TZ)
-                        embed = discord.Embed(title="📍 ETH Trade Exit Alert – SL HIT",
-                                              color=discord.Color.red(), timestamp=now)
-                        embed.add_field(name="Type", value=side, inline=True)
-                        embed.add_field(name="Exit Price", value=f"${price:.2f}", inline=True)
-                        embed.add_field(name="Outcome", value="SL HIT", inline=True)
-                        embed.add_field(name="Trade ID", value=trade_id, inline=False)
-                        embed.set_footer(text=f"🕒 UTC: {now.strftime('%H:%M:%S')} | CT: {ct.strftime('%I:%M %p')}")
-                        ch = bot.get_channel(BATTLE_SIGNALS_ID)
-                        if ch: await ch.send(embed=embed)
+                # ---------------- trailing (after TP1) ----------------
+                if tp1_hit and TRAIL_MODE != "OFF" and df_5 is not None and len(df_5) > 30:
+                    cand = compute_trailing_stop(df_5, price, side)
+                    if cand is not None:
+                        if side == "Long":
+                            # never move stop down; respect BE as a floor
+                            new_sl = max(float(trade.get("sl", sl)), float(cand), float(trade.get("be_stop", -1e18)))
+                            if new_sl > trade.get("sl", sl):
+                                trade["sl"] = float(new_sl)
+                                trade["trail_stop"] = float(new_sl)
+                                trade["trail_active"] = True
+                        else:
+                            # never move stop up for a short; respect BE as a ceiling
+                            new_sl = min(float(trade.get("sl", sl)), float(cand), float(trade.get("be_stop", 1e18)))
+                            if new_sl < trade.get("sl", sl):
+                                trade["sl"] = float(new_sl)
+                                trade["trail_stop"] = float(new_sl)
+                                trade["trail_active"] = True
 
-                        pnl_pct = _blended_exit_pnl(entry, tp1, price, side, tp1_hit, PARTIAL_FRACTION)
+                # ---------------- SL / Trailing stop ----------------
+                sl_now = float(trade.get("sl", sl))
+                if side == "Long":
+                    if price <= sl_now:
+                        reason = "TRAIL STOP" if trade.get("trail_active") else "SL HIT"
+                        pnl_pct = _blended_exit_pnl(entry, tp1, sl_now, side, tp1_hit, PARTIAL_FRACTION)
                         if trade_tracker:
-                            await trade_tracker.log_trade_exit(trade_id, float(price), "SL HIT" + (" (after TP1)" if tp1_hit else ""), float(pnl_pct))
+                            await trade_tracker.log_trade_exit(trade_id, float(sl_now), reason, float(pnl_pct))
                         trades_to_close.append(trade_id)
                         continue
                 else:
-                    if price >= sl:
-                        now = datetime.now(timezone.utc); ct = now.astimezone(CENTRAL_TZ)
-                        embed = discord.Embed(title="📍 ETH Trade Exit Alert – SL HIT",
-                                              color=discord.Color.red(), timestamp=now)
-                        embed.add_field(name="Type", value=side, inline=True)
-                        embed.add_field(name="Exit Price", value=f"${price:.2f}", inline=True)
-                        embed.add_field(name="Outcome", value="SL HIT", inline=True)
-                        embed.add_field(name="Trade ID", value=trade_id, inline=False)
-                        embed.set_footer(text=f"🕒 UTC: {now.strftime('%H:%M:%S')} | CT: {ct.strftime('%I:%M %p')}")
-                        ch = bot.get_channel(BATTLE_SIGNALS_ID)
-                        if ch: await ch.send(embed=embed)
-
-                        pnl_pct = _blended_exit_pnl(entry, tp1, price, side, tp1_hit, PARTIAL_FRACTION)
+                    if price >= sl_now:
+                        reason = "TRAIL STOP" if trade.get("trail_active") else "SL HIT"
+                        pnl_pct = _blended_exit_pnl(entry, tp1, sl_now, side, tp1_hit, PARTIAL_FRACTION)
                         if trade_tracker:
-                            await trade_tracker.log_trade_exit(trade_id, float(price), "SL HIT" + (" (after TP1)" if tp1_hit else ""), float(pnl_pct))
+                            await trade_tracker.log_trade_exit(trade_id, float(sl_now), reason, float(pnl_pct))
                         trades_to_close.append(trade_id)
                         continue
 
             except Exception as inner_e:
-                logger.error("monitor_trade_exits: error on %s: %s", trade_id, inner_e)
+                logger.error("Trade watcher error for %s: %s", trade_id, inner_e)
 
         # Cleanup closed trades
         for tid in trades_to_close:
             active_trades.pop(tid, None)
-            if hasattr(trade_tracker, "partial_exits"):
-                trade_tracker.partial_exits.pop(tid, None)
-            logger.warning("Trade %s fully closed", tid)
 
     except Exception as e:
-        logger.error("Error in monitor_trade_exits: %s", e)
+        logger.error(f"Error in monitor_trade_exits: {e}")
 
 @tasks.loop(minutes=5)
 async def memory_cleanup():
@@ -3512,6 +3594,18 @@ async def enhanced_performance_report(ctx, days: int = 7):
     else:
         await ctx.send("⚠️ Administrator permissions required")
 
+@bot.command(name="rehydrate")
+@commands.has_permissions(administrator=True)
+async def cmd_rehydrate(ctx):
+    try:
+        before = len(active_trades)
+        await rehydrate_active_trades()
+        after = len(active_trades)
+        await ctx.send(f"🔁 Rehydrated. Active trades: {before} → {after}")
+    except Exception as e:
+        logger.error("rehydrate cmd error: %s", e)
+        await ctx.send("❌ Rehydrate failed. Check logs.")
+
 # ============================================
 # NEW AUTOMATED TRACKING COMMANDS
 # ============================================
@@ -3729,13 +3823,25 @@ async def database_stats(ctx):
 async def on_ready():
     global trade_tracker, bot_start_time
     bot_start_time = datetime.now(timezone.utc)
-    
+
     # Initialize ENHANCED tracking system with automated capture
     trade_tracker = EnhancedIntegratedTradeTracker(bot)
-    
+
     logger.warning(f"🟢 Bot logged in as {bot.user}")
 
+    # (A) Install shutdown hooks (safe if helper not present)
     try:
+        _install_shutdown_hooks()  # no-op if you didn’t add it; wrapped in try
+    except Exception as e:
+        logger.error("failed to install shutdown hooks: %s", e)
+
+    try:
+        # (B) Rehydrate open trades from Sheets BEFORE starting tasks
+        try:
+            await rehydrate_active_trades()
+        except Exception as e:
+            logger.error("rehydrate on_ready failed: %s", e)
+
         # Start all tasks with FIXED versions
         if not enhanced_camarilla_scan.is_running():
             enhanced_camarilla_scan.start()
@@ -3743,7 +3849,7 @@ async def on_ready():
             chronicle_loop.start()
         if not trade_100x_scan.is_running():
             trade_100x_scan.start()
-        
+
         # FIXED alert tasks
         if not enhanced_camarilla_warning.is_running():
             enhanced_camarilla_warning.start()
@@ -3751,23 +3857,23 @@ async def on_ready():
             smart_battleground_monitor.start()
         if not track_setup_outcomes.is_running():
             track_setup_outcomes.start()
-        
+
         # Core monitoring tasks
         if not monitor_trade_exits.is_running():
             monitor_trade_exits.start()
         if not memory_cleanup.is_running():
             memory_cleanup.start()
 
-        # Send startup notification
+        # (C) Startup notification
         embed = discord.Embed(
             title="🏰 Control Tower v10.2 - ALL CRITICAL FIXES + AUTOMATED TRACKING",
             description="*Enhanced system with all reported issues resolved + zero manual entry tracking*",
             color=discord.Color.gold(),
             timestamp=datetime.now(timezone.utc)
         )
-        
+
         embed.add_field(
-            name="🔧 Critical Fixes Applied", 
+            name="🔧 Critical Fixes Applied",
             value=(
                 "✅ **H5/L5 Continuation**: Full breakout logic implemented\n"
                 "✅ **Async HTTP**: No more blocking requests in event loop\n"
@@ -3776,12 +3882,12 @@ async def on_ready():
                 "✅ **Retry Integration**: API calls now use retry logic\n"
                 "✅ **CSV Export**: BytesIO fix for Discord file uploads\n"
                 "✅ **TP1 Alert Control**: Only TP2 and SL alerts sent"
-            ), 
+            ),
             inline=False
         )
-        
+
         embed.add_field(
-            name="🤖 NEW: Automated Tracking System", 
+            name="🤖 NEW: Automated Tracking System",
             value=(
                 "✅ **Zero Manual Entry**: All metrics captured automatically\n"
                 "✅ **SQLite Database**: Local storage for all trade data\n"
@@ -3790,22 +3896,22 @@ async def on_ready():
                 "✅ **Market Context**: RSI, volume, VWAP, volatility auto-logged\n"
                 "✅ **Setup Analytics**: Breakout structure, confluence tracking\n"
                 "✅ **Advanced Export**: Complete dataset with 30+ metrics"
-            ), 
+            ),
             inline=False
         )
-        
+
         embed.add_field(
-            name="⚡ Performance Improvements", 
+            name="⚡ Performance Improvements",
             value=(
                 "🎯 **Dynamic Levels**: Now actively used in scanning\n"
                 "📊 **ATR Caching**: Reduced redundant calculations\n"
                 "🧠 **Smart Scoring**: Fixed double-counting bias\n"
                 "🔄 **Memory Optimization**: Enhanced cleanup routines\n"
                 "📈 **Real-time Analysis**: Market conditions tracked continuously"
-            ), 
+            ),
             inline=False
         )
-        
+
         embed.add_field(
             name="🎮 Available Commands",
             value=(
@@ -3822,11 +3928,11 @@ async def on_ready():
             ),
             inline=False
         )
-        
-        # Database and tracking status
+
+        # Integration / status
         db_status = "✅ Connected" if hasattr(trade_tracker, 'auto_tracker') else "❌ Failed to initialize"
         sheets_msg = "✅ Enabled" if trade_tracker.sheets_webhook else "❌ Add GOOGLE_SHEETS_WEBHOOK env var"
-        
+
         embed.add_field(
             name="📊 Integration Status",
             value=(
@@ -3837,7 +3943,14 @@ async def on_ready():
             ),
             inline=True
         )
-        
+
+        # Live policy summary from env
+        policy = (
+            f"Partial: {int(float(os.getenv('PARTIAL_FRACTION','0.5'))*100)}% @ TP1 • "
+            f"BE: {'ON' if os.getenv('BE_AFTER_TP1','true').lower()=='true' else 'OFF'} • "
+            f"Trail: {os.getenv('TRAIL_MODE','OFF').upper()}"
+        )
+   
         embed.add_field(
             name="📈 System Status",
             value=(
@@ -3845,25 +3958,12 @@ async def on_ready():
                 f"**Active Trades:** {len(active_trades)}\n"
                 f"**Setup Tracking:** {len(setup_tracking)}\n"
                 f"**Cache Usage:** {len(ohlc_cache.cache)}/{MAX_CACHE_SIZE}\n"
-                f"**Database Tables:** trades, partial_exits"
+                f"**Database Tables:** trades, partial_exits\n"
+                f"**Policy:** {policy}"
             ),
             inline=True
         )
-        
-        # Performance guarantee
-        embed.add_field(
-            name="🎯 What You Get Now",
-            value=(
-                "• **Zero Manual Work**: Every trade automatically analyzed\n"
-                "• **Instant Insights**: Know why Score 4+ trades fail\n"
-                "• **Pattern Recognition**: 'RSI >80 = 90% loss rate' alerts\n"
-                "• **Enhanced Scoring**: Score 5 & 6 for better trade selection\n"
-                "• **Data-Driven Optimization**: Improve your 50% win rate\n"
-                "• **Professional Analytics**: Export for advanced analysis"
-            ),
-            inline=False
-        )
-        
+
         channel = bot.get_channel(SCROLLS_ORDER_ID)
         if channel:
             await channel.send(embed=embed)
@@ -3887,22 +3987,6 @@ async def on_ready():
 
     except Exception as e:
         logger.error(f"Error during startup: {e}")
-
-@bot.event
-async def on_error(event, *args, **kwargs):
-    logger.error(f"Discord event error in {event}: {args}")
-
-@bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.CommandNotFound):
-        return
-    elif isinstance(error, commands.MissingPermissions):
-        await ctx.send("⚠️ You don't have permission to use this command")
-    elif isinstance(error, commands.BadArgument):
-        await ctx.send("❌ Invalid arguments. Check the command usage.")
-    else:
-        logger.error(f"Command error: {error}")
-        await ctx.send(f"❌ An error occurred: {str(error)}")
 
 # ============================================
 # FLASK THREAD STARTER
