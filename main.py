@@ -1,5 +1,5 @@
 # ============================================
-# Control Tower - Clean v11.10.1 + Enhanced Alert System
+# Control Tower - Clean v11.10.2 + Enhanced Alert System
 # ============================================
 
 import os
@@ -918,32 +918,80 @@ class GoogleSheetsIntegration:
         return {"status": "failed", "reason": "max_retries_exceeded"}
 
     async def send_trade_entry(self, session: aiohttp.ClientSession, t):
+        # Create clean trade ID
+        clean_trade_id = t.id
+        if len(clean_trade_id) > 16:  # If it's too long, shorten it
+            clean_trade_id = clean_trade_id[-8:]  # Take last 8 characters
+        
+        # Build base payload matching sheet structure
         payload = {
+            # A-L: Core trade data
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "trade_id": t.id,
+            "trade_id": clean_trade_id,
             "asset": t.asset,
             "direction": t.direction.name.title(),
-            "level_name": t.level_name or "",
-            "entry_price": t.entry_price,
-            "stop_loss": t.sl,
-            "target1": t.tp1,
-            "target2": t.tp2,
-            "score": t.score or 0,
-            "knight": t.knight or "",
+            "entry_price": float(t.entry_price),
+            "stop_loss": float(t.sl),
+            "take_profit_1": float(t.tp1), 
+            "take_profit_2": float(t.tp2),
             "status": "OPEN",
-            "trade_type": t.trade_type or "Breakout",
-            "confidence": t.rating or "",
-            "enhanced_data": t.enhanced_data or {},
+            # M: Original Score
+            "original_score": int(t.score or 0),
         }
         
-        log.info(f"Sending to sheets: {payload}")
+        # N-AI: Enhanced data fields (flatten from enhanced_data dict)
+        enhanced_data = t.enhanced_data or {}
+        
+        # Enhanced metrics (N-T)
+        payload.update({
+            "enhanced_score": enhanced_data.get("enhanced_score", t.score or 0),
+            "rsi_level": enhanced_data.get("rsi_level", 50.0),
+            "volume_ratio": enhanced_data.get("volume_ratio", 1.0),
+            "market_status": enhanced_data.get("market_status", "NORMAL"),
+            "vwap_position": enhanced_data.get("vwap_position", "Above"),
+            "macd_status": enhanced_data.get("macd_status", "Neutral"),
+            "market_bias": enhanced_data.get("market_bias", "Neutral"),
+        })
+        
+        # Trade metadata (U-X)
+        payload.update({
+            "level_name": t.level_name or "Unknown",
+            "knight": t.knight or "Unknown",
+            "trade_type": t.trade_type or "Breakout",
+            "confidence": t.rating or "A",
+        })
+        
+        # Risk metrics (Y-Z)
+        payload.update({
+            "risk_pct": enhanced_data.get("risk_pct", 1.0),
+            "rr_ratio": enhanced_data.get("rr_ratio", 1.5),
+        })
+        
+        # Setup analysis (AA-AD)
+        payload.update({
+            "setup_age_minutes": enhanced_data.get("setup_age_minutes", 0),
+            "breakout_structure": enhanced_data.get("breakout_structure", "Present"),
+            "confluence_count": enhanced_data.get("confluence_count", 2),
+            "candle_body_strength": enhanced_data.get("candle_body_strength", "Moderate"),
+        })
+        
+        # Market context (AE-AI)
+        payload.update({
+            "market_session": enhanced_data.get("market_session", "Mid-day"),
+            "distance_from_level_pct": enhanced_data.get("distance_from_level_pct", 0.0),
+            "recent_news_events": enhanced_data.get("recent_news_events", "No"),
+            "volatility_state": enhanced_data.get("volatility_state", "Normal"),
+            "trend_strength": enhanced_data.get("trend_strength", "Moderate"),
+        })
+        
+        log.info(f"Sending to sheets - Trade ID: {clean_trade_id}, Level: {t.level_name}, Enhanced Score: {payload.get('enhanced_score')}")
         result = await self._post(session, payload)
         log.info(f"Sheets response: {result}")
         
         if result.get("status") == "success":
-            log.info(f"Trade entry sent to sheets: {t.id}")
+            log.info(f"Trade entry sent to sheets: {clean_trade_id}")
         else:
-            log.warning(f"Sheets entry failed for {t.id}: {result}")
+            log.warning(f"Sheets entry failed for {clean_trade_id}: {result}")
         return result
 
     async def send_trade_exit(self, session: aiohttp.ClientSession, trade_id: str, reason: str, price: float, time_iso: str, pnl_pct: float):
@@ -1110,18 +1158,21 @@ class MarketDataProvider:
 
 # -------- Enhanced Market Analysis Functions --------
 async def calculate_enhanced_metrics(df: pd.DataFrame, latest: pd.Series, level_price: float, direction: str) -> Dict[str, Any]:
-    """Calculate enhanced metrics for Google Sheets"""
+    """Calculate enhanced metrics for Google Sheets - all 26 fields"""
     try:
         # Basic metrics
         rsi = float(latest.get("rsi", 50)) if TA_AVAILABLE else 50.0
         volume = float(latest.get("volume", 0))
         price = float(latest["close"])
+        open_price = float(latest.get("open", price))
+        high = float(latest["high"])
+        low = float(latest["low"])
         
-        # Volume ratio
+        # Volume ratio (P)
         avg_volume = float(df["volume"].tail(10).mean()) if len(df) >= 10 else volume
         volume_ratio = volume / avg_volume if avg_volume > 0 else 1.0
         
-        # Market status from RSI
+        # Market status from RSI (Q)
         if rsi > 75:
             market_status = "OVERBOUGHT"
         elif rsi < 25:
@@ -1129,24 +1180,27 @@ async def calculate_enhanced_metrics(df: pd.DataFrame, latest: pd.Series, level_
         else:
             market_status = "NORMAL"
         
-        # VWAP position
+        # VWAP position (R)
         vwap = float(latest.get("vwap", price))
         vwap_position = "Above" if price > vwap else "Below"
         
-        # MACD status
+        # MACD status (S)
         macd_hist = float(latest.get("macd_hist", 0)) if TA_AVAILABLE else 0
         macd_status = "Bullish" if macd_hist > 0 else "Bearish"
         
-        # Market bias from trend
-        recent_closes = df["close"].tail(5)
-        trend_up = recent_closes.iloc[-1] > recent_closes.iloc[0] if len(recent_closes) >= 2 else True
-        if direction == "Long":
-            market_bias = "Bullish" if trend_up else "Neutral"
+        # Market bias from trend (T)
+        if len(df) >= 5:
+            recent_closes = df["close"].tail(5)
+            trend_up = recent_closes.iloc[-1] > recent_closes.iloc[0]
+            if direction == "Long":
+                market_bias = "Bullish" if trend_up else "Neutral"
+            else:
+                market_bias = "Bearish" if not trend_up else "Neutral"
         else:
-            market_bias = "Bearish" if not trend_up else "Neutral"
+            market_bias = "Neutral"
         
-        # Enhanced score calculation
-        base_score = 4  # Base breakout score
+        # Enhanced score calculation (N)
+        base_score = 4
         enhanced_score = base_score
         
         # Add points for favorable conditions
@@ -1159,7 +1213,7 @@ async def calculate_enhanced_metrics(df: pd.DataFrame, latest: pd.Series, level_
             
         enhanced_score = min(enhanced_score, 6)  # Cap at 6
         
-        # Risk % and R:R Ratio calculations
+        # Risk % and R:R Ratio calculations (Y-Z)
         entry_price = price
         if direction == "Long":
             sl_price = entry_price * 0.99
@@ -1172,18 +1226,32 @@ async def calculate_enhanced_metrics(df: pd.DataFrame, latest: pd.Series, level_
         reward_pct = abs((tp1_price - entry_price) / entry_price) * 100
         rr_ratio = reward_pct / risk_pct if risk_pct > 0 else 0
         
-        # Tier based on enhanced score
-        if enhanced_score >= 5:
-            tier = "S"
-        elif enhanced_score == 4:
-            tier = "A"
+        # Candle body strength (AD)
+        body_size = abs(price - open_price)
+        range_size = high - low
+        if range_size > 0:
+            body_ratio = body_size / range_size
+            if body_ratio > 0.7:
+                candle_body_strength = "Strong"
+            elif body_ratio > 0.3:
+                candle_body_strength = "Moderate"
+            else:
+                candle_body_strength = "Weak"
         else:
-            tier = "B"
+            candle_body_strength = "Doji"
         
-        # Distance from level
-        distance_pct = abs(price - level_price) / price * 100
+        # Breakout structure (AB)
+        breakout_structure = "Present" if (volume_ratio > 1.0 and body_ratio > 0.5) else "Missing"
         
-        # Market session
+        # Confluence count (AC)
+        confluence = 0
+        if volume_ratio > 1.0: confluence += 1
+        if (direction == "Long" and rsi > 50) or (direction == "Short" and rsi < 50): confluence += 1
+        if (direction == "Long" and macd_hist > 0) or (direction == "Short" and macd_hist < 0): confluence += 1
+        if (direction == "Long" and price > vwap) or (direction == "Short" and price < vwap): confluence += 1
+        confluence_count = min(confluence, 4)
+        
+        # Market session (AE)
         hour = datetime.now(timezone.utc).hour
         if 8 <= hour < 12:
             market_session = "Open"
@@ -1194,34 +1262,69 @@ async def calculate_enhanced_metrics(df: pd.DataFrame, latest: pd.Series, level_
         else:
             market_session = "After-hours"
         
+        # Distance from level (AF)
+        distance_from_level_pct = abs(price - level_price) / price * 100
+        
+        # Volatility state (AH)
+        if len(df) >= 20:
+            returns = df["close"].pct_change().tail(20)
+            volatility = returns.std() * 100
+            if volatility > 5:
+                volatility_state = "High"
+            elif volatility > 3:
+                volatility_state = "Elevated"
+            elif volatility < 1:
+                volatility_state = "Low"
+            else:
+                volatility_state = "Normal"
+        else:
+            volatility_state = "Normal"
+        
+        # Trend strength (AI)
+        if len(df) >= 20:
+            recent_closes = df["close"].tail(20)
+            trend_slope = np.polyfit(range(len(recent_closes)), recent_closes, 1)[0]
+            normalized_slope = (trend_slope / recent_closes.iloc[-1]) * 100
+            
+            if normalized_slope > 0.5:
+                trend_strength = "Strong Bullish"
+            elif normalized_slope > 0.1:
+                trend_strength = "Moderate Bullish"
+            elif normalized_slope < -0.5:
+                trend_strength = "Strong Bearish"
+            elif normalized_slope < -0.1:
+                trend_strength = "Moderate Bearish"
+            else:
+                trend_strength = "Neutral"
+        else:
+            trend_strength = "Neutral"
+        
         return {
-            # Enhanced data block to match sheet structure
-            "enhanced_score": enhanced_score,
-            "rsi_level": round(rsi, 8),
-            "volume_ratio": round(volume_ratio, 8),
-            "market_status": market_status,
-            "vwap_position": vwap_position,
-            "macd_status": macd_status,
-            "market_bias": market_bias,
-            "setup_age_minutes": 7,
-            "breakout_structure": "Present" if volume_ratio > 1.0 else "Missing",
-            "confluence_count": min(4, int(enhanced_score - base_score + 2)),
-            "candle_body_strength": "Strong" if volume_ratio > 1.2 else "Moderate",
-            "market_session": market_session,
-            "distance_from_level_pct": round(distance_pct, 8),
-            "recent_news_events": "No",
-            "volatility_state": market_status.lower().title() if market_status != "NORMAL" else "Normal",
-            "trend_strength": f"Moderate {market_bias}",
-            # Additional fields for sheet
-            "confidence": tier,
-            "risk_pct": round(risk_pct, 2),
-            "rr_ratio": round(rr_ratio, 1),
-            "tier": tier
+            # N-AI: All enhanced metrics matching sheet columns exactly
+            "enhanced_score": enhanced_score,                    # N
+            "rsi_level": round(rsi, 2),                         # O
+            "volume_ratio": round(volume_ratio, 2),             # P
+            "market_status": market_status,                     # Q
+            "vwap_position": vwap_position,                     # R
+            "macd_status": macd_status,                         # S
+            "market_bias": market_bias,                         # T
+            "setup_age_minutes": 0,                             # AA
+            "breakout_structure": breakout_structure,           # AB
+            "confluence_count": confluence_count,               # AC
+            "candle_body_strength": candle_body_strength,       # AD
+            "market_session": market_session,                   # AE
+            "distance_from_level_pct": round(distance_from_level_pct, 4), # AF
+            "recent_news_events": "No",                         # AG
+            "volatility_state": volatility_state,              # AH
+            "trend_strength": trend_strength,                   # AI
+            "risk_pct": round(risk_pct, 2),                     # Y
+            "rr_ratio": round(rr_ratio, 1),                     # Z
+            "tier": "S" if enhanced_score >= 5 else "A" if enhanced_score == 4 else "B"
         }
         
     except Exception as e:
         log.error(f"Enhanced metrics calculation error: {e}")
-        # Return minimal fallback data
+        # Return minimal fallback data with all required fields
         return {
             "enhanced_score": 4,
             "rsi_level": 50.0,
@@ -1238,7 +1341,9 @@ async def calculate_enhanced_metrics(df: pd.DataFrame, latest: pd.Series, level_
             "distance_from_level_pct": 0.0,
             "recent_news_events": "No",
             "volatility_state": "Normal",
-            "trend_strength": "Moderate",
+            "trend_strength": "Neutral",
+            "risk_pct": 1.0,
+            "rr_ratio": 1.5,
             "tier": "A"
         }
 
@@ -1313,8 +1418,8 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
         vwap_den = df["volume"].cumsum()
         df["vwap"] = vwap_num / vwap_den
         
-        # Fill any NaN values
-        df = df.fillna(method='ffill').fillna(method='bfill')
+        # Fix deprecated fillna method
+        df = df.ffill().bfill()
         
         return df
         
@@ -1450,10 +1555,24 @@ def create_bot():
                 timestamp=datetime.now(timezone.utc)
             )
             
-            # Active cooldowns
-            active_cooldowns = sum(1 for cd_dict in alert_manager.enhanced_cooldowns.values() 
-                                 if isinstance(cd_dict, dict) for cd_time in cd_dict.values() 
-                                 if (datetime.now(timezone.utc) - cd_time).total_seconds() < 3600)
+            # Active cooldowns - fix timezone issue
+            active_cooldowns = 0
+            now = datetime.now(timezone.utc)
+            for cd_dict in alert_manager.enhanced_cooldowns.values():
+                if isinstance(cd_dict, dict):
+                    for cd_time in cd_dict.values():
+                        if isinstance(cd_time, datetime):
+                            # Ensure timezone awareness
+                            if cd_time.tzinfo is None:
+                                cd_time = cd_time.replace(tzinfo=timezone.utc)
+                            if (now - cd_time).total_seconds() < 3600:
+                                active_cooldowns += 1
+                elif isinstance(cd_dict, datetime):
+                    # Handle battleground cooldown
+                    if cd_dict.tzinfo is None:
+                        cd_dict = cd_dict.replace(tzinfo=timezone.utc)
+                    if (now - cd_dict).total_seconds() < 3600:
+                        active_cooldowns += 1
             
             e.add_field(name="📜 Market Scorecard", value="✅ Active", inline=True)
             e.add_field(name="🕰️ Proximity Warnings", value="✅ Enhanced", inline=True)
@@ -1674,9 +1793,13 @@ def create_bot():
                 # Potential long signal
                 enhanced_data = await calculate_enhanced_metrics(df, latest, h5, "Long")
                 
+                # Create shorter, cleaner trade ID
+                timestamp = datetime.now(timezone.utc)
+                trade_id = f"L{timestamp.strftime('%m%d%H%M')}"  # L08131430 format
+                
                 t = TradeData(
-                    id=datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),
-                    asset=cfg.pair,
+                    id=trade_id,
+                    asset=cfg.pair.replace("USD", ""),  # ETH instead of ETHUSD
                     direction=TradeDirection.LONG,
                     entry_price=current_price,
                     sl=current_price * 0.99,
@@ -1702,9 +1825,13 @@ def create_bot():
                 # Potential short signal
                 enhanced_data = await calculate_enhanced_metrics(df, latest, l5, "Short")
                 
+                # Create shorter, cleaner trade ID
+                timestamp = datetime.now(timezone.utc)
+                trade_id = f"S{timestamp.strftime('%m%d%H%M')}"  # S08131430 format
+                
                 t = TradeData(
-                    id=datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),
-                    asset=cfg.pair,
+                    id=trade_id,
+                    asset=cfg.pair.replace("USD", ""),  # ETH instead of ETHUSD
                     direction=TradeDirection.SHORT,
                     entry_price=current_price,
                     sl=current_price * 1.01,
@@ -1761,6 +1888,11 @@ def create_bot():
                     enhanced_data = await calculate_enhanced_metrics(df, latest, level_price, direction)
                     score = enhanced_data.get("enhanced_score", 4)
                     
+                    # Create clean trade ID
+                    timestamp = datetime.now(timezone.utc)
+                    direction_prefix = "L" if direction == "Long" else "S"
+                    trade_id = f"{direction_prefix}{level_name}{timestamp.strftime('%H%M')}"  # LH408131430
+                    
                     # Create trade
                     if direction == "Long":
                         sl = price * 0.99
@@ -1772,8 +1904,8 @@ def create_bot():
                         tp2 = price * 0.97
                     
                     t = TradeData(
-                        id=datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + f"_{level_name}",
-                        asset=cfg.pair,
+                        id=trade_id,
+                        asset=cfg.pair.replace("USD", ""),  # ETH instead of ETHUSD
                         direction=TradeDirection.LONG if direction == "Long" else TradeDirection.SHORT,
                         entry_price=price,
                         sl=sl,
