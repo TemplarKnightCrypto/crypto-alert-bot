@@ -1,5 +1,5 @@
 # ============================================
-# Control Tower - Complete v11.11.7
+# Control Tower - Complete v11.11.9
 # ============================================
 
 import os
@@ -1336,6 +1336,61 @@ async def calculate_enhanced_metrics(df: pd.DataFrame, latest: pd.Series, level_
             "tier": "A"
         }
 
+def build_trade_alert_data(df: pd.DataFrame, t: "TradeData", sig) -> Dict[str, Any]:
+    """
+    Standardized fields for Sheets/Discord derived from the signal and trade.
+    Safe to call even if df lacks some columns.
+    """
+    # RR calc (protect against divide-by-zero)
+    r = abs(t.entry_price - t.sl)
+    denom = r if r > 1e-9 else 1e-9
+    rr_tp1 = abs(t.tp1 - t.entry_price) / denom
+    rr_tp2 = abs(t.tp2 - t.entry_price) / denom
+
+    # Candle time (prefer 'dt', else 'time', else now)
+    try:
+        last = df.iloc[-1]
+        if "dt" in last:
+            candle_iso = str(last["dt"])
+        elif "time" in last:
+            candle_iso = pd.to_datetime(int(last["time"]), unit="s", utc=True).isoformat()
+        else:
+            candle_iso = datetime.now(timezone.utc).isoformat()
+    except Exception:
+        candle_iso = datetime.now(timezone.utc).isoformat()
+
+    # Optional ATR14 for context
+    def _atr(arr: pd.DataFrame, period: int = 14) -> Optional[float]:
+        if arr is None or len(arr) < period + 1:
+            return None
+        h, l, c = arr["high"].to_numpy(), arr["low"].to_numpy(), arr["close"].to_numpy()
+        trs = [max(h[i]-l[i], abs(h[i]-c[i-1]), abs(l[i]-c[i-1])) for i in range(1, len(arr))]
+        if len(trs) < period:
+            return None
+        return float(sum(trs[-period:]) / period)
+
+    atr14 = _atr(df, 14)
+
+    return {
+        "rr_tp1": round(rr_tp1, 3),
+        "rr_tp2": round(rr_tp2, 3),
+        "signal_kind": getattr(sig, "kind", None),
+        "signal_reason": getattr(sig, "reason", None),
+        "level_price": getattr(sig, "level_price", getattr(t, "level_price", None)),
+        "candle_iso": candle_iso,
+        "timeframe_min": getattr(cfg, "interval_min", getattr(cfg, "tf_min", None)),
+        "atr14": atr14,
+        # engine params (if you want to see what the engine used)
+        "engine_body_ratio": 0.5,
+        "engine_vol_mult": 1.2,
+        "cooldown_s": getattr(signal_engine, "cooldown_s", None),
+        # config flags that downstream Sheets might care about
+        "be_after_tp1": getattr(cfg, "be_after_tp1", True),
+        "be_offset_pct": getattr(cfg, "be_offset_pct", 0.0),
+        "trail_mode": getattr(cfg, "trail_mode", "off"),
+        "trail_atr_mult": getattr(cfg, "trail_atr_mult", None),
+    }
+
 def calc_camarilla(df: pd.DataFrame) -> Dict[str, float]:
     try:
         if len(df) < 2:
@@ -1727,48 +1782,50 @@ def create_bot():
         except Exception as e:
             log.error(f"Enhanced scanner error: {e}")
 
-    async def scan_for_signals(df: pd.DataFrame, levels: Dict[str, float]):
-        """Find signals via TradeSignalEngine and open trades."""
-        try:
-            sig = signal_engine.get_signal(df, levels, pair=cfg.pair, now_ts=int(time.time()))
-            if not sig:
-                return
-            latest = df.iloc[-1]
-            direction_str = "Long" if sig.side == "long" else "Short"
-            enhanced_data = await calculate_enhanced_metrics(df, latest, sig.level_price, direction_str)
+async def scan_for_signals(df: pd.DataFrame, levels: Dict[str, float]):
+    """Find signals via TradeSignalEngine and open trades."""
+    try:
+        sig = signal_engine.get_signal(df, levels, pair=cfg.pair, now_ts=int(time.time()))
+        if not sig:
+            return
 
-            timestamp = datetime.now(timezone.utc)
-            trade_id = ("L" if sig.side == "long" else "S") + timestamp.strftime("%m%d%H%M")
+        latest = df.iloc[-1]
+        direction_str = "Long" if sig.side == "long" else "Short"
+        enhanced_data = await calculate_enhanced_metrics(df, latest, sig.level_price, direction_str)
 
-            t = TradeData(
-                id=trade_id,
-                asset=cfg.pair.replace("USD",""),
-                direction=TradeDirection.LONG if sig.side == "long" else TradeDirection.SHORT,
-                entry_price=float(sig.entry),
-                sl=float(sig.sl),
-                tp1=float(sig.tp1),
-                tp2=float(sig.tp2),
-                level_name=sig.level_name,
-                level_price=float(sig.level_price),
-                knight="Sir Leonis" if sig.kind == "breakout" else "Sir Lucien",
-                rating=enhanced_data.get("tier", "A"),
-                score=enhanced_data.get("enhanced_score", 4),
-                trade_type=f"{sig.level_name}_{sig.kind.capitalize()}",
-                enhanced_data={**enhanced_data, "reason": sig.reason}
-            )
+        timestamp = datetime.now(timezone.utc)
+        trade_id = ("L" if sig.side == "long" else "S") + timestamp.strftime("%m%d%H%M")
 
-    # ✅ enrich with standardized alert data (so Sheets + Discord see the same fields)
-    alert = build_trade_alert_data(df, t, sig)
-    t.enhanced_data = {**(t.enhanced_data or {}), **alert}
+        t = TradeData(
+            id=trade_id,
+            asset=cfg.pair.replace("USD",""),
+            direction=TradeDirection.LONG if sig.side == "long" else TradeDirection.SHORT,
+            entry_price=float(sig.entry),
+            sl=float(sig.sl),
+            tp1=float(sig.tp1),
+            tp2=float(sig.tp2),
+            level_name=sig.level_name,
+            level_price=float(sig.level_price),
+            knight="Sir Leonis" if sig.kind == "breakout" else "Sir Lucien",
+            rating=enhanced_data.get("tier", "A"),
+            score=enhanced_data.get("enhanced_score", 4),
+            trade_type=f"{sig.level_name}_{sig.kind.capitalize()}",
+            enhanced_data={**enhanced_data, "reason": sig.reason}
+        )
 
-            await trade_manager.open_trade(t)
+        # ✅ enrich with standardized alert data (so Sheets + Discord see the same fields)
+        alert = build_trade_alert_data(df, t, sig)
+        t.enhanced_data = {**(t.enhanced_data or {}), **alert}
 
-            channel = bot.get_channel(cfg.channels.battle_signals_id)
-            if channel:
-                await send_battle_signal(channel, t)
+        await trade_manager.open_trade(t)
 
-        except Exception as e:
-            log.error(f"Signal scanning error: {e}")
+        channel = bot.get_channel(cfg.channels.battle_signals_id)
+        if channel:
+            await send_battle_signal(channel, t)
+
+    except Exception as e:
+        log.error(f"Signal scanning error: {e}")
+
 
     @enhanced_scanner.before_loop
     async def before_scanner():
