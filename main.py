@@ -1,5 +1,5 @@
 # =====================================================================
-# Control Tower - v11.8 Advanced + Channels
+# Control Tower - v11.9
 # =====================================================================
 # What's included
 # - Channel routing (Scorecard, Battle, 100x, Proximity, Battleground, Setup)
@@ -656,6 +656,21 @@ async def route_100x_alert(t: TradeData):
     e.add_field(name="Knight", value=t.knight or "-", inline=True)
     await send_to_channel(cfg.eagle_signal_id, e)
 
+async def route_exit_alert(t: TradeData, exit_price: float, reason: str, pnl_pct: float):
+    color = discord.Color.light_grey() if "TP2" in reason else discord.Color.dark_red()
+    title_icon = "🏁" if "TP2" in reason else "⛔"
+    e = discord.Embed(
+        title=f"{title_icon} Exit — {t.asset} {t.direction.name} ({reason})",
+        color=color,
+        timestamp=datetime.now(timezone.utc)
+    )
+    e.add_field(name="Entry", value=f"{t.entry_price:.2f}", inline=True)
+    e.add_field(name="Exit", value=f"{exit_price:.2f}", inline=True)
+    e.add_field(name="PnL %", value=f"{pnl_pct:.2f}", inline=True)
+    e.add_field(name="Level", value=f"{t.level_name or '-'}", inline=True)
+    e.set_footer(text=f"Trade ID: {t.id}")
+    await send_to_channel(cfg.battle_signals_id, e)
+
 async def route_proximity_warning(side: str, level_name: str, level_price: float, price: float, distance_pct: float):
     e = discord.Embed(title=f"🕰️ Knight's Warning — {cfg.pair} near {level_name}",
                       color=discord.Color.orange(), timestamp=datetime.now(timezone.utc))
@@ -766,9 +781,38 @@ def build_trade(last: pd.Series, levels: Dict[str,float], signal: Dict[str,Any])
         enhanced_data=conf
     )
 
+
+async def _close_trade_and_notify(t: TradeData, exit_price: float, reason: str):
+    # Compute PnL %
+    try:
+        if t.direction == TradeDirection.LONG:
+            pnl_pct = (exit_price / t.entry_price - 1.0) * 100.0
+        else:
+            pnl_pct = (1.0 - exit_price / t.entry_price) * 100.0
+    except Exception:
+        pnl_pct = 0.0
+    # Mark closed & persist
+    t.status = TradeStatus.CLOSED
+    t.closed_at = datetime.now(timezone.utc)
+    db.save_trade(t)  # upsert with CLOSED
+    # Sheets update
+    try:
+        await trade_manager.start()
+        time_iso = t.closed_at.isoformat()
+        await sheets.send_trade_exit(trade_manager.session, t.id, reason, exit_price, time_iso, round(pnl_pct, 2))
+    except Exception as e:
+        log.warning(f"Sheets exit update failed: {e}")
+    # Alert channel
+    await route_exit_alert(t, exit_price, reason, round(pnl_pct, 2))
+    # Remove from active
+    try:
+        trade_manager.active.pop(t.id, None)
+    except Exception:
+        pass
 # -------- Schedulers --------
 @tasks.loop(seconds=60)
 async def scan_loop():
+    global _hundred_x_cooldown_at
     await mdp.start()
     await trade_manager.start()
 
@@ -810,8 +854,7 @@ async def scan_loop():
             await trade_manager.open_trade(t)
             await route_battle_signal(t)
             # 100x gate
-            global _hundred_x_cooldown_at
-            if (t.score or 0) >= 5:
+                        if (t.score or 0) >= 5:
                 now = datetime.now(timezone.utc)
                 if not _hundred_x_cooldown_at or (now - _hundred_x_cooldown_at) >= timedelta(minutes=cfg.hundred_x_cooldown_min):
                     await route_100x_alert(t); _hundred_x_cooldown_at = now
@@ -822,8 +865,7 @@ async def scan_loop():
             t = build_trade(last, levels, {"type":"L5_Breakout","direction":TradeDirection.SHORT,"level":"L5","level_price":L5})
             await trade_manager.open_trade(t)
             await route_battle_signal(t)
-            global _hundred_x_cooldown_at
-            if (t.score or 0) >= 5:
+                        if (t.score or 0) >= 5:
                 now = datetime.now(timezone.utc)
                 if not _hundred_x_cooldown_at or (now - _hundred_x_cooldown_at) >= timedelta(minutes=cfg.hundred_x_cooldown_min):
                     await route_100x_alert(t); _hundred_x_cooldown_at = now
@@ -838,8 +880,7 @@ async def scan_loop():
             await route_battle_signal(t)
             if (t.score or 0) >= 5:
                 now = datetime.now(timezone.utc)
-                global _hundred_x_cooldown_at
-                if not _hundred_x_cooldown_at or (now - _hundred_x_cooldown_at) >= timedelta(minutes=cfg.hundred_x_cooldown_min):
+                                if not _hundred_x_cooldown_at or (now - _hundred_x_cooldown_at) >= timedelta(minutes=cfg.hundred_x_cooldown_min):
                     await route_100x_alert(t); _hundred_x_cooldown_at = now
 
     # ---------- Tertiary: Pullbacks & Reversals ----------
@@ -860,6 +901,28 @@ async def scan_loop():
             t.knight = "Orion Vellum"
             await trade_manager.open_trade(t)
             await route_battle_signal(t)
+
+    
+    # ---------- Manage exits for active trades (TP2 / SL) ----------
+    to_check = list(trade_manager.active.values())
+    for t in to_check:
+        if t.status != TradeStatus.OPEN:
+            continue
+        # Use high/low of last bar for intrabar hits
+        if t.direction == TradeDirection.LONG:
+            if h >= (t.tp2 or float('inf')):
+                await _close_trade_and_notify(t, t.tp2, "TP2 Hit")
+                continue
+            if l <= (t.sl or 0):
+                await _close_trade_and_notify(t, t.sl, "Stop Loss Hit")
+                continue
+        else:  # SHORT
+            if l <= (t.tp2 or 0):
+                await _close_trade_and_notify(t, t.tp2, "TP2 Hit")
+                continue
+            if h >= (t.sl or float('inf')):
+                await _close_trade_and_notify(t, t.sl, "Stop Loss Hit")
+                continue
 
     # ---------- Battleground heartbeat ----------
     await route_battleground_report(c, levels)
