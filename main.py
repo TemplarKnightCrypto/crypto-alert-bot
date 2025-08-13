@@ -1,5 +1,5 @@
 # ============================================
-# Control Tower - Complete v11.11.3 + Trade Closure System
+# Control Tower - Complete v11.11.4 + Trade Closure System
 # ============================================
 
 import os
@@ -26,6 +26,171 @@ from dotenv import load_dotenv
 import discord
 from discord.ext import commands, tasks
 from trade_signal_engine import TradeSignalEngine
+
+# ===== Trade Signal Engine (inlined) =====
+import time
+from dataclasses import dataclass
+from typing import Dict, Optional, Tuple
+from collections import defaultdict
+
+@dataclass
+class Signal:
+    pair: str
+    side: str           # "long" or "short"
+    level_name: str     # "H5" or "L5"
+    level_price: float
+    entry: float
+    sl: float
+    tp1: float
+    tp2: float
+    candle_ts: int
+    kind: str           # "breakout" or "continuation"
+    reason: str
+
+class TradeSignalEngine:
+    def __init__(self, cooldown_s: int = 1800):
+        self.cooldown_s = cooldown_s
+        self.seen_ids = set()
+        self.next_ok = defaultdict(lambda: 0)  # (pair, side) -> unix_ts
+
+    @staticmethod
+    def _get_ts(row) -> int:
+        for k in ("timestamp", "time", "ts"):
+            if k in row.index:
+                v = row[k]
+                try:
+                    if hasattr(v, "to_pydatetime"):
+                        return int(v.to_pydatetime().timestamp())
+                except Exception:
+                    pass
+                try:
+                    if hasattr(v, "timestamp"):
+                        return int(v.timestamp())
+                except Exception:
+                    pass
+                try:
+                    return int(v)
+                except Exception:
+                    pass
+        return int(time.time())
+
+    @staticmethod
+    def _avg_vol(df, lookback: int = 20) -> float:
+        if "volume" not in df.columns or len(df) < lookback + 1:
+            return 0.0
+        return float(df["volume"].iloc[-(lookback+1):-1].mean() or 0.0)
+
+    @staticmethod
+    def _atr(df, period: int = 14) -> Optional[float]:
+        if len(df) < period + 1:
+            return None
+        h = df["high"].to_numpy()
+        l = df["low"].to_numpy()
+        c = df["close"].to_numpy()
+        trs = []
+        for i in range(1, len(df)):
+            tr = max(h[i]-l[i], abs(h[i]-c[i-1]), abs(l[i]-c[i-1]))
+            trs.append(tr)
+        if len(trs) < period:
+            return None
+        return float(sum(trs[-period:]) / period)
+
+    def _is_confirmed_breakout(self, row, level: float, avg_vol: float,
+                               side: str, body_ratio: float = 0.5, vol_mult: float = 1.2) -> bool:
+        open_, high, low, close = float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"])
+        vol = float(row["volume"]) if "volume" in row.index else 0.0
+        if high == low:
+            return False
+        body_ok = abs(close - open_) / max(1e-9, (high - low)) >= body_ratio
+        vol_ok  = (avg_vol <= 0.0) or (vol >= vol_mult * avg_vol)
+        close_ok = close > level if side == "long" else close < level
+        return bool(close_ok and body_ok and vol_ok)
+
+    def _continuation_ready(self, recent_df, level: float, side: str, max_bars: int = 3) -> Tuple[bool, str]:
+        if len(recent_df) < max_bars + 1:
+            return (False, "not_enough_bars")
+        pulls = 0
+        for i in range(-max_bars-1, -1):
+            r = recent_df.iloc[i]
+            if side == "long":
+                if float(r["low"]) < level:
+                    return (False, "lost_level")
+                if float(r["close"]) < float(r["open"]):
+                    pulls += 1
+            else:
+                if float(r["high"]) > level:
+                    return (False, "lost_level")
+                if float(r["close"]) > float(r["open"]):
+                    pulls += 1
+        return (pulls >= 1, f"pulls={pulls}")
+
+    def _can_alert(self, pair: str, side: str, level_name: str, candle_ts: int, now_ts: int) -> bool:
+        sig_id = f"{pair}:{side}:{level_name}:{candle_ts}"
+        if sig_id in self.seen_ids:
+            return False
+        if now_ts < self.next_ok[(pair, side)]:
+            return False
+        self.seen_ids.add(sig_id)
+        self.next_ok[(pair, side)] = now_ts + self.cooldown_s
+        return True
+
+    def get_signal(self, df, levels: Dict[str, float], *, pair: str, now_ts: Optional[int] = None) -> Optional[Signal]:
+        import pandas as pd
+        assert isinstance(df, pd.DataFrame), "df must be a pandas DataFrame"
+        if not levels or ("H5" not in levels and "L5" not in levels) or len(df) < 25:
+            return None
+
+        now_ts = now_ts or int(time.time())
+        c = df.iloc[-1]
+        p = df.iloc[-2]
+        cts = self._get_ts(c)
+        avg_vol = self._avg_vol(df)
+
+        h5 = levels.get("H5")
+        l5 = levels.get("L5")
+        atr = self._atr(df) or 0.0
+
+        # LONG breakout
+        if h5 is not None and float(p["close"]) <= h5 and float(c["close"]) > h5:
+            if self._is_confirmed_breakout(c, h5, avg_vol, side="long"):
+                if self._can_alert(pair, "long", "H5", cts, now_ts):
+                    entry = float(c["close"])
+                    sl = min(entry - 0.01 * entry, h5 - 0.2 * (atr or entry*0.005))
+                    tp1 = entry * 1.015
+                    tp2 = entry * 1.03
+                    return Signal(pair, "long", "H5", float(h5), entry, float(sl), float(tp1), float(tp2), cts, "breakout", "close+body+volume")
+
+        # SHORT breakout
+        if l5 is not None and float(p["close"]) >= l5 and float(c["close"]) < l5:
+            if self._is_confirmed_breakout(c, l5, avg_vol, side="short"):
+                if self._can_alert(pair, "short", "L5", cts, now_ts):
+                    entry = float(c["close"])
+                    sl = max(entry + 0.01 * entry, l5 + 0.2 * (atr or entry*0.005))
+                    tp1 = entry * 0.985
+                    tp2 = entry * 0.97
+                    return Signal(pair, "short", "L5", float(l5), entry, float(sl), float(tp1), float(tp2), cts, "breakout", "close+body+volume")
+
+        # LONG continuation above H5
+        if h5 is not None and float(c["close"]) > h5 and float(p["close"]) > h5:
+            ok, why = self._continuation_ready(df.tail(6), h5, "long")
+            if ok and self._can_alert(pair, "long", "H5", cts, now_ts):
+                entry = float(c["close"])
+                sl = max(h5, entry - 0.012 * entry)
+                tp1 = entry * 1.015
+                tp2 = entry * 1.03
+                return Signal(pair, "long", "H5", float(h5), entry, float(sl), float(tp1), float(tp2), cts, "continuation", f"pullback_ok ({why})")
+
+        # SHORT continuation below L5
+        if l5 is not None and float(c["close"]) < l5 and float(p["close"]) < l5:
+            ok, why = self._continuation_ready(df.tail(6), l5, "short")
+            if ok and self._can_alert(pair, "short", "L5", cts, now_ts):
+                entry = float(c["close"])
+                sl = min(l5, entry + 0.012 * entry)
+                tp1 = entry * 0.985
+                tp2 = entry * 0.97
+                return Signal(pair, "short", "L5", float(l5), entry, float(sl), float(tp1), float(tp2), cts, "continuation", f"pullback_ok ({why})")
+
+        return None
 
 
 # TA imports with fallbacks
@@ -939,7 +1104,7 @@ trade_manager = None
 mdp = None
 
 # Trade signal engine (cooldown is env-tunable)
-SIGNAL_COOLDOWN_S = int(os.getenv("SIGNAL_COOLDOWN_S", "1800"))  # 30 min default
+SIGNAL_COOLDOWN_S = int(os.getenv("SIGNAL_COOLDOWN_S", "450"))
 signal_engine = TradeSignalEngine(cooldown_s=SIGNAL_COOLDOWN_S)
 
 def status_embed() -> discord.Embed:
