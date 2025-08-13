@@ -1,5 +1,5 @@
 # ============================================
-# Control Tower - Complete v11.11.9.1
+# Control Tower - Complete v11.11.9.2
 # ============================================
 
 import os
@@ -403,87 +403,200 @@ class DatabaseManager:
                     time TEXT
                 );
                 """)
+                # Helpful indices for performance queries
+                c.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);")
+                c.execute("CREATE INDEX IF NOT EXISTS idx_trades_closed_at ON trades(closed_at);")
                 conn.commit()
         except Exception as e:
-            log.error(f"Database schema error: {e}")
+            log.exception(f"Database schema error: {e}")
+
+    # ---- JSON sanitation for 'extra' / enhanced_data ----
+    @staticmethod
+    def _json_dumps_safe(obj) -> str:
+        from enum import Enum
+        from datetime import datetime, date
+        try:
+            import numpy as np
+        except Exception:
+            np = None
+        try:
+            import pandas as pd
+        except Exception:
+            pd = None
+
+        def _default(o):
+            # Enums (e.g., TrailMode)
+            if isinstance(o, Enum):
+                v = getattr(o, "value", None)
+                return v if isinstance(v, (str, int, float, bool)) else getattr(o, "name", str(o))
+            # numpy scalar -> Python scalar
+            if np is not None and isinstance(o, np.generic):
+                return o.item()
+            # pandas Timestamp -> ISO
+            if pd is not None and isinstance(o, pd.Timestamp):
+                try:
+                    return o.to_pydatetime().isoformat()
+                except Exception:
+                    return str(o)
+            # datetime/date -> ISO
+            if isinstance(o, (datetime, date)):
+                try:
+                    return o.isoformat()
+                except Exception:
+                    return str(o)
+            # Fallback: string
+            return str(o)
+
+        # Ensure NaN/inf don't break JSON consumers
+        def _replace_special_numbers(x):
+            try:
+                # floats only
+                if isinstance(x, float):
+                    if x != x or x == float("inf") or x == float("-inf"):
+                        return None
+                return x
+            except Exception:
+                return x
+
+        # Shallow walk to clean top-level floats; json default handles nested via _default
+        if isinstance(obj, dict):
+            obj = {k: _replace_special_numbers(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            obj = [_replace_special_numbers(v) for v in obj]
+
+        return json.dumps(obj, default=_default)
 
     def save_trade(self, t):
         try:
+            status_text = getattr(getattr(t, "status", None), "name", None)
+            if status_text is None:
+                # allow plain string status or default to OPEN
+                status_text = str(getattr(t, "status", "OPEN"))
+
+            trail_mode_text = None
+            tm = getattr(t, "trail_mode", None)
+            if tm is not None:
+                # Enum safe: prefer .value if it's simple, else name, else str
+                trail_mode_text = getattr(tm, "value", None)
+                if not isinstance(trail_mode_text, (str, int, float, bool)):
+                    trail_mode_text = getattr(tm, "name", str(tm))
+            else:
+                # default to NONE if your enum has it; otherwise empty
+                try:
+                    trail_mode_text = TrailMode.NONE.value  # will work if TrailMode is in scope
+                except Exception:
+                    trail_mode_text = "NONE"
+
+            extra_json = self._json_dumps_safe(getattr(t, "enhanced_data", {}) or {})
+
             with sqlite3.connect(self.path) as conn:
                 c = conn.cursor()
                 c.execute("""
-                INSERT OR REPLACE INTO trades(id, asset, direction, entry, sl, tp1, tp2, status, opened_at, closed_at, be_active, trail_mode, extra, tp1_done, partial_fraction, exit_reason, exit_price, pnl_pct)
+                INSERT OR REPLACE INTO trades(
+                    id, asset, direction, entry, sl, tp1, tp2, status,
+                    opened_at, closed_at, be_active, trail_mode, extra,
+                    tp1_done, partial_fraction, exit_reason, exit_price, pnl_pct
+                )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """, (
-                    t.id, t.asset, t.direction.name, t.entry_price, t.sl, t.tp1, t.tp2, t.status.name,
-                    t.opened_at.isoformat() if t.opened_at else None,
-                    t.closed_at.isoformat() if t.closed_at else None,
-                    1 if t.be_active else 0,
-                    t.trail_mode.value if t.trail_mode else TrailMode.NONE.value,
-                    json.dumps(t.enhanced_data or {}),
-                    1 if t.tp1_done else 0,
-                    t.partial_fraction,
-                    getattr(t, 'exit_reason', None),
-                    getattr(t, 'exit_price', None),
-                    getattr(t, 'pnl_pct', None)
+                    t.id,
+                    t.asset,
+                    getattr(t.direction, "name", str(t.direction)),
+                    float(t.entry_price),
+                    float(t.sl),
+                    float(t.tp1),
+                    float(t.tp2),
+                    status_text,
+                    (t.opened_at.isoformat() if getattr(t, "opened_at", None) else None),
+                    (t.closed_at.isoformat() if getattr(t, "closed_at", None) else None),
+                    1 if getattr(t, "be_active", False) else 0,
+                    trail_mode_text,
+                    extra_json,
+                    1 if getattr(t, "tp1_done", False) else 0,
+                    float(getattr(t, "partial_fraction", 0.0)),
+                    getattr(t, "exit_reason", None),
+                    (float(getattr(t, "exit_price", None)) if getattr(t, "exit_price", None) is not None else None),
+                    (float(getattr(t, "pnl_pct", None)) if getattr(t, "pnl_pct", None) is not None else None)
                 ))
                 conn.commit()
         except Exception as e:
-            log.error(f"Save trade error: {e}")
+            log.exception(f"Save trade error: {e}")
 
     def close_trade(self, trade_id: str, closed_at: datetime, exit_reason: str = None, exit_price: float = None, pnl_pct: float = None):
         try:
             with sqlite3.connect(self.path) as conn:
                 c = conn.cursor()
                 c.execute("""
-                UPDATE trades SET status=?, closed_at=?, exit_reason=?, exit_price=?, pnl_pct=? WHERE id=?
-                """, ("CLOSED", closed_at.isoformat(), exit_reason, exit_price, pnl_pct, trade_id))
+                UPDATE trades
+                   SET status=?,
+                       closed_at=?,
+                       exit_reason=?,
+                       exit_price=?,
+                       pnl_pct=?
+                 WHERE id=?
+                """, (
+                    "CLOSED",
+                    closed_at.isoformat() if closed_at else datetime.now(timezone.utc).isoformat(),
+                    exit_reason,
+                    (float(exit_price) if exit_price is not None else None),
+                    (float(pnl_pct) if pnl_pct is not None else None),
+                    trade_id
+                ))
                 conn.commit()
         except Exception as e:
-            log.error(f"Close trade error: {e}")
+            log.exception(f"Close trade error: {e}")
 
     def add_partial(self, trade_id: str, fraction: float, price: float, time: datetime):
         try:
             with sqlite3.connect(self.path) as conn:
                 c = conn.cursor()
                 c.execute("""
-                INSERT INTO partial_exits(trade_id, fraction, price, time) VALUES (?,?,?,?)
-                """, (trade_id, fraction, price, time.isoformat()))
+                INSERT INTO partial_exits(trade_id, fraction, price, time)
+                VALUES (?,?,?,?)
+                """, (
+                    trade_id,
+                    float(fraction),
+                    float(price),
+                    (time.isoformat() if time else datetime.now(timezone.utc).isoformat())
+                ))
                 conn.commit()
         except Exception as e:
-            log.error(f"Add partial error: {e}")
+            log.exception(f"Add partial error: {e}")
 
     def get_trade_performance(self) -> Dict[str, Any]:
         """Get trade performance statistics"""
         try:
             with sqlite3.connect(self.path) as conn:
                 c = conn.cursor()
-                
-                # Basic stats
+
                 c.execute("SELECT COUNT(*) FROM trades WHERE status='CLOSED'")
-                total_closed = c.fetchone()[0]
-                
+                total_closed_row = c.fetchone()
+                total_closed = total_closed_row[0] if total_closed_row and total_closed_row[0] is not None else 0
+
                 c.execute("SELECT COUNT(*) FROM trades WHERE status='CLOSED' AND pnl_pct > 0")
-                winners = c.fetchone()[0]
-                
+                winners_row = c.fetchone()
+                winners = winners_row[0] if winners_row and winners_row[0] is not None else 0
+
                 c.execute("SELECT AVG(pnl_pct) FROM trades WHERE status='CLOSED' AND pnl_pct IS NOT NULL")
-                avg_pnl = c.fetchone()[0] or 0
-                
+                avg_pnl_row = c.fetchone()
+                avg_pnl = float(avg_pnl_row[0]) if (avg_pnl_row and avg_pnl_row[0] is not None) else 0.0
+
                 c.execute("SELECT SUM(pnl_pct) FROM trades WHERE status='CLOSED' AND pnl_pct IS NOT NULL")
-                total_pnl = c.fetchone()[0] or 0
-                
-                win_rate = (winners / total_closed * 100) if total_closed > 0 else 0
-                
+                total_pnl_row = c.fetchone()
+                total_pnl = float(total_pnl_row[0]) if (total_pnl_row and total_pnl_row[0] is not None) else 0.0
+
+                win_rate = (winners / total_closed * 100.0) if total_closed > 0 else 0.0
+
                 return {
                     "total_trades": total_closed,
                     "winners": winners,
                     "losers": total_closed - winners,
                     "win_rate": win_rate,
                     "avg_pnl": avg_pnl,
-                    "total_pnl": total_pnl
+                    "total_pnl": total_pnl,
                 }
         except Exception as e:
-            log.error(f"Performance stats error: {e}")
+            log.exception(f"Performance stats error: {e}")
             return {}
 
 # -------- Trade Model --------
@@ -521,6 +634,67 @@ class GoogleSheetsIntegration:
         self.url = url
         self.token = token
 
+    # ---- JSON sanitation helpers ----
+    @staticmethod
+    def _enum_to_str(e):
+        try:
+            v = e.value  # prefer enum value if it's simple
+            return str(v) if isinstance(v, (str, int, float, bool)) else str(e.name)
+        except Exception:
+            return str(e)
+
+    @staticmethod
+    def _json_sanitize(obj):
+        # Avoid importing extra libs here; rely on duck-typing
+        from enum import Enum as _Enum
+        import pandas as _pd
+        import numpy as _np
+        from datetime import datetime as _dt, date as _date
+
+        if obj is None:
+            return None
+
+        # dict-like
+        if isinstance(obj, dict):
+            return {str(k): GoogleSheetsIntegration._json_sanitize(v) for k, v in obj.items()}
+
+        # list/tuple/set
+        if isinstance(obj, (list, tuple, set)):
+            return [GoogleSheetsIntegration._json_sanitize(v) for v in obj]
+
+        # enums
+        if isinstance(obj, _Enum):
+            return GoogleSheetsIntegration._enum_to_str(obj)
+
+        # pandas Timestamp / datetime / date
+        if isinstance(obj, _pd.Timestamp):
+            try:
+                return obj.to_pydatetime().isoformat()
+            except Exception:
+                return str(obj)
+        if isinstance(obj, (_dt, _date)):
+            try:
+                return obj.isoformat()
+            except Exception:
+                return str(obj)
+
+        # numpy scalars
+        if isinstance(obj, _np.generic):
+            return obj.item()
+
+        # pandas/numpy NaN/inf handling
+        if isinstance(obj, float):
+            # NaN or inf -> None so Apps Script JSON.parse is happy
+            if obj != obj or obj == float("inf") or obj == float("-inf"):
+                return None
+
+        # already safe: str/int/bool/float
+        if isinstance(obj, (str, int, bool, float)):
+            return obj
+
+        # fallback to string
+        return str(obj)
+
     async def _post(self, session: aiohttp.ClientSession, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         POST to Apps Script with real retries on non-2xx and exceptions.
@@ -530,9 +704,12 @@ class GoogleSheetsIntegration:
             log.warning("[Sheets] not configured - skipping POST")
             return {"status": "skipped", "reason": "no_config"}
 
-        # Store payload for debugging
+        # Sanitize for JSON (Enums, numpy/pandas, timestamps, NaN, etc.)
+        safe_payload = self._json_sanitize(payload)
+
+        # Store payload for debugging (already sanitized)
         global last_sheets_payload
-        last_sheets_payload = payload.copy()
+        last_sheets_payload = safe_payload.copy() if isinstance(safe_payload, dict) else safe_payload
 
         headers = {"x-app-secret": self.token, "content-type": "application/json"}
         log.info(f"[Sheets] POST -> {self.url}")
@@ -543,7 +720,7 @@ class GoogleSheetsIntegration:
         for attempt in range(1, 4):
             try:
                 timeout = aiohttp.ClientTimeout(total=20)
-                async with session.post(self.url, headers=headers, json=payload, timeout=timeout) as resp:
+                async with session.post(self.url, headers=headers, json=safe_payload, timeout=timeout) as resp:
                     txt = await resp.text()
                     last_status, last_body = resp.status, txt
                     if 200 <= resp.status < 300:
@@ -593,7 +770,6 @@ class GoogleSheetsIntegration:
         })
 
         # --- Extra standardized alert fields from enhanced_data ---
-        # Prefer rr_tp1/rr_tp2 over a single rr_ratio
         extra = {
             "rr_tp1":            ed.get("rr_tp1"),
             "rr_tp2":            ed.get("rr_tp2"),
@@ -608,7 +784,7 @@ class GoogleSheetsIntegration:
             "cooldown_s":        ed.get("cooldown_s"),
             "be_after_tp1":      ed.get("be_after_tp1"),
             "be_offset_pct":     ed.get("be_offset_pct"),
-            "trail_mode":        ed.get("trail_mode"),
+            "trail_mode":        ed.get("trail_mode"),   # may be Enum; sanitizer will convert
             "trail_atr_mult":    ed.get("trail_atr_mult"),
         }
         payload.update({k: v for k, v in extra.items() if v is not None})
@@ -788,7 +964,6 @@ class GoogleSheetsIntegration:
 
         log.info(f"[Sheets] Rehydrated {len(out)} trade(s)")
         return out
-
 
 # -------- Trade Manager --------
 class TradeManager:
@@ -1391,6 +1566,112 @@ def build_trade_alert_data(df: pd.DataFrame, t: "TradeData", sig) -> Dict[str, A
         "trail_atr_mult": getattr(cfg, "trail_atr_mult", None),
     }
 
+def normalize_enhanced_alert_fields(ed_raw: Dict[str, Any],
+                                    df: pd.DataFrame,
+                                    t: "TradeData",
+                                    sig) -> Dict[str, Any]:
+    """
+    Map whatever keys your calculators produce into the canonical fields
+    that Sheets/Discord expect. Also enrich with ts/ATR/RR/engine params.
+    """
+    ed_raw = ed_raw or {}
+
+    # --- map common aliases -> canonical names ---
+    def pick(*names, default=None):
+        for n in names:
+            if n in ed_raw and ed_raw[n] is not None:
+                return ed_raw[n]
+        return default
+
+    rsi_level     = pick("rsi_level", "rsi14", "rsi", default=50.0)
+    volume_ratio  = pick("volume_ratio", "vol_ratio", "volumeMult", default=1.0)
+    market_status = pick("market_status", "regime", default="NORMAL")
+    vwap_position = pick("vwap_position", "vwapPos", default="Above")
+    macd_status   = pick("macd_status", "macd", default="Neutral")
+    market_bias   = pick("market_bias", "bias", default="Neutral")
+    risk_pct      = pick("risk_pct", "risk", default=0.0)
+    enhanced_score= pick("enhanced_score", "score", default=t.score or 0)
+    tier          = pick("tier", default="A")
+
+    # Risk/Reward (robust vs zero distance)
+    r     = abs(float(t.entry_price) - float(t.sl))
+    denom = r if r > 1e-9 else 1e-9
+    rr_tp1 = abs(float(t.tp1) - float(t.entry_price)) / denom
+    rr_tp2 = abs(float(t.tp2) - float(t.entry_price)) / denom
+
+    # Candle time (prefer df['dt'] then 'time')
+    try:
+        last = df.iloc[-1]
+        if "dt" in last:
+            candle_iso = str(last["dt"])
+        elif "time" in last:
+            candle_iso = pd.to_datetime(int(last["time"]), unit="s", utc=True).isoformat()
+        else:
+            candle_iso = datetime.now(timezone.utc).isoformat()
+    except Exception:
+        candle_iso = datetime.now(timezone.utc).isoformat()
+
+    # ATR14 (optional)
+    def _atr(arr: pd.DataFrame, period: int = 14):
+        if arr is None or len(arr) < period + 1:
+            return None
+        h, l, c = arr["high"].to_numpy(), arr["low"].to_numpy(), arr["close"].to_numpy()
+        trs = [max(h[i]-l[i], abs(h[i]-c[i-1]), abs(l[i]-c[i-1])) for i in range(1, len(arr))]
+        if len(trs) < period:
+            return None
+        return float(sum(trs[-period:]) / period)
+
+    atr14 = _atr(df, 14)
+
+    # Engine/strategy params (make sure these are present)
+    engine_body_ratio = pick("engine_body_ratio", default=0.5)
+    engine_vol_mult   = pick("engine_vol_mult", default=1.2)
+    cooldown_s        = pick("cooldown_s", default=getattr(signal_engine, "cooldown_s", None))
+
+    # BE/trailing settings
+    be_after_tp1  = pick("be_after_tp1", default=getattr(cfg, "be_after_tp1", True))
+    be_offset_pct = pick("be_offset_pct", default=getattr(cfg, "be_offset_pct", 0.0))
+    trail_mode    = pick("trail_mode", default=getattr(cfg, "trail_mode", "off"))
+    trail_atr_mult= pick("trail_atr_mult", default=getattr(cfg, "trail_atr_mult", None))
+
+    # Signal info
+    signal_kind   = getattr(sig, "kind", pick("signal_kind"))
+    signal_reason = getattr(sig, "reason", pick("signal_reason", "reason"))
+    level_price   = getattr(sig, "level_price", getattr(t, "level_price", pick("level_price")))
+    timeframe_min = getattr(cfg, "interval_min", getattr(cfg, "tf_min", pick("timeframe_min")))
+
+    return {
+        # canonical “context” fields expected by send_trade_entry
+        "enhanced_score": enhanced_score,
+        "tier": tier,
+        "rsi_level": float(rsi_level),
+        "volume_ratio": float(volume_ratio),
+        "market_status": str(market_status),
+        "vwap_position": str(vwap_position),
+        "macd_status": str(macd_status),
+        "market_bias": str(market_bias),
+        "risk_pct": float(risk_pct),
+
+        # standardized alert fields
+        "rr_tp1": round(rr_tp1, 3),
+        "rr_tp2": round(rr_tp2, 3),
+        "signal_kind": signal_kind,
+        "signal_reason": signal_reason,
+        "level_price": float(level_price) if level_price is not None else None,
+        "atr14": atr14,
+        "candle_iso": candle_iso,
+        "timeframe_min": timeframe_min,
+
+        # engine thresholds & behavior flags
+        "engine_body_ratio": float(engine_body_ratio) if engine_body_ratio is not None else None,
+        "engine_vol_mult": float(engine_vol_mult) if engine_vol_mult is not None else None,
+        "cooldown_s": cooldown_s,
+        "be_after_tp1": bool(be_after_tp1),
+        "be_offset_pct": float(be_offset_pct),
+        "trail_mode": trail_mode,          # can be Enum; Sheets class sanitizes
+        "trail_atr_mult": trail_atr_mult,
+    }
+
 def calc_camarilla(df: pd.DataFrame) -> Dict[str, float]:
     try:
         if len(df) < 2:
@@ -1763,6 +2044,7 @@ def create_bot():
             df = await mdp.fetch_ohlc(100)
             if df is None or df.empty:
                 return
+
             df = add_indicators(df)
             levels = calc_camarilla(df)
             if not levels:
@@ -1771,7 +2053,7 @@ def create_bot():
             latest = df.iloc[-1]
             current_price = float(latest["close"])
 
-            # 1) Monitor existing trades FIRST (uses BE move & trailing)
+            # 1) Monitor existing trades FIRST (BE move & trailing handled inside)
             await monitor_active_trades(df, current_price)
 
             # 2) Generate new signals via the engine
@@ -1789,14 +2071,16 @@ def create_bot():
 
             latest = df.iloc[-1]
             direction_str = "Long" if sig.side == "long" else "Short"
-            enhanced_data = await calculate_enhanced_metrics(df, latest, sig.level_price, direction_str)
+
+            # Base metrics from your calculator (may use various key names)
+            base_ed = await calculate_enhanced_metrics(df, latest, sig.level_price, direction_str)
 
             timestamp = datetime.now(timezone.utc)
             trade_id = ("L" if sig.side == "long" else "S") + timestamp.strftime("%m%d%H%M")
 
             t = TradeData(
                 id=trade_id,
-                asset=cfg.pair.replace("USD",""),
+                asset=cfg.pair.replace("USD", ""),
                 direction=TradeDirection.LONG if sig.side == "long" else TradeDirection.SHORT,
                 entry_price=float(sig.entry),
                 sl=float(sig.sl),
@@ -1805,15 +2089,15 @@ def create_bot():
                 level_name=sig.level_name,
                 level_price=float(sig.level_price),
                 knight="Sir Leonis" if sig.kind == "breakout" else "Sir Lucien",
-                rating=enhanced_data.get("tier", "A"),
-                score=enhanced_data.get("enhanced_score", 4),
+                rating=base_ed.get("tier", "A"),
+                score=base_ed.get("enhanced_score", 4),
                 trade_type=f"{sig.level_name}_{sig.kind.capitalize()}",
-                enhanced_data={**enhanced_data, "reason": sig.reason}
+                enhanced_data={"reason": sig.reason}  # will be expanded by normalizer below
             )
 
-            # enrich with standardized alert data (so Sheets + Discord see the same fields)
-            alert = build_trade_alert_data(df, t, sig)
-            t.enhanced_data = {**(t.enhanced_data or {}), **alert}
+            # ✅ Normalize + enrich so Sheets/Discord get fully-populated, real-time fields
+            ed_norm = normalize_enhanced_alert_fields(base_ed, df, t, sig)
+            t.enhanced_data = ed_norm
 
             await trade_manager.open_trade(t)
 
@@ -1871,6 +2155,7 @@ def create_bot():
             log.error(f"Bot ready error: {e}")
 
     return bot
+
 
 def main():
     global cfg, bot, db, sheets, trade_manager, mdp
