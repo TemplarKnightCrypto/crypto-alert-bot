@@ -1,5 +1,5 @@
 # ============================================
-# Control Tower - Complete v11.11 + Trade Closure System
+# Control Tower - Complete v11.11.1 + Trade Closure System
 # ============================================
 
 import os
@@ -174,7 +174,7 @@ class BotConfig:
             trail_atr_mult = 3.0
             
         try:
-            chand_lookback = int(os.getenv("CHAN_LOOKBACK", "22"))
+            chand_lookback = int(os.getenv("CHAN_LOOKBOOK", "22"))
         except (ValueError, TypeError):
             chand_lookback = 22
             
@@ -354,1117 +354,6 @@ class TradeData:
     exit_price: Optional[float] = None
     pnl_pct: Optional[float] = None
 
-# -------- Enhanced Alert Manager --------
-class AlertManager:
-    def __init__(self, bot, config: BotConfig):
-        self.bot = bot
-        self.config = config
-        # Initialize all datetime fields as timezone-aware from the start
-        utc_min = datetime.min.replace(tzinfo=timezone.utc)
-        self.last_scorecard_time = utc_min
-        self.last_100x_time = utc_min
-        self.cooldowns = defaultdict(lambda: utc_min)
-        self.battleground_cooldown = utc_min
-        # Use defaultdict with lambda to ensure all new keys get timezone-aware values
-        self.enhanced_cooldowns = {
-            "setup": defaultdict(lambda: utc_min),
-            "warning": defaultdict(lambda: utc_min), 
-            "battleground": utc_min
-        }
-        self.setup_tracking = {}
-        self.setup_success_rates = defaultdict(lambda: {"attempts": 0, "conversions": 0})
-        
-    def _ensure_timezone_aware(self, dt: Optional[datetime]) -> datetime:
-        """Ensure datetime is timezone-aware (UTC)"""
-        if dt is None:
-            return datetime.min.replace(tzinfo=timezone.utc)
-        if isinstance(dt, datetime) and dt.tzinfo is None:
-            return dt.replace(tzinfo=timezone.utc)
-        return dt if isinstance(dt, datetime) else datetime.min.replace(tzinfo=timezone.utc)
-    
-    def _safe_time_diff(self, dt1: datetime, dt2: Optional[datetime]) -> float:
-        """Safely calculate time difference in seconds"""
-        try:
-            dt1_aware = self._ensure_timezone_aware(dt1)
-            dt2_aware = self._ensure_timezone_aware(dt2)
-            return (dt1_aware - dt2_aware).total_seconds()
-        except Exception as e:
-            log.warning(f"Safe time diff error: {e}")
-            return 999999  # Return large number to avoid cooldown issues
-    
-    def _get_utc_now(self) -> datetime:
-        """Get current UTC time - always timezone aware"""
-        return datetime.now(timezone.utc)
-        
-    def _set_cooldown(self, category: str, key: str, time_value: Optional[datetime] = None):
-        """Safely set a cooldown with timezone awareness"""
-        if time_value is None:
-            time_value = self._get_utc_now()
-        time_value = self._ensure_timezone_aware(time_value)
-        
-        if category in self.enhanced_cooldowns and isinstance(self.enhanced_cooldowns[category], dict):
-            self.enhanced_cooldowns[category][key] = time_value
-        elif category == "battleground":
-            self.enhanced_cooldowns["battleground"] = time_value
-        
-    async def send_market_scorecard(self, df: pd.DataFrame, levels: Dict[str, float]):
-        """📜 Send enhanced market scorecard to Scribes Keep"""
-        try:
-            now = datetime.now(timezone.utc)
-            if self.last_scorecard_time and (now - self.last_scorecard_time).total_seconds() < 900:
-                return
-                
-            channel = self.bot.get_channel(self.config.channels.scribes_keep_id)
-            if not channel:
-                return
-                
-            latest = df.iloc[-1]
-            price = float(latest["close"])
-            rsi = float(latest.get("rsi", 50))
-            volume = float(latest["volume"])
-            avg_volume = float(df["volume"].tail(10).mean()) if len(df) >= 10 else volume
-            
-            # Enhanced scoring with market context
-            score, reasons = self._evaluate_scorecard(df, levels)
-            
-            # Market bias determination
-            if score >= 5:
-                bias = "🟢 Strong Bullish"
-                color = discord.Color.green()
-            elif score >= 4:
-                bias = "🟡 Moderate Bullish" 
-                color = discord.Color.gold()
-            elif score >= 3:
-                bias = "⚪ Neutral"
-                color = discord.Color.light_grey()
-            else:
-                bias = "🔴 Bearish"
-                color = discord.Color.red()
-                
-            # Find closest level with enhanced analysis
-            closest_level = min(levels.items(), key=lambda x: abs(price - x[1]))
-            level_name, level_price = closest_level
-            distance = price - level_price
-            distance_pct = (distance / price) * 100
-            
-            embed = discord.Embed(
-                title="📜 ETH Market Chronicle",
-                description="*The scribes record the current state of the battlefield*",
-                color=color,
-                timestamp=now
-            )
-            
-            embed.add_field(
-                name="📈 Current Price",
-                value=f"**${price:.2f}**",
-                inline=True
-            )
-            embed.add_field(
-                name="🎯 Level in Focus", 
-                value=f"**{level_name}: ${level_price:.2f}**\n{distance_pct:+.2f}% (${distance:+.2f})",
-                inline=True
-            )
-            embed.add_field(
-                name="🧠 Market Bias",
-                value=f"**{bias}**\nScore: {score}/6",
-                inline=True
-            )
-            
-            # Enhanced technical indicators with context
-            rsi_emoji = "🟢" if 45 <= rsi <= 75 else "🔴" if rsi > 80 or rsi < 20 else "⚪"
-            volume_ratio = volume / avg_volume if avg_volume > 0 else 1.0
-            volume_emoji = "🟢" if volume_ratio > 1.2 else "🔴" if volume_ratio < 0.8 else "⚪"
-            
-            indicators_text = (
-                f"{rsi_emoji} **RSI:** {rsi:.1f}\n"
-                f"{volume_emoji} **Volume:** {volume_ratio:.1f}x avg"
-            )
-            embed.add_field(name="📊 Technical Indicators", value=indicators_text, inline=False)
-            
-            if reasons:
-                embed.add_field(name="⚖️ Confluence Analysis", value="\n".join(reasons), inline=False)
-            
-            # Market regime analysis
-            market_regime = self._detect_market_regime(df)
-            embed.add_field(name="🌊 Market Regime", value=market_regime, inline=True)
-            
-            await channel.send(embed=embed)
-            self.last_scorecard_time = now
-            
-        except Exception as e:
-            log.error(f"Market scorecard error: {e}")
-    
-    async def send_proximity_warning(self, df: pd.DataFrame, levels: Dict[str, float]):
-        """🕰️ Send enhanced proximity warnings to Knights Watch"""
-        try:
-            channel = self.bot.get_channel(self.config.channels.knights_watch_id)
-            if not channel:
-                return
-                
-            latest = df.iloc[-1]
-            price = float(latest["close"])
-            now = self._get_utc_now()
-            
-            # Enhanced ATR-based distance calculation
-            atr_value = self._calculate_atr(df)
-            distance_threshold = price * 0.005  # 0.5% of price
-            
-            for level_name, level_price in levels.items():
-                if level_name == "P":  # Skip pivot
-                    continue
-                    
-                distance = abs(price - level_price)
-                distance_pct = (distance / price) * 100
-                
-                # Only alert if within dynamic threshold
-                if distance > distance_threshold:
-                    continue
-                    
-                # Determine warning stage
-                if distance_pct < 0.1:
-                    stage = "AT_LEVEL"
-                    stage_emoji = "🎯"
-                    urgency = "🚨 CRITICAL"
-                    color = discord.Color.red()
-                    cooldown_minutes = 3
-                elif distance_pct < 0.25:
-                    stage = "VERY_CLOSE"
-                    stage_emoji = "⚡"
-                    urgency = "⚠️ HIGH"
-                    color = discord.Color.orange()
-                    cooldown_minutes = 5
-                else:
-                    stage = "APPROACHING"
-                    stage_emoji = "👀"
-                    urgency = "📊 MEDIUM"
-                    color = discord.Color.gold()
-                    cooldown_minutes = 8
-                
-                # Enhanced cooldown system
-                warning_key = f"{level_name}_{stage}"
-                if (now - self.enhanced_cooldowns["warning"].get(warning_key, datetime.min)).total_seconds() < cooldown_minutes * 60:
-                    continue
-                    
-                self.enhanced_cooldowns["warning"][warning_key] = now
-                
-                # Market context analysis
-                market_regime = self._detect_market_regime(df)
-                volume_ratio = latest["volume"] / df["volume"].tail(10).mean()
-                
-                # Outcome prediction based on context
-                outcome, guidance = self._predict_level_outcome(
-                    df, latest, level_price, price, market_regime, volume_ratio
-                )
-                
-                direction = "🔼 Approaching from Below" if price < level_price else "🔽 Approaching from Above"
-                
-                embed = discord.Embed(
-                    title=f"{stage_emoji} Strategic Alert - ETH at {level_name}",
-                    description=f"*{urgency} PRIORITY - Price {stage.replace('_', ' ').lower()} key level*",
-                    color=color,
-                    timestamp=now
-                )
-                
-                embed.add_field(name="🎯 Level", value=f"{level_name} - ${level_price:.2f}", inline=True)
-                embed.add_field(name="💰 Current Price", value=f"${price:.2f}", inline=True)
-                embed.add_field(name="📏 Distance", value=f"{distance_pct:.2f}% (${distance:+.2f})", inline=True)
-                
-                embed.add_field(name="📊 Direction", value=direction, inline=False)
-                embed.add_field(name="🔮 Likely Outcome", value=outcome, inline=True)
-                embed.add_field(name="🌊 Market Regime", value=market_regime, inline=True)
-                
-                if guidance:
-                    embed.add_field(name="🎯 Action Items", value="\n".join(guidance), inline=False)
-                
-                await channel.send(embed=embed)
-                
-        except Exception as e:
-            log.error(f"Proximity warning error: {e}")
-    
-    async def send_setup_alert(self, df: pd.DataFrame, levels: Dict[str, float], level_name: str, direction: str, score: int, missing_criteria: List[str]):
-        """🗺️ Send enhanced setup alerts to Setup Alerts channel"""
-        try:
-            channel = self.bot.get_channel(self.config.channels.setup_alerts_id)
-            if not channel:
-                return
-                
-            now = self._get_utc_now()
-            
-            # Filter by minimum quality
-            if score < 3:
-                return
-            
-            # Enhanced cooldown using safe methods
-            setup_key = f"{level_name}_{direction}_setup"
-            cooldown_minutes = 5 if score >= 4 else 10
-            
-            if self._safe_time_diff(now, self.enhanced_cooldowns["setup"].get(setup_key)) < cooldown_minutes * 60:
-                return
-                
-            self._set_cooldown("setup", setup_key, now)
-            
-            latest = df.iloc[-1]
-            price = float(latest["close"])
-            level_price = levels.get(level_name, price)
-            
-            # Setup strength analysis
-            setup_strength = "Strong" if score >= 4 else "Moderate"
-            missing_count = len(missing_criteria)
-            completion_probability = ((score - missing_count) / 6) * 100
-            
-            # Market context
-            market_regime = self._detect_market_regime(df)
-            distance_pct = abs(price - level_price) / price * 100
-            
-            # Context-aware messaging
-            if market_regime == "TRENDING":
-                context_msg = "🔥 Trending Market - Higher Breakout Probability"
-                context_color = discord.Color.orange()
-            elif market_regime == "RANGING":
-                context_msg = "⚖️ Ranging Market - Watch for Reversals"
-                context_color = discord.Color.blue()
-            elif market_regime == "VOLATILE":
-                context_msg = "🌋 High Volatility - Use Tighter Stops"
-                context_color = discord.Color.red()
-            else:
-                context_msg = "📊 Market Analysis - Neutral Conditions"
-                context_color = discord.Color.light_grey()
-
-            embed = discord.Embed(
-                title=f"🎯 {setup_strength} Setup Alert - ETH {direction}",
-                description=f"**High-probability setup developing at {level_name}**",
-                color=context_color,
-                timestamp=now
-            )
-
-            embed.add_field(name="🧭 Level", value=f"{level_name} (${level_price:.2f})", inline=True)
-            embed.add_field(name="📊 Quality Score", value=f"{score}/6 ({setup_strength})", inline=True)
-            embed.add_field(name="🎯 Completion", value=f"{completion_probability:.0f}% probable", inline=True)
-            
-            embed.add_field(name="📏 Distance", value=f"{distance_pct:.2f}% away", inline=True)
-            embed.add_field(name="🌊 Regime", value=market_regime, inline=True)
-            embed.add_field(name="🧠 Context", value=context_msg, inline=True)
-
-            # Actionable guidance
-            action_items = self._generate_setup_guidance(missing_criteria, direction)
-            if action_items:
-                embed.add_field(
-                    name="⚠️ Watch For Next",
-                    value="\n".join(action_items[:3]),
-                    inline=False
-                )
-
-            await channel.send(embed=embed)
-            
-            # Track setup for follow-up
-            setup_id = f"{setup_key}_{int(now.timestamp())}"
-            self.setup_tracking[setup_id] = {
-                "level_name": level_name,
-                "direction": direction,
-                "score": score,
-                "timestamp": now,
-                "completed": False,
-                "level_price": level_price
-            }
-            
-        except Exception as e:
-            log.error(f"Setup alert error: {e}")
-    
-    async def send_battleground_update(self, df: pd.DataFrame, events: List[str], trigger_context: str = "market_event"):
-        """🏰 Send event-driven battleground updates"""
-        try:
-            channel = self.bot.get_channel(self.config.channels.eth_battleground_id)
-            if not channel:
-                return
-                
-            now = self._get_utc_now()
-            
-            # Rate limiting using safe methods
-            if self._safe_time_diff(now, self.battleground_cooldown) < 1800:
-                return
-                
-            self._set_cooldown("battleground", "", now)
-                
-            latest = df.iloc[-1]
-            price = float(latest["close"])
-            rsi = float(latest.get("rsi", 50))
-            volume = float(latest["volume"])
-            avg_volume = float(df["volume"].tail(10).mean()) if len(df) >= 10 else volume
-            volume_ratio = volume / avg_volume if avg_volume > 0 else 1.0
-            
-            # Event-specific messaging
-            primary_event = events[0] if events else "GENERAL"
-            
-            if "VOLUME_SPIKE" in events:
-                emoji = "🌋"
-                status = "HIGH VOLUME ACTIVITY"
-                color = discord.Color.orange()
-                priority = "🚨 CRITICAL"
-            elif "RSI_EXTREME" in events:
-                emoji = "🔥" if rsi > 75 else "❄️"
-                status = "EXTREME RSI TERRITORY"
-                color = discord.Color.red() if rsi > 75 else discord.Color.blue()
-                priority = "⚠️ HIGH"
-            elif "HIGH_VOLATILITY" in events:
-                emoji = "⚡"
-                status = "ELEVATED VOLATILITY"
-                color = discord.Color.gold()
-                priority = "📊 MEDIUM"
-            else:
-                emoji = "📊"
-                status = "MARKET SHIFT DETECTED"
-                color = discord.Color.greyple()
-                priority = "📈 INFO"
-
-            embed = discord.Embed(
-                title=f"{emoji} Market Intelligence - {status}",
-                description=f"*{priority} - Significant market event detected*",
-                color=color,
-                timestamp=now
-            )
-
-            embed.add_field(name="💰 Price", value=f"${price:.2f}", inline=True)
-            embed.add_field(name="📈 RSI", value=f"{rsi:.1f}", inline=True)
-            embed.add_field(name="🌊 Regime", value=market_regime, inline=True)
-            
-            # Show key levels
-            level_text = []
-            for name, level in levels.items():
-                distance = price - level
-                distance_pct = (distance / price) * 100
-                level_text.append(f"**{name}:** ${level:.2f} ({distance_pct:+.2f}%)")
-            
-            embed.add_field(
-                name="🎯 Camarilla Levels",
-                value="\n".join(level_text[:6]),
-                inline=False
-            )
-            
-            await ctx.send(embed=embed)
-            
-        except Exception as e:
-            await ctx.send(f"Market analysis error: {e}")
-
-    @bot.command(name="export")
-    async def _export(ctx):
-        try:
-            # Export DB to CSV
-            path = "trades_export.csv"
-            with sqlite3.connect(db.path) as conn:
-                df_trades = pd.read_sql_query("SELECT * FROM trades", conn)
-                df_partials = pd.read_sql_query("SELECT * FROM partial_exits", conn)
-            
-            # Create export file
-            with open(path, 'w', newline='') as csvfile:
-                df_trades.to_csv(csvfile, index=False)
-            
-            await ctx.send("📊 Database Export", file=discord.File(path))
-            
-            # Clean up
-            if os.path.exists(path):
-                os.remove(path)
-                
-        except Exception as e:
-            await ctx.send(f"Export error: {e}")
-
-    @bot.command(name="rehydrate")
-    async def _rehydrate(ctx):
-        try:
-            before_count = len(trade_manager.active)
-            await trade_manager.rehydrate()
-            after_count = len(trade_manager.active)
-            rehydrated = after_count - before_count
-            
-            embed = discord.Embed(
-                title="🔄 Manual Rehydration Complete",
-                color=discord.Color.blue(),
-                timestamp=datetime.now(timezone.utc)
-            )
-            embed.add_field(name="Before", value=str(before_count), inline=True)
-            embed.add_field(name="After", value=str(after_count), inline=True)
-            embed.add_field(name="Rehydrated", value=str(rehydrated), inline=True)
-            
-            await ctx.send(embed=embed)
-        except Exception as e:
-            await ctx.send(f"Rehydration error: {e}")
-
-    @tasks.loop(minutes=2)
-    async def enhanced_scanner():
-        """Enhanced scanner with trade monitoring and alert integration"""
-        try:
-            await mdp.start()
-            await trade_manager.start()
-            
-            df = await mdp.fetch_ohlc(100)
-            if df is None:
-                return
-                
-            df = add_indicators(df)
-            levels = calc_camarilla(df)
-            
-            if not levels:
-                return
-                
-            latest = df.iloc[-1]
-            current_price = float(latest["close"])
-            
-            # CRITICAL: Monitor existing trades FIRST
-            await monitor_active_trades(df, current_price)
-            
-            # Send alerts through alert manager
-            if alert_manager:
-                # Market scorecard every 15 minutes - use timezone-aware datetime
-                now = datetime.now(timezone.utc)
-                if now.minute % 15 == 0:
-                    await alert_manager.send_market_scorecard(df, levels)
-                
-                # Proximity warnings (only if enabled)
-                if PROXIMITY_WARNINGS_ENABLED:
-                    await alert_manager.send_proximity_warning(df, levels)
-                
-                # 100x alerts for high-quality setups
-                score = calculate_signal_score(df, latest, levels)
-                if score >= 5:
-                    await alert_manager.send_100x_alert(df, score, current_price)
-                
-                # Detect significant market events for battleground
-                events = detect_market_events(df, latest)
-                if events:
-                    await alert_manager.send_battleground_update(df, events)
-            
-            # Traditional signal generation
-            await scan_for_signals(df, levels)
-                
-        except Exception as e:
-            log.error(f"Enhanced scanner error: {e}")
-
-    async def scan_for_signals(df: pd.DataFrame, levels: Dict[str, float]):
-        """Scan for trading signals"""
-        try:
-            latest = df.iloc[-1]
-            current_price = float(latest["close"])
-            
-            # Check for H5/L5 breakouts
-            h5 = levels.get("H5")
-            l5 = levels.get("L5")
-            
-            if h5 and current_price > h5:
-                # Potential long signal
-                enhanced_data = await calculate_enhanced_metrics(df, latest, h5, "Long")
-                
-                # Log enhanced data calculation
-                log.info(f"H5 breakout detected at ${current_price:.2f}")
-                log.info(f"Enhanced data calculated: {list(enhanced_data.keys())}")
-                
-                # Create shorter, cleaner trade ID
-                timestamp = datetime.now(timezone.utc)
-                trade_id = f"L{timestamp.strftime('%m%d%H%M')}"  # L08131430 format
-                
-                t = TradeData(
-                    id=trade_id,
-                    asset=cfg.pair.replace("USD", ""),  # ETH instead of ETHUSD
-                    direction=TradeDirection.LONG,
-                    entry_price=float(current_price),  # Ensure this is a number
-                    sl=float(current_price * 0.99),
-                    tp1=float(current_price * 1.015),
-                    tp2=float(current_price * 1.03),
-                    level_name="H5",  # This should go in column U, not E
-                    level_price=float(h5),
-                    knight="Sir Camarilla",
-                    rating=enhanced_data.get("tier", "A"),
-                    score=enhanced_data.get("enhanced_score", 4),
-                    trade_type="H5_Breakout",
-                    enhanced_data=enhanced_data  # This contains all the N-AI data
-                )
-                
-                log.info(f"Trade created: ID={t.id}, Entry=${t.entry_price}, Level={t.level_name}")
-                
-                await trade_manager.open_trade(t)
-                
-                # Send battle signal
-                channel = bot.get_channel(cfg.channels.battle_signals_id)
-                if channel:
-                    await send_battle_signal(channel, t)
-                    
-            elif l5 and current_price < l5:
-                # Potential short signal
-                enhanced_data = await calculate_enhanced_metrics(df, latest, l5, "Short")
-                
-                # Log enhanced data calculation
-                log.info(f"L5 breakout detected at ${current_price:.2f}")
-                log.info(f"Enhanced data calculated: {list(enhanced_data.keys())}")
-                
-                # Create shorter, cleaner trade ID
-                timestamp = datetime.now(timezone.utc)
-                trade_id = f"S{timestamp.strftime('%m%d%H%M')}"  # S08131430 format
-                
-                t = TradeData(
-                    id=trade_id,
-                    asset=cfg.pair.replace("USD", ""),  # ETH instead of ETHUSD
-                    direction=TradeDirection.SHORT,
-                    entry_price=float(current_price),  # Ensure this is a number
-                    sl=float(current_price * 1.01),
-                    tp1=float(current_price * 0.985),
-                    tp2=float(current_price * 0.97),
-                    level_name="L5",  # This should go in column U, not E
-                    level_price=float(l5),
-                    knight="Sir Camarilla",
-                    rating=enhanced_data.get("tier", "A"),
-                    score=enhanced_data.get("enhanced_score", 4),
-                    trade_type="L5_Breakout",
-                    enhanced_data=enhanced_data  # This contains all the N-AI data
-                )
-                
-                log.info(f"Trade created: ID={t.id}, Entry=${t.entry_price}, Level={t.level_name}")
-                
-                await trade_manager.open_trade(t)
-                
-                # Send battle signal
-                channel = bot.get_channel(cfg.channels.battle_signals_id)
-                if channel:
-                    await send_battle_signal(channel, t)
-            
-            # Check for traditional Camarilla signals
-            await scan_traditional_levels(df, levels)
-                
-        except Exception as e:
-            log.error(f"Signal scanning error: {e}")
-
-    async def scan_traditional_levels(df: pd.DataFrame, levels: Dict[str, float]):
-        """Scan traditional Camarilla levels for setups and signals"""
-        try:
-            latest = df.iloc[-1]
-            price = float(latest["close"])
-            open_price = float(latest.get("open", price))
-            high = float(latest["high"])
-            low = float(latest["low"])
-            volume = float(latest["volume"])
-            avg_volume = float(df["volume"].tail(10).mean()) if len(df) >= 10 else volume
-            
-            for level_name, level_price in levels.items():
-                if level_name == "P":  # Skip pivot
-                    continue
-                
-                distance_pct = abs(price - level_price) / price * 100
-                direction = "Long" if price > level_price else "Short"
-                
-                # Check for breakout confirmation
-                breakout_confirmed, breakout_meta = confirm_breakout(
-                    price, open_price, high, low, volume, avg_volume, level_price, 
-                    TradeDirection.LONG if direction == "Long" else TradeDirection.SHORT
-                )
-                
-                if breakout_confirmed:
-                    # Calculate enhanced metrics and score
-                    enhanced_data = await calculate_enhanced_metrics(df, latest, level_price, direction)
-                    score = enhanced_data.get("enhanced_score", 4)
-                    
-                    # Create clean trade ID
-                    timestamp = datetime.now(timezone.utc)
-                    direction_prefix = "L" if direction == "Long" else "S"
-                    trade_id = f"{direction_prefix}{level_name}{timestamp.strftime('%H%M')}"  # LH408131430
-                    
-                    # Create trade
-                    if direction == "Long":
-                        sl = price * 0.99
-                        tp1 = price * 1.015
-                        tp2 = price * 1.03
-                    else:
-                        sl = price * 1.01
-                        tp1 = price * 0.985
-                        tp2 = price * 0.97
-                    
-                    t = TradeData(
-                        id=trade_id,
-                        asset=cfg.pair.replace("USD", ""),  # ETH instead of ETHUSD
-                        direction=TradeDirection.LONG if direction == "Long" else TradeDirection.SHORT,
-                        entry_price=price,
-                        sl=sl,
-                        tp1=tp1,
-                        tp2=tp2,
-                        level_name=level_name,
-                        level_price=level_price,
-                        knight="Sir Camarilla",
-                        rating=enhanced_data.get("tier", "A"),
-                        score=score,
-                        trade_type="Breakout",
-                        enhanced_data=enhanced_data
-                    )
-                    
-                    await trade_manager.open_trade(t)
-                    
-                    # Send battle signal
-                    channel = bot.get_channel(cfg.channels.battle_signals_id)
-                    if channel:
-                        await send_battle_signal(channel, t)
-                
-                elif distance_pct < 1.0 and alert_manager:
-                    # Send setup alert for near misses
-                    missing_criteria = []
-                    if not breakout_meta.get("vol_ok", False):
-                        missing_criteria.append("Volume below threshold")
-                    if not breakout_meta.get("close_beyond", False):
-                        missing_criteria.append("Price hasn't broken level")
-                    if breakout_meta.get("body_ratio", 0) <= 0.5:
-                        missing_criteria.append("Weak candle body")
-                    
-                    score = calculate_signal_score(df, latest, levels)
-                    await alert_manager.send_setup_alert(df, levels, level_name, direction, score, missing_criteria)
-                    
-        except Exception as e:
-            log.error(f"Traditional level scanning error: {e}")
-
-    def calculate_signal_score(df: pd.DataFrame, latest: pd.Series, levels: Dict[str, float]) -> int:
-        """Calculate signal quality score"""
-        try:
-            score = 0
-            price = float(latest["close"])
-            rsi = float(latest.get("rsi", 50))
-            volume = float(latest["volume"])
-            avg_volume = float(df["volume"].tail(10).mean()) if len(df) >= 10 else volume
-            
-            # RSI conditions
-            if 45 <= rsi <= 75:
-                score += 1
-            
-            # Volume condition
-            if volume > avg_volume * 1.2:
-                score += 1
-            
-            # Trend condition
-            if len(df) >= 3:
-                if df["close"].iloc[-1] > df["close"].iloc[-3]:
-                    score += 1
-            
-            # VWAP condition
-            vwap = latest.get("vwap", price)
-            if price > vwap:
-                score += 1
-            
-            # Level proximity
-            closest_level = min(levels.values(), key=lambda x: abs(price - x))
-            if abs(price - closest_level) / price < 0.01:
-                score += 1
-            
-            # MACD condition
-            macd_hist = latest.get("macd_hist", 0)
-            if abs(macd_hist) > 0.1:
-                score += 1
-            
-            return min(score, 6)
-            
-        except Exception as e:
-            log.error(f"Score calculation error: {e}")
-            return 0
-
-    def detect_market_events(df: pd.DataFrame, latest: pd.Series) -> List[str]:
-        """Detect significant market events"""
-        try:
-            events = []
-            
-            price = float(latest["close"])
-            rsi = float(latest.get("rsi", 50))
-            volume = float(latest["volume"])
-            avg_volume = float(df["volume"].tail(10).mean()) if len(df) >= 10 else volume
-            
-            # Volume spike
-            volume_ratio = volume / avg_volume if avg_volume > 0 else 1.0
-            if volume_ratio > 2.0:
-                events.append("VOLUME_SPIKE")
-            
-            # RSI extremes
-            if rsi > 75 or rsi < 25:
-                events.append("RSI_EXTREME")
-            
-            # High volatility
-            if len(df) >= 12:
-                recent_high = df["high"].tail(12).max()
-                recent_low = df["low"].tail(12).min()
-                price_range_pct = ((recent_high - recent_low) / price) * 100
-                if price_range_pct > 2.0:
-                    events.append("HIGH_VOLATILITY")
-            
-            return events
-            
-        except Exception as e:
-            log.error(f"Event detection error: {e}")
-            return []
-
-    @enhanced_scanner.before_loop
-    async def before_scanner():
-        await bot.wait_until_ready()
-        await trade_manager.start()
-        await mdp.start()
-
-    @bot.event
-    async def on_ready():
-        global alert_manager
-        log.info(f"Logged in as {bot.user}")
-        
-        # Initialize enhanced alert manager with timezone fix
-        alert_manager = AlertManager(bot, cfg)
-        
-        # Force timezone awareness on all datetime fields
-        utc_min = datetime.min.replace(tzinfo=timezone.utc)
-        alert_manager.last_scorecard_time = utc_min
-        alert_manager.last_100x_time = utc_min
-        alert_manager.battleground_cooldown = utc_min
-        alert_manager.enhanced_cooldowns = {
-            "setup": defaultdict(lambda: utc_min),
-            "warning": defaultdict(lambda: utc_min), 
-            "battleground": utc_min
-        }
-        
-        try:
-            await trade_manager.rehydrate()
-            if not enhanced_scanner.is_running():
-                enhanced_scanner.start()
-                
-            # Send startup notification
-            embed = discord.Embed(
-                title="🏰 Complete Control Tower v11.11 Online",
-                description="*Trade closure system implemented - Full automation ready*",
-                color=discord.Color.gold(),
-                timestamp=datetime.now(timezone.utc)
-            )
-            
-            embed.add_field(
-                name="✅ System Status",
-                value=(
-                    "🤖 **Discord Bot**: Connected\n"
-                    "📊 **Google Sheets**: Ready\n"
-                    "🚨 **Enhanced Alerts**: Active\n"
-                    "📈 **Market Scanner**: Running\n"
-                    "🏁 **Trade Closure**: IMPLEMENTED\n"
-                    "🔄 **Trade Monitoring**: Active"
-                ),
-                inline=False
-            )
-            
-            embed.add_field(
-                name="🔧 New Features",
-                value=(
-                    "✅ **Trade Monitoring**: Every 2 minutes\n"
-                    "✅ **Auto Stop Loss**: Price-based triggers\n"
-                    "✅ **Auto Take Profit**: TP1 partial, TP2 full exit\n"
-                    "✅ **Google Sheets Updates**: Exit data sent\n"
-                    "✅ **Discord Notifications**: Exit alerts\n"
-                    "✅ **Performance Tracking**: Win/loss statistics"
-                ),
-                inline=False
-            )
-            
-            embed.add_field(
-                name="🎯 Trade Closure Logic",
-                value=(
-                    "• **Long Stop Loss**: Price ≤ SL\n"
-                    "• **Long TP1**: Price ≥ TP1 (50% exit)\n"
-                    "• **Long TP2**: Price ≥ TP2 (full exit)\n"
-                    "• **Short Stop Loss**: Price ≥ SL\n"
-                    "• **Short TP1**: Price ≤ TP1 (50% exit)\n"
-                    "• **Short TP2**: Price ≤ TP2 (full exit)"
-                ),
-                inline=False
-            )
-            
-            channel = bot.get_channel(cfg.channels.scrolls_order_id)
-            if channel:
-                await channel.send(embed=embed)
-                
-            log.info("✅ Bot ready with complete trade closure system")
-                
-        except Exception as e:
-            log.error(f"Bot ready error: {e}")
-
-    return bot
-
-def main():
-    try:
-        global cfg, bot, db, sheets, trade_manager, mdp
-        
-        log.info("Starting Complete Control Tower v11.11...")
-        
-        # Load configuration
-        cfg = BotConfig.from_env()
-        log.info(f"Configuration loaded successfully")
-        
-        # Initialize components
-        db = DatabaseManager("trades.db")
-        sheets = GoogleSheetsIntegration(cfg.sheets_url, cfg.sheets_token)
-        trade_manager = TradeManager(cfg, db, sheets)
-        mdp = MarketDataProvider(cfg.pair, cfg.interval_min)
-        
-        # Create bot
-        bot = create_bot()
-        
-        # Start Flask
-        log.info("Starting Flask health server...")
-        threading.Thread(target=run_flask, daemon=True).start()
-        
-        # Start Discord bot
-        log.info("Starting Discord bot with complete trade closure system...")
-        bot.run(cfg.token)
-        
-    except Exception as e:
-        log.error(f"Main execution error: {e}")
-        raise
-
-if __name__ == "__main__":
-    main()d_field(name="📊 RSI", value=f"{rsi:.1f}", inline=True)
-            embed.add_field(name="📊 Volume", value=f"{volume_ratio:.1f}x avg", inline=True)
-            
-            # Event-specific guidance
-            guidance = self._generate_battleground_guidance(events, rsi, volume_ratio)
-            if guidance:
-                embed.add_field(name="🎯 Recommended Actions", value="\n".join(guidance), inline=False)
-
-            await channel.send(embed=embed)
-            self._set_cooldown("battleground", "", now)
-            
-        except Exception as e:
-            log.error(f"Battleground update error: {e}")
-    
-    async def send_100x_alert(self, df: pd.DataFrame, score: int, price: float):
-        """🦅 Send 100x alerts for premium setups"""
-        try:
-            if score < 5:  # Only for high-quality setups
-                return
-                
-            now = self._get_utc_now()
-            
-            # Cooldown check using safe time comparison
-            if self._safe_time_diff(now, self.last_100x_time) < 900:
-                return
-                
-            channel = self.bot.get_channel(self.config.channels.eagle_signal_id)
-            if not channel:
-                return
-                
-            # Enhanced context analysis
-            market_regime = self._detect_market_regime(df)
-            tier = "S-Tier" if score >= 6 else "A-Tier"
-            
-            embed = discord.Embed(
-                title="🦅 100x ETH Trade Opportunity",
-                description=f"High-confidence {tier} setup detected",
-                color=discord.Color.dark_gold(),
-                timestamp=now
-            )
-            
-            embed.add_field(name="Current Price", value=f"${price:.2f}", inline=True)
-            embed.add_field(name="Confidence Score", value=f"{score}/6", inline=True)
-            embed.add_field(name="Tier", value=f"{tier} Setup", inline=True)
-            embed.add_field(name="Market Regime", value=market_regime, inline=True)
-
-            await channel.send(embed=embed)
-            self.last_100x_time = now
-            
-        except Exception as e:
-            log.error(f"100x alert error: {e}")
-    
-    async def mark_setup_completion(self, level_name: str, direction: str):
-        """Mark setups as completed when signals fire"""
-        try:
-            completed_setups = []
-            
-            for setup_id, setup_data in self.setup_tracking.items():
-                if (setup_data["level_name"] == level_name and 
-                    setup_data["direction"] == direction and 
-                    not setup_data.get("completed", False)):
-                    
-                    setup_data["completed"] = True
-                    completed_setups.append(setup_id)
-                    
-                    # Update success rates
-                    level_key = level_name.replace("_", "")
-                    self.setup_success_rates[level_key]["conversions"] += 1
-            
-            log.info(f"Marked {len(completed_setups)} setups as completed for {level_name} {direction}")
-            
-        except Exception as e:
-            log.error(f"Error marking setup completion: {e}")
-    
-    def _evaluate_scorecard(self, df: pd.DataFrame, levels: Dict[str, float]) -> Tuple[int, List[str]]:
-        """Enhanced scorecard evaluation with market context"""
-        try:
-            if df is None or len(df) < 5 or not levels:
-                return 0, []
-
-            latest = df.iloc[-1]
-            price = float(latest["close"])
-            rsi = float(latest.get("rsi", 50))
-            macd_hist = float(latest.get("macd_hist", 0))
-            volume = float(latest["volume"])
-            avg_volume = float(df["volume"].tail(10).mean()) if len(df) >= 10 else volume
-            
-            reasons = []
-            score = 0
-
-            # RSI conditions
-            if 45 <= rsi <= 75:
-                score += 1
-                reasons.append("✅ RSI in Optimal Zone")
-            elif rsi > 55 or rsi < 45:
-                score += 1
-                reasons.append("✅ RSI Out of Neutral Zone")
-            
-            # MACD momentum
-            if abs(macd_hist) > 0.1:
-                score += 1
-                reasons.append("✅ MACD Momentum Present")
-            
-            # Volume confirmation
-            volume_ratio = volume / avg_volume if avg_volume > 0 else 1.0
-            if volume_ratio > 1.2:
-                score += 1
-                reasons.append("✅ Volume Spike Detected")
-            
-            # Price trend
-            if len(df) >= 3:
-                recent_trend = df["close"].iloc[-1] > df["close"].iloc[-3]
-                if recent_trend:
-                    score += 1
-                    reasons.append("✅ Bullish Price Trend")
-            
-            # VWAP position
-            vwap = latest.get("vwap", price)
-            if price > vwap:
-                score += 1
-                reasons.append("✅ Price Above VWAP")
-            
-            # Level proximity
-            closest_level = min(levels.values(), key=lambda x: abs(price - x))
-            distance_pct = abs(price - closest_level) / price * 100
-            if distance_pct < 1.0:
-                score += 1
-                reasons.append("✅ Near Key Level")
-
-            return score, reasons
-
-        except Exception as e:
-            log.error(f"Error evaluating scorecard: {e}")
-            return 0, []
-    
-    def _detect_market_regime(self, df: pd.DataFrame) -> str:
-        """Detect current market regime"""
-        try:
-            if df is None or len(df) < 20:
-                return "UNKNOWN"
-            
-            # Calculate trend strength
-            recent_closes = df["close"].tail(20)
-            trend_slope = np.polyfit(range(len(recent_closes)), recent_closes, 1)[0]
-            normalized_slope = (trend_slope / recent_closes.iloc[-1]) * 100
-            
-            # Calculate volatility
-            returns = df["close"].pct_change().tail(20)
-            volatility = returns.std() * 100
-            
-            if abs(normalized_slope) > 0.5 and volatility < 3:
-                return "TRENDING"
-            elif volatility > 5:
-                return "VOLATILE"
-            elif abs(normalized_slope) < 0.1 and volatility < 2:
-                return "RANGING"
-            else:
-                return "TRANSITIONAL"
-                
-        except Exception as e:
-            log.error(f"Market regime detection error: {e}")
-            return "UNKNOWN"
-    
-    def _calculate_atr(self, df: pd.DataFrame, period: int = 14) -> float:
-        """Calculate Average True Range"""
-        try:
-            if df is None or len(df) < period:
-                return 20.0  # Default value
-            
-            high = df["high"]
-            low = df["low"]
-            close = df["close"]
-            
-            tr1 = high - low
-            tr2 = abs(high - close.shift(1))
-            tr3 = abs(low - close.shift(1))
-            
-            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-            atr = tr.rolling(window=period).mean().iloc[-1]
-            
-            return float(atr) if not pd.isna(atr) else 20.0
-            
-        except Exception as e:
-            log.error(f"ATR calculation error: {e}")
-            return 20.0
-    
-    def _predict_level_outcome(self, df: pd.DataFrame, latest: pd.Series, level_price: float, 
-                              current_price: float, market_regime: str, volume_ratio: float) -> Tuple[str, List[str]]:
-        """Predict likely outcome when approaching a level"""
-        try:
-            guidance = []
-            
-            # Trend direction
-            trend_up = current_price > df["close"].iloc[-3] if len(df) >= 3 else True
-            
-            if market_regime == "TRENDING" and volume_ratio > 1.2:
-                if (trend_up and current_price < level_price) or (not trend_up and current_price > level_price):
-                    outcome = "🚀 Likely Breakout"
-                    guidance = ["📊 Watch for volume acceleration", "📈 Prepare for continuation move"]
-                else:
-                    outcome = "🎯 Possible Reversal"
-                    guidance = ["📊 Watch for momentum divergence", "⚖️ Prepare for potential bounce"]
-            elif market_regime == "RANGING":
-                outcome = "🔄 Likely Bounce/Reversal"
-                guidance = ["📉 Watch for rejection candles", "🎯 Prepare for range-bound move"]
-            elif market_regime == "VOLATILE":
-                outcome = "⚡ Unpredictable - High Risk"
-                guidance = ["⚠️ Use tight stops", "📊 Wait for clear direction"]
-            else:
-                outcome = "🤷 Unclear Direction"
-                guidance = ["👀 Watch price action closely", "📊 Wait for volume confirmation"]
-            
-            return outcome, guidance
-            
-        except Exception as e:
-            log.error(f"Outcome prediction error: {e}")
-            return "📊 Monitoring", ["👀 Watch closely"]
-    
-    def _generate_setup_guidance(self, missing_criteria: List[str], direction: str) -> List[str]:
-        """Generate actionable guidance for setups"""
-        guidance = []
-        
-        for criteria in missing_criteria:
-            if "Volume" in criteria:
-                guidance.append("📊 Watch for volume spike above 1.2x average")
-            elif "Candle" in criteria or "Body" in criteria:
-                guidance.append("🕯️ Wait for strong directional candle")
-            elif "RSI" in criteria:
-                guidance.append(f"📈 RSI needs to move {'above 50' if direction == 'Long' else 'below 50'}")
-            elif "Breakout" in criteria:
-                guidance.append("🔥 Wait for price to break level")
-        
-        if not guidance:
-            guidance.append("⚡ Setup very close to completion - watch closely!")
-        
-        return guidance[:3]  # Limit to top 3
-    
-    def _generate_battleground_guidance(self, events: List[str], rsi: float, volume_ratio: float) -> List[str]:
-        """Generate battleground-specific guidance"""
-        guidance = []
-        
-        if "VOLUME_SPIKE" in events:
-            guidance.append("📊 Monitor for breakout confirmation")
-        if "RSI_EXTREME" in events:
-            guidance.append("📈 Watch for potential reversal signals")
-        if "HIGH_VOLATILITY" in events:
-            guidance.append("⚠️ Use reduced position sizes")
-        if "LEVEL_PROXIMITY" in events:
-            guidance.append("🎯 Prepare for level break/bounce")
-        
-        if not guidance:
-            guidance.append("👀 Monitor price action closely")
-        
-        return guidance[:3]
-
 # -------- Sheets Integration --------
 class GoogleSheetsIntegration:
     def __init__(self, url: Optional[str], token: Optional[str]):
@@ -1508,12 +397,11 @@ class GoogleSheetsIntegration:
     async def send_trade_entry(self, session: aiohttp.ClientSession, t):
         # Create clean trade ID
         clean_trade_id = t.id
-        if len(clean_trade_id) > 16:  # If it's too long, shorten it
-            clean_trade_id = clean_trade_id[-8:]  # Take last 8 characters
+        if len(clean_trade_id) > 16:
+            clean_trade_id = clean_trade_id[-8:]
         
         # Build base payload matching sheet structure
         payload = {
-            # A-L: Core trade data
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "trade_id": clean_trade_id,
             "asset": t.asset,
@@ -1523,14 +411,11 @@ class GoogleSheetsIntegration:
             "take_profit_1": float(t.tp1), 
             "take_profit_2": float(t.tp2),
             "status": "OPEN",
-            # M: Original Score
             "original_score": int(t.score or 0),
         }
         
-        # N-AI: Enhanced data fields (flatten from enhanced_data dict)
+        # Enhanced data fields
         enhanced_data = t.enhanced_data or {}
-        
-        # Enhanced metrics (N-T)
         payload.update({
             "enhanced_score": enhanced_data.get("enhanced_score", t.score or 0),
             "rsi_level": enhanced_data.get("rsi_level", 50.0),
@@ -1539,58 +424,28 @@ class GoogleSheetsIntegration:
             "vwap_position": enhanced_data.get("vwap_position", "Above"),
             "macd_status": enhanced_data.get("macd_status", "Neutral"),
             "market_bias": enhanced_data.get("market_bias", "Neutral"),
-        })
-        
-        # Trade metadata (U-X)
-        payload.update({
             "level_name": t.level_name or "Unknown",
             "knight": t.knight or "Unknown",
             "trade_type": t.trade_type or "Breakout",
             "confidence": t.rating or "A",
-        })
-        
-        # Risk metrics (Y-Z)
-        payload.update({
             "risk_pct": enhanced_data.get("risk_pct", 1.0),
             "rr_ratio": enhanced_data.get("rr_ratio", 1.5),
         })
         
-        # Setup analysis (AA-AD)
-        payload.update({
-            "setup_age_minutes": enhanced_data.get("setup_age_minutes", 0),
-            "breakout_structure": enhanced_data.get("breakout_structure", "Present"),
-            "confluence_count": enhanced_data.get("confluence_count", 2),
-            "candle_body_strength": enhanced_data.get("candle_body_strength", "Moderate"),
-        })
-        
-        # Market context (AE-AI)
-        payload.update({
-            "market_session": enhanced_data.get("market_session", "Mid-day"),
-            "distance_from_level_pct": enhanced_data.get("distance_from_level_pct", 0.0),
-            "recent_news_events": enhanced_data.get("recent_news_events", "No"),
-            "volatility_state": enhanced_data.get("volatility_state", "Normal"),
-            "trend_strength": enhanced_data.get("trend_strength", "Moderate"),
-        })
-        
-        log.info(f"Sending to sheets - Trade ID: {clean_trade_id}, Level: {t.level_name}, Enhanced Score: {payload.get('enhanced_score')}")
+        log.info(f"Sending to sheets - Trade ID: {clean_trade_id}, Level: {t.level_name}")
         result = await self._post(session, payload)
         log.info(f"Sheets response: {result}")
         
-        if result.get("status") == "success":
-            log.info(f"Trade entry sent to sheets: {clean_trade_id}")
-        else:
-            log.warning(f"Sheets entry failed for {clean_trade_id}: {result}")
         return result
 
     async def send_trade_exit(self, session: aiohttp.ClientSession, trade_id: str, reason: str, price: float, time_iso: str, pnl_pct: float):
-        # Build payload to match your Google Apps Script updateExit function
         payload = {
-            "action": "update",  # This tells your script to call updateExit()
-            "trade_id": trade_id,  # Your script looks for this field
+            "action": "update",
+            "trade_id": trade_id,
             "exit_price": float(price),
             "exit_reason": str(reason),
             "pnl_pct": float(pnl_pct),
-            "exit_time": time_iso,  # Include timestamp for completeness
+            "exit_time": time_iso,
         }
         
         log.info(f"Sending trade exit to sheets: {trade_id} - {reason} - {pnl_pct:+.2f}%")
@@ -1697,7 +552,7 @@ class TradeManager:
         try:
             if trade_id not in self.active:
                 log.warning(f"Trade {trade_id} not found in active trades")
-                return
+                return {"success": False, "error": "Trade not found"}
             
             trade = self.active[trade_id]
             closed_at = datetime.now(timezone.utc)
@@ -1744,7 +599,7 @@ class TradeManager:
         try:
             trades_to_close = []
             
-            for trade_id, trade in self.active.items():
+            for trade_id, trade in list(self.active.items()):
                 exit_reason = None
                 exit_price = current_price
                 
@@ -1756,8 +611,9 @@ class TradeManager:
                         # Mark TP1 as done but don't close trade yet
                         trade.tp1_done = True
                         trade.partial_fraction = self.cfg.partial_fraction
-                        self.db.save_trade(trade)  # Save updated state
+                        self.db.save_trade(trade)
                         self.db.add_partial(trade_id, self.cfg.partial_fraction, current_price, datetime.now(timezone.utc))
+                        log.info(f"Trade {trade_id} hit TP1 - 50% partial exit")
                         continue  # Don't close the trade, just mark partial
                     elif current_price >= trade.tp2:
                         exit_reason = "Take Profit 2 (Full Exit)"
@@ -1769,8 +625,9 @@ class TradeManager:
                         # Mark TP1 as done but don't close trade yet
                         trade.tp1_done = True
                         trade.partial_fraction = self.cfg.partial_fraction
-                        self.db.save_trade(trade)  # Save updated state
+                        self.db.save_trade(trade)
                         self.db.add_partial(trade_id, self.cfg.partial_fraction, current_price, datetime.now(timezone.utc))
+                        log.info(f"Trade {trade_id} hit TP1 - 50% partial exit")
                         continue  # Don't close the trade, just mark partial
                     elif current_price <= trade.tp2:
                         exit_reason = "Take Profit 2 (Full Exit)"
@@ -1783,36 +640,34 @@ class TradeManager:
                 result = await self.close_trade(trade_id, reason, price)
                 if result.get("success"):
                     # Send Discord notification
-                    await self._send_trade_exit_notification(self.active.get(trade_id), reason, price, result.get("pnl_pct", 0))
+                    await self._send_trade_exit_notification(trade_id, reason, price, result.get("pnl_pct", 0))
                     
         except Exception as e:
             log.error(f"Trade monitoring error: {e}")
 
-    async def _send_trade_exit_notification(self, trade: TradeData, reason: str, exit_price: float, pnl_pct: float):
+    async def _send_trade_exit_notification(self, trade_id: str, reason: str, exit_price: float, pnl_pct: float):
         """Send trade exit notification to Discord"""
         try:
-            # Import bot reference (will be available when this is called)
-            from __main__ import bot, cfg
+            # Get bot and config from global scope
+            global bot, cfg
             
             channel = bot.get_channel(cfg.channels.battle_signals_id)
-            if not channel or not trade:
+            if not channel:
                 return
             
             color = discord.Color.green() if pnl_pct > 0 else discord.Color.red()
             
             embed = discord.Embed(
-                title=f"🏁 Trade Closed - {trade.asset} {trade.direction.name}",
+                title=f"🏁 Trade Closed - {trade_id}",
                 description=f"**{reason}** - {pnl_pct:+.2f}% P&L",
                 color=color,
                 timestamp=datetime.now(timezone.utc)
             )
             
-            embed.add_field(name="📍 Entry", value=f"${trade.entry_price:.2f}", inline=True)
-            embed.add_field(name="🏁 Exit", value=f"${exit_price:.2f}", inline=True)
+            embed.add_field(name="🏁 Exit Price", value=f"${exit_price:.2f}", inline=True)
             embed.add_field(name="💰 P&L", value=f"{pnl_pct:+.2f}%", inline=True)
             embed.add_field(name="⏱️ Reason", value=reason, inline=True)
-            embed.add_field(name="🆔 Trade ID", value=trade.id, inline=True)
-            embed.add_field(name="📊 Level", value=trade.level_name or "Unknown", inline=True)
+            embed.add_field(name="🆔 Trade ID", value=trade_id, inline=True)
             
             # Add performance context
             if pnl_pct > 2:
@@ -1826,22 +681,6 @@ class TradeManager:
             
         except Exception as e:
             log.error(f"Exit notification error: {e}")
-
-    def get_trade_status(self, trade_id: str) -> dict:
-        """Get current status of a trade"""
-        if trade_id not in self.active:
-            return {"status": "not_found"}
-        
-        trade = self.active[trade_id]
-        return {
-            "status": "active",
-            "entry_price": trade.entry_price,
-            "sl": trade.sl,
-            "tp1": trade.tp1,
-            "tp2": trade.tp2,
-            "tp1_done": trade.tp1_done,
-            "partial_fraction": trade.partial_fraction
-        }
 
 # -------- Market Data --------
 class MarketDataProvider:
@@ -1904,7 +743,7 @@ class MarketDataProvider:
 
 # -------- Enhanced Market Analysis Functions --------
 async def calculate_enhanced_metrics(df: pd.DataFrame, latest: pd.Series, level_price: float, direction: str) -> Dict[str, Any]:
-    """Calculate enhanced metrics for Google Sheets - all 26 fields"""
+    """Calculate enhanced metrics for Google Sheets"""
     try:
         # Basic metrics
         rsi = float(latest.get("rsi", 50)) if TA_AVAILABLE else 50.0
@@ -1914,11 +753,11 @@ async def calculate_enhanced_metrics(df: pd.DataFrame, latest: pd.Series, level_
         high = float(latest["high"])
         low = float(latest["low"])
         
-        # Volume ratio (P)
+        # Volume ratio
         avg_volume = float(df["volume"].tail(10).mean()) if len(df) >= 10 else volume
         volume_ratio = volume / avg_volume if avg_volume > 0 else 1.0
         
-        # Market status from RSI (Q)
+        # Market status from RSI
         if rsi > 75:
             market_status = "OVERBOUGHT"
         elif rsi < 25:
@@ -1926,15 +765,15 @@ async def calculate_enhanced_metrics(df: pd.DataFrame, latest: pd.Series, level_
         else:
             market_status = "NORMAL"
         
-        # VWAP position (R)
+        # VWAP position
         vwap = float(latest.get("vwap", price))
         vwap_position = "Above" if price > vwap else "Below"
         
-        # MACD status (S)
+        # MACD status
         macd_hist = float(latest.get("macd_hist", 0)) if TA_AVAILABLE else 0
         macd_status = "Bullish" if macd_hist > 0 else "Bearish"
         
-        # Market bias from trend (T)
+        # Market bias from trend
         if len(df) >= 5:
             recent_closes = df["close"].tail(5)
             trend_up = recent_closes.iloc[-1] > recent_closes.iloc[0]
@@ -1945,7 +784,7 @@ async def calculate_enhanced_metrics(df: pd.DataFrame, latest: pd.Series, level_
         else:
             market_bias = "Neutral"
         
-        # Enhanced score calculation (N)
+        # Enhanced score calculation
         base_score = 4
         enhanced_score = base_score
         
@@ -1959,7 +798,7 @@ async def calculate_enhanced_metrics(df: pd.DataFrame, latest: pd.Series, level_
             
         enhanced_score = min(enhanced_score, 6)  # Cap at 6
         
-        # Risk % and R:R Ratio calculations (Y-Z)
+        # Risk % and R:R Ratio calculations
         entry_price = price
         if direction == "Long":
             sl_price = entry_price * 0.99
@@ -1972,105 +811,21 @@ async def calculate_enhanced_metrics(df: pd.DataFrame, latest: pd.Series, level_
         reward_pct = abs((tp1_price - entry_price) / entry_price) * 100
         rr_ratio = reward_pct / risk_pct if risk_pct > 0 else 0
         
-        # Candle body strength (AD)
-        body_size = abs(price - open_price)
-        range_size = high - low
-        if range_size > 0:
-            body_ratio = body_size / range_size
-            if body_ratio > 0.7:
-                candle_body_strength = "Strong"
-            elif body_ratio > 0.3:
-                candle_body_strength = "Moderate"
-            else:
-                candle_body_strength = "Weak"
-        else:
-            candle_body_strength = "Doji"
-        
-        # Breakout structure (AB)
-        breakout_structure = "Present" if (volume_ratio > 1.0 and body_ratio > 0.5) else "Missing"
-        
-        # Confluence count (AC)
-        confluence = 0
-        if volume_ratio > 1.0: confluence += 1
-        if (direction == "Long" and rsi > 50) or (direction == "Short" and rsi < 50): confluence += 1
-        if (direction == "Long" and macd_hist > 0) or (direction == "Short" and macd_hist < 0): confluence += 1
-        if (direction == "Long" and price > vwap) or (direction == "Short" and price < vwap): confluence += 1
-        confluence_count = min(confluence, 4)
-        
-        # Market session (AE)
-        hour = datetime.now(timezone.utc).hour
-        if 8 <= hour < 12:
-            market_session = "Open"
-        elif 12 <= hour < 16:
-            market_session = "Mid-day"
-        elif 16 <= hour < 20:
-            market_session = "Close"
-        else:
-            market_session = "After-hours"
-        
-        # Distance from level (AF)
-        distance_from_level_pct = abs(price - level_price) / price * 100
-        
-        # Volatility state (AH)
-        if len(df) >= 20:
-            returns = df["close"].pct_change().tail(20)
-            volatility = returns.std() * 100
-            if volatility > 5:
-                volatility_state = "High"
-            elif volatility > 3:
-                volatility_state = "Elevated"
-            elif volatility < 1:
-                volatility_state = "Low"
-            else:
-                volatility_state = "Normal"
-        else:
-            volatility_state = "Normal"
-        
-        # Trend strength (AI)
-        if len(df) >= 20:
-            recent_closes = df["close"].tail(20)
-            trend_slope = np.polyfit(range(len(recent_closes)), recent_closes, 1)[0]
-            normalized_slope = (trend_slope / recent_closes.iloc[-1]) * 100
-            
-            if normalized_slope > 0.5:
-                trend_strength = "Strong Bullish"
-            elif normalized_slope > 0.1:
-                trend_strength = "Moderate Bullish"
-            elif normalized_slope < -0.5:
-                trend_strength = "Strong Bearish"
-            elif normalized_slope < -0.1:
-                trend_strength = "Moderate Bearish"
-            else:
-                trend_strength = "Neutral"
-        else:
-            trend_strength = "Neutral"
-        
         return {
-            # N-AI: All enhanced metrics matching sheet columns exactly
-            "enhanced_score": enhanced_score,                    # N
-            "rsi_level": round(rsi, 2),                         # O
-            "volume_ratio": round(volume_ratio, 2),             # P
-            "market_status": market_status,                     # Q
-            "vwap_position": vwap_position,                     # R
-            "macd_status": macd_status,                         # S
-            "market_bias": market_bias,                         # T
-            "setup_age_minutes": 0,                             # AA
-            "breakout_structure": breakout_structure,           # AB
-            "confluence_count": confluence_count,               # AC
-            "candle_body_strength": candle_body_strength,       # AD
-            "market_session": market_session,                   # AE
-            "distance_from_level_pct": round(distance_from_level_pct, 4), # AF
-            "recent_news_events": "No",                         # AG
-            "volatility_state": volatility_state,              # AH
-            "trend_strength": trend_strength,                   # AI
-            "risk_pct": round(risk_pct, 2),                     # Y
-            "rr_ratio": round(rr_ratio, 1),                     # Z
+            "enhanced_score": enhanced_score,
+            "rsi_level": round(rsi, 2),
+            "volume_ratio": round(volume_ratio, 2),
+            "market_status": market_status,
+            "vwap_position": vwap_position,
+            "macd_status": macd_status,
+            "market_bias": market_bias,
+            "risk_pct": round(risk_pct, 2),
+            "rr_ratio": round(rr_ratio, 1),
             "tier": "S" if enhanced_score >= 5 else "A" if enhanced_score == 4 else "B"
         }
         
     except Exception as e:
         log.error(f"Enhanced metrics calculation error: {e}")
-        # Return minimal fallback data with all required fields
         return {
             "enhanced_score": 4,
             "rsi_level": 50.0,
@@ -2079,15 +834,6 @@ async def calculate_enhanced_metrics(df: pd.DataFrame, latest: pd.Series, level_
             "vwap_position": "Above",
             "macd_status": "Neutral",
             "market_bias": "Neutral",
-            "setup_age_minutes": 0,
-            "breakout_structure": "Present",
-            "confluence_count": 2,
-            "candle_body_strength": "Moderate",
-            "market_session": "Mid-day",
-            "distance_from_level_pct": 0.0,
-            "recent_news_events": "No",
-            "volatility_state": "Normal",
-            "trend_strength": "Neutral",
             "risk_pct": 1.0,
             "rr_ratio": 1.5,
             "tier": "A"
@@ -2123,27 +869,14 @@ def calc_camarilla(df: pd.DataFrame) -> Dict[str, float]:
         log.error(f"Camarilla calculation error: {e}")
         return {}
 
-def confirm_breakout(c, o, h, l, vol, avg_vol, level: float, direction) -> Tuple[bool, Dict[str, Any]]:
-    try:
-        rng = max(h - l, 1e-9)
-        body_ratio = abs(c - o) / rng
-        close_beyond = (direction == TradeDirection.LONG and c > level) or (direction == TradeDirection.SHORT and c < level)
-        vol_ok = vol > (avg_vol * 1.2 if avg_vol > 0 else vol)
-        ok = (body_ratio > 0.5) and close_beyond and vol_ok
-        meta = {"body_ratio": body_ratio, "vol_ok": vol_ok, "close_beyond": close_beyond}
-        return ok, meta
-    except Exception as e:
-        log.error(f"Breakout confirmation error: {e}")
-        return False, {}
-
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Add technical indicators to dataframe"""
     try:
         if not TA_AVAILABLE or df is None or len(df) < 20:
             # Add basic indicators without TA library
-            df["rsi"] = 50.0  # Default RSI
-            df["macd_hist"] = 0.0  # Default MACD
-            df["vwap"] = df["close"]  # Use close as VWAP fallback
+            df["rsi"] = 50.0
+            df["macd_hist"] = 0.0
+            df["vwap"] = df["close"]
             return df
         
         df = df.copy()
@@ -2158,7 +891,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
         df["macd_signal"] = macd_indicator.macd_signal()
         df["macd_hist"] = macd_indicator.macd_diff()
         
-        # VWAP (Volume Weighted Average Price)
+        # VWAP
         typical_price = (df["high"] + df["low"] + df["close"]) / 3
         vwap_num = (typical_price * df["volume"]).cumsum()
         vwap_den = df["volume"].cumsum()
@@ -2200,8 +933,6 @@ db = None
 sheets = None
 trade_manager = None
 mdp = None
-alert_manager = None
-PROXIMITY_WARNINGS_ENABLED = True  # Global flag to control proximity warnings
 
 def status_embed() -> discord.Embed:
     try:
@@ -2213,7 +944,6 @@ def status_embed() -> discord.Embed:
         e.add_field(name="Pair", value=cfg.pair if cfg else "N/A", inline=True)
         e.add_field(name="Active Trades", value=str(len(trade_manager.active)) if trade_manager else "0", inline=True)
         e.add_field(name="Sheets", value="ON" if (cfg and cfg.sheets_url) else "OFF", inline=True)
-        e.add_field(name="Alert System", value="Enhanced" if alert_manager else "Basic", inline=True)
         e.add_field(name="Trade Closure", value="✅ Implemented", inline=True)
         return e
     except Exception as e:
@@ -2243,10 +973,6 @@ async def send_battle_signal(channel, t: TradeData):
             e.add_field(name="✨ Enhanced Score", value=f"{enhanced_score}/6 ({tier})", inline=True)
         
         await channel.send(embed=e)
-        
-        # Mark setup completion
-        if alert_manager and t.level_name:
-            await alert_manager.mark_setup_completion(t.level_name, t.direction.name)
             
     except Exception as e:
         log.error(f"Battle signal error: {e}")
@@ -2261,20 +987,6 @@ def create_bot():
         except Exception as e:
             await ctx.send(f"Status error: {e}")
 
-    @bot.command(name="config")
-    async def _config(ctx):
-        try:
-            e = discord.Embed(title="⚙️ Bot Configuration", color=discord.Color.blue())
-            e.add_field(name="Pair", value=cfg.pair, inline=True)
-            e.add_field(name="Interval", value=f"{cfg.interval_min}m", inline=True)
-            e.add_field(name="Trail Mode", value=cfg.trail_mode.value, inline=True)
-            e.add_field(name="Sheets", value="✅ Configured" if cfg.sheets_url else "❌ Not configured", inline=True)
-            e.add_field(name="Active Trades", value=str(len(trade_manager.active)), inline=True)
-            e.add_field(name="Alert System", value="Enhanced" if alert_manager else "Basic", inline=True)
-            await ctx.send(embed=e)
-        except Exception as e:
-            await ctx.send(f"Config error: {e}")
-
     @bot.command(name="trades")
     async def _trades(ctx):
         try:
@@ -2288,7 +1000,7 @@ def create_bot():
                 color=discord.Color.green()
             )
             
-            for trade_id, trade in list(trade_manager.active.items())[:10]:  # Limit to 10
+            for trade_id, trade in list(trade_manager.active.items())[:10]:
                 trade_info = (
                     f"**Direction:** {trade.direction.name}\n"
                     f"**Entry:** ${trade.entry_price:.2f}\n"
@@ -2344,7 +1056,7 @@ def create_bot():
         except Exception as e:
             await ctx.send(f"Performance error: {e}")
 
-    @bot.command(name="test_close")
+@bot.command(name="test_close")
     async def _test_close(ctx, trade_id: str = None):
         """Test closing a trade manually"""
         if not ctx.author.guild_permissions.administrator:
@@ -2413,88 +1125,6 @@ def create_bot():
         except Exception as e:
             await ctx.send(f"❌ Force monitor failed: {e}")
 
-    @bot.command(name="close_trade")
-    async def _close_trade(ctx, trade_id: str, reason: str = "Manual Close"):
-        """Manually close a specific trade"""
-        if not ctx.author.guild_permissions.administrator:
-            await ctx.send("⚠️ Administrator permissions required")
-            return
-        
-        try:
-            if trade_id not in trade_manager.active:
-                await ctx.send(f"❌ Trade {trade_id} not found")
-                return
-            
-            # Get current price
-            df = await mdp.fetch_ohlc(10)
-            if df is None:
-                await ctx.send("❌ Failed to fetch current price")
-                return
-            
-            current_price = float(df.iloc[-1]["close"])
-            
-            result = await trade_manager.close_trade(trade_id, reason, current_price)
-            
-            if result.get("success"):
-                pnl = result.get("pnl_pct", 0)
-                await ctx.send(f"✅ Trade {trade_id} closed - Reason: {reason} - P&L: {pnl:+.2f}%")
-            else:
-                await ctx.send(f"❌ Failed to close trade: {result.get('error', 'Unknown error')}")
-                
-        except Exception as e:
-            await ctx.send(f"❌ Close trade failed: {e}")
-
-    # Previous commands continue...
-    @bot.command(name="alerts")
-    async def _alerts(ctx):
-        """Show alert system status"""
-        try:
-            if not alert_manager:
-                await ctx.send("❌ Alert system not initialized")
-                return
-                
-            e = discord.Embed(
-                title="🚨 Enhanced Alert System Status",
-                color=discord.Color.orange(),
-                timestamp=datetime.now(timezone.utc)
-            )
-            
-            # Active cooldowns - using safe time comparison
-            active_cooldowns = 0
-            now = datetime.now(timezone.utc)
-            
-            for cd_dict in alert_manager.enhanced_cooldowns.values():
-                if isinstance(cd_dict, dict):
-                    for cd_time in cd_dict.values():
-                        if alert_manager._safe_time_diff(now, cd_time) < 3600:
-                            active_cooldowns += 1
-                elif isinstance(cd_dict, datetime):
-                    # Handle battleground cooldown
-                    if alert_manager._safe_time_diff(now, cd_dict) < 3600:
-                        active_cooldowns += 1
-            
-            e.add_field(name="📜 Market Scorecard", value="✅ Active", inline=True)
-            e.add_field(name="🕰️ Proximity Warnings", value="✅ Enhanced", inline=True)
-            e.add_field(name="🗺️ Setup Alerts", value="✅ Smart Filtering", inline=True)
-            e.add_field(name="🏰 Battleground", value="✅ Event-Driven", inline=True)
-            e.add_field(name="🦅 100x Alerts", value="✅ S-Tier Only", inline=True)
-            e.add_field(name="⚡ Active Cooldowns", value=str(active_cooldowns), inline=True)
-            
-            # Setup tracking stats
-            setup_count = len(alert_manager.setup_tracking)
-            completed_setups = sum(1 for s in alert_manager.setup_tracking.values() if s.get("completed", False))
-            
-            e.add_field(
-                name="🎯 Setup Intelligence",
-                value=f"**Tracking:** {setup_count}\n**Completed:** {completed_setups}",
-                inline=True
-            )
-            
-            await ctx.send(embed=e)
-            
-        except Exception as e:
-            await ctx.send(f"Alerts error: {e}")
-
     @bot.command(name="market")
     async def _market(ctx):
         """Show current market analysis"""
@@ -2515,9 +1145,6 @@ def create_bot():
             price = float(latest["close"])
             rsi = float(latest.get("rsi", 50))
             
-            # Market regime analysis
-            market_regime = alert_manager._detect_market_regime(df) if alert_manager else "Unknown"
-            
             embed = discord.Embed(
                 title="📊 Current Market Analysis",
                 color=discord.Color.blue(),
@@ -2525,4 +1152,226 @@ def create_bot():
             )
             
             embed.add_field(name="💰 Price", value=f"${price:.2f}", inline=True)
-            embed.ad
+            embed.add_field(name="📈 RSI", value=f"{rsi:.1f}", inline=True)
+            embed.add_field(name="🌊 Regime", value="NORMAL", inline=True)
+            
+            # Show key levels
+            level_text = []
+            for name, level in levels.items():
+                distance = price - level
+                distance_pct = (distance / price) * 100
+                level_text.append(f"**{name}:** ${level:.2f} ({distance_pct:+.2f}%)")
+            
+            embed.add_field(
+                name="🎯 Camarilla Levels",
+                value="\n".join(level_text[:6]),
+                inline=False
+            )
+            
+            await ctx.send(embed=embed)
+            
+        except Exception as e:
+            await ctx.send(f"Market analysis error: {e}")
+
+@tasks.loop(minutes=2)
+    async def enhanced_scanner():
+        """Enhanced scanner with trade monitoring"""
+        try:
+            await mdp.start()
+            await trade_manager.start()
+            
+            df = await mdp.fetch_ohlc(100)
+            if df is None:
+                return
+                
+            df = add_indicators(df)
+            levels = calc_camarilla(df)
+            
+            if not levels:
+                return
+                
+            latest = df.iloc[-1]
+            current_price = float(latest["close"])
+            
+            # CRITICAL: Monitor existing trades FIRST
+            await monitor_active_trades(df, current_price)
+            
+            # Traditional signal generation
+            await scan_for_signals(df, levels)
+                
+        except Exception as e:
+            log.error(f"Enhanced scanner error: {e}")
+
+    async def scan_for_signals(df: pd.DataFrame, levels: Dict[str, float]):
+        """Scan for trading signals"""
+        try:
+            latest = df.iloc[-1]
+            current_price = float(latest["close"])
+            
+            # Check for H5/L5 breakouts
+            h5 = levels.get("H5")
+            l5 = levels.get("L5")
+            
+            if h5 and current_price > h5:
+                # Potential long signal
+                enhanced_data = await calculate_enhanced_metrics(df, latest, h5, "Long")
+                
+                log.info(f"H5 breakout detected at ${current_price:.2f}")
+                
+                timestamp = datetime.now(timezone.utc)
+                trade_id = f"L{timestamp.strftime('%m%d%H%M')}"
+                
+                t = TradeData(
+                    id=trade_id,
+                    asset=cfg.pair.replace("USD", ""),
+                    direction=TradeDirection.LONG,
+                    entry_price=float(current_price),
+                    sl=float(current_price * 0.99),
+                    tp1=float(current_price * 1.015),
+                    tp2=float(current_price * 1.03),
+                    level_name="H5",
+                    level_price=float(h5),
+                    knight="Sir Camarilla",
+                    rating=enhanced_data.get("tier", "A"),
+                    score=enhanced_data.get("enhanced_score", 4),
+                    trade_type="H5_Breakout",
+                    enhanced_data=enhanced_data
+                )
+                
+                await trade_manager.open_trade(t)
+                
+                # Send battle signal
+                channel = bot.get_channel(cfg.channels.battle_signals_id)
+                if channel:
+                    await send_battle_signal(channel, t)
+                    
+            elif l5 and current_price < l5:
+                # Potential short signal
+                enhanced_data = await calculate_enhanced_metrics(df, latest, l5, "Short")
+                
+                log.info(f"L5 breakout detected at ${current_price:.2f}")
+                
+                timestamp = datetime.now(timezone.utc)
+                trade_id = f"S{timestamp.strftime('%m%d%H%M')}"
+                
+                t = TradeData(
+                    id=trade_id,
+                    asset=cfg.pair.replace("USD", ""),
+                    direction=TradeDirection.SHORT,
+                    entry_price=float(current_price),
+                    sl=float(current_price * 1.01),
+                    tp1=float(current_price * 0.985),
+                    tp2=float(current_price * 0.97),
+                    level_name="L5",
+                    level_price=float(l5),
+                    knight="Sir Camarilla",
+                    rating=enhanced_data.get("tier", "A"),
+                    score=enhanced_data.get("enhanced_score", 4),
+                    trade_type="L5_Breakout",
+                    enhanced_data=enhanced_data
+                )
+                
+                await trade_manager.open_trade(t)
+                
+                # Send battle signal
+                channel = bot.get_channel(cfg.channels.battle_signals_id)
+                if channel:
+                    await send_battle_signal(channel, t)
+                
+        except Exception as e:
+            log.error(f"Signal scanning error: {e}")
+
+    @enhanced_scanner.before_loop
+    async def before_scanner():
+        await bot.wait_until_ready()
+        await trade_manager.start()
+        await mdp.start()
+
+@bot.event
+    async def on_ready():
+        log.info(f"Logged in as {bot.user}")
+        
+        try:
+            await trade_manager.rehydrate()
+            if not enhanced_scanner.is_running():
+                enhanced_scanner.start()
+                
+            # Send startup notification
+            embed = discord.Embed(
+                title="🏰 Complete Control Tower v11.11 Online",
+                description="*Trade closure system implemented - Full automation ready*",
+                color=discord.Color.gold(),
+                timestamp=datetime.now(timezone.utc)
+            )
+            
+            embed.add_field(
+                name="✅ System Status",
+                value=(
+                    "🤖 **Discord Bot**: Connected\n"
+                    "📊 **Google Sheets**: Ready\n"
+                    "📈 **Market Scanner**: Running\n"
+                    "🏁 **Trade Closure**: IMPLEMENTED\n"
+                    "🔄 **Trade Monitoring**: Active"
+                ),
+                inline=False
+            )
+            
+            embed.add_field(
+                name="🎯 Trade Closure Logic",
+                value=(
+                    "• **Long Stop Loss**: Price ≤ SL\n"
+                    "• **Long TP1**: Price ≥ TP1 (50% exit)\n"
+                    "• **Long TP2**: Price ≥ TP2 (full exit)\n"
+                    "• **Short Stop Loss**: Price ≥ SL\n"
+                    "• **Short TP1**: Price ≤ TP1 (50% exit)\n"
+                    "• **Short TP2**: Price ≤ TP2 (full exit)"
+                ),
+                inline=False
+            )
+            
+            channel = bot.get_channel(cfg.channels.scrolls_order_id)
+            if channel:
+                await channel.send(embed=embed)
+                
+            log.info("✅ Bot ready with complete trade closure system")
+                
+        except Exception as e:
+            log.error(f"Bot ready error: {e}")
+
+    return bot
+
+def main():
+    try:
+        global cfg, bot, db, sheets, trade_manager, mdp
+        
+        log.info("Starting Complete Control Tower v11.11...")
+        
+        # Load configuration
+        cfg = BotConfig.from_env()
+        log.info(f"Configuration loaded successfully")
+        
+        # Initialize components
+        db = DatabaseManager("trades.db")
+        sheets = GoogleSheetsIntegration(cfg.sheets_url, cfg.sheets_token)
+        trade_manager = TradeManager(cfg, db, sheets)
+        mdp = MarketDataProvider(cfg.pair, cfg.interval_min)
+        
+        # Create bot
+        bot = create_bot()
+        
+        # Start Flask
+        log.info("Starting Flask health server...")
+        threading.Thread(target=run_flask, daemon=True).start()
+        
+        # Start Discord bot
+        log.info("Starting Discord bot with complete trade closure system...")
+        bot.run(cfg.token)
+        
+    except Exception as e:
+        log.error(f"Main execution error: {e}")
+        raise
+
+if __name__ == "__main__":
+    main()
+
+# End of Control Tower v11.11 - Complete Trade Closure System
