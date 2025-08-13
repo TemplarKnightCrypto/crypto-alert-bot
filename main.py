@@ -1,5 +1,5 @@
 # ============================================
-# Control Tower - Complete v11.11.1 + Trade Closure System
+# Control Tower - Complete v11.11.2 + Trade Closure System
 # ============================================
 
 import os
@@ -1056,7 +1056,7 @@ def create_bot():
         except Exception as e:
             await ctx.send(f"Performance error: {e}")
 
-@bot.command(name="test_close")
+    @bot.command(name="test_close")
     async def _test_close(ctx, trade_id: str = None):
         """Test closing a trade manually"""
         if not ctx.author.guild_permissions.administrator:
@@ -1173,7 +1173,7 @@ def create_bot():
         except Exception as e:
             await ctx.send(f"Market analysis error: {e}")
 
-@tasks.loop(minutes=2)
+    @tasks.loop(minutes=2)
     async def enhanced_scanner():
         """Enhanced scanner with trade monitoring"""
         try:
@@ -1287,57 +1287,57 @@ def create_bot():
         await trade_manager.start()
         await mdp.start()
 
-@bot.event
+    @bot.event
     async def on_ready():
-        log.info(f"Logged in as {bot.user}")
-        
-        try:
-            await trade_manager.rehydrate()
-            if not enhanced_scanner.is_running():
-                enhanced_scanner.start()
-                
-            # Send startup notification
-            embed = discord.Embed(
-                title="🏰 Complete Control Tower v11.11 Online",
-                description="*Trade closure system implemented - Full automation ready*",
-                color=discord.Color.gold(),
-                timestamp=datetime.now(timezone.utc)
-            )
+            log.info(f"Logged in as {bot.user}")
             
-            embed.add_field(
-                name="✅ System Status",
-                value=(
-                    "🤖 **Discord Bot**: Connected\n"
-                    "📊 **Google Sheets**: Ready\n"
-                    "📈 **Market Scanner**: Running\n"
-                    "🏁 **Trade Closure**: IMPLEMENTED\n"
-                    "🔄 **Trade Monitoring**: Active"
-                ),
-                inline=False
-            )
-            
-            embed.add_field(
-                name="🎯 Trade Closure Logic",
-                value=(
-                    "• **Long Stop Loss**: Price ≤ SL\n"
-                    "• **Long TP1**: Price ≥ TP1 (50% exit)\n"
-                    "• **Long TP2**: Price ≥ TP2 (full exit)\n"
-                    "• **Short Stop Loss**: Price ≥ SL\n"
-                    "• **Short TP1**: Price ≤ TP1 (50% exit)\n"
-                    "• **Short TP2**: Price ≤ TP2 (full exit)"
-                ),
-                inline=False
-            )
-            
-            channel = bot.get_channel(cfg.channels.scrolls_order_id)
-            if channel:
-                await channel.send(embed=embed)
+            try:
+                await trade_manager.rehydrate()
+                if not enhanced_scanner.is_running():
+                    enhanced_scanner.start()
+                    
+                # Send startup notification
+                embed = discord.Embed(
+                    title="🏰 Complete Control Tower v11.11 Online",
+                    description="*Trade closure system implemented - Full automation ready*",
+                    color=discord.Color.gold(),
+                    timestamp=datetime.now(timezone.utc)
+                )
                 
-            log.info("✅ Bot ready with complete trade closure system")
+                embed.add_field(
+                    name="✅ System Status",
+                    value=(
+                        "🤖 **Discord Bot**: Connected\n"
+                        "📊 **Google Sheets**: Ready\n"
+                        "📈 **Market Scanner**: Running\n"
+                        "🏁 **Trade Closure**: IMPLEMENTED\n"
+                        "🔄 **Trade Monitoring**: Active"
+                    ),
+                    inline=False
+                )
                 
-        except Exception as e:
-            log.error(f"Bot ready error: {e}")
-
+                embed.add_field(
+                    name="🎯 Trade Closure Logic",
+                    value=(
+                        "• **Long Stop Loss**: Price ≤ SL\n"
+                        "• **Long TP1**: Price ≥ TP1 (50% exit)\n"
+                        "• **Long TP2**: Price ≥ TP2 (full exit)\n"
+                        "• **Short Stop Loss**: Price ≥ SL\n"
+                        "• **Short TP1**: Price ≤ TP1 (50% exit)\n"
+                        "• **Short TP2**: Price ≤ TP2 (full exit)"
+                    ),
+                    inline=False
+                )
+                
+                channel = bot.get_channel(cfg.channels.scrolls_order_id)
+                if channel:
+                    await channel.send(embed=embed)
+                    
+                log.info("✅ Bot ready with complete trade closure system")
+                    
+            except Exception as e:
+                log.error(f"Bot ready error: {e}")
+    
     return bot
 
 def main():
