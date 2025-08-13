@@ -1,5 +1,5 @@
 # ============================================
-# Control Tower - Clean v11.10.3 + Enhanced Alert System
+# Control Tower - Clean v11.10.5 + Enhanced Alert System
 # ============================================
 
 import os
@@ -298,14 +298,16 @@ class AlertManager:
     def __init__(self, bot, config: BotConfig):
         self.bot = bot
         self.config = config
-        self.last_scorecard_time = None
-        self.last_100x_time = None
-        self.cooldowns = defaultdict(lambda: datetime.min.replace(tzinfo=timezone.utc))
-        self.battleground_cooldown = datetime.min.replace(tzinfo=timezone.utc)
+        # Initialize all datetime fields as timezone-aware
+        utc_min = datetime.min.replace(tzinfo=timezone.utc)
+        self.last_scorecard_time = utc_min
+        self.last_100x_time = utc_min
+        self.cooldowns = defaultdict(lambda: utc_min)
+        self.battleground_cooldown = utc_min
         self.enhanced_cooldowns = {
-            "setup": {},
-            "warning": {},
-            "battleground": datetime.min.replace(tzinfo=timezone.utc)
+            "setup": defaultdict(lambda: utc_min),
+            "warning": defaultdict(lambda: utc_min), 
+            "battleground": utc_min
         }
         self.setup_tracking = {}
         self.setup_success_rates = defaultdict(lambda: {"attempts": 0, "conversions": 0})
@@ -321,7 +323,12 @@ class AlertManager:
     def _safe_time_diff(self, dt1: datetime, dt2: Optional[datetime]) -> float:
         """Safely calculate time difference in seconds"""
         dt2_aware = self._ensure_timezone_aware(dt2)
-        return (dt1 - dt2_aware).total_seconds()
+        dt1_aware = self._ensure_timezone_aware(dt1)
+        return (dt1_aware - dt2_aware).total_seconds()
+    
+    def _get_utc_now(self) -> datetime:
+        """Get current UTC time - always timezone aware"""
+        return datetime.now(timezone.utc)
         
     async def send_market_scorecard(self, df: pd.DataFrame, levels: Dict[str, float]):
         """📜 Send enhanced market scorecard to Scribes Keep"""
@@ -419,7 +426,7 @@ class AlertManager:
                 
             latest = df.iloc[-1]
             price = float(latest["close"])
-            now = datetime.now(timezone.utc)
+            now = self._get_utc_now()
             
             # Enhanced ATR-based distance calculation
             atr_value = self._calculate_atr(df)
@@ -504,7 +511,7 @@ class AlertManager:
             if not channel:
                 return
                 
-            now = datetime.now(timezone.utc)
+            now = self._get_utc_now()
             
             # Filter by minimum quality
             if score < 3:
