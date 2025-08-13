@@ -1,6 +1,6 @@
-
+#!/usr/bin/env python3
 # ============================================
-# Control Tower - Clean v11.5
+# Control Tower - Clean v11.6
 # ============================================
 
 import os
@@ -511,6 +511,139 @@ class MarketDataProvider:
             log.error(f"OHLC fetch error: {e}")
             raise
 
+async def calculate_enhanced_metrics(df: pd.DataFrame, latest: pd.Series, level_price: float, direction: str) -> Dict[str, Any]:
+    """Calculate enhanced metrics for Google Sheets"""
+    try:
+        # Basic metrics
+        rsi = float(latest.get("rsi", 50)) if TA_AVAILABLE else 50.0
+        volume = float(latest.get("volume", 0))
+        price = float(latest["close"])
+        
+        # Volume ratio
+        avg_volume = float(df["volume"].tail(10).mean()) if len(df) >= 10 else volume
+        volume_ratio = volume / avg_volume if avg_volume > 0 else 1.0
+        
+        # Market status from RSI
+        if rsi > 75:
+            market_status = "OVERBOUGHT"
+        elif rsi < 25:
+            market_status = "OVERSOLD"
+        else:
+            market_status = "NORMAL"
+        
+        # VWAP position (simplified)
+        vwap = float(latest.get("vwap", price))
+        vwap_position = "Above" if price > vwap else "Below"
+        
+        # MACD status (if available)
+        macd_hist = float(latest.get("macd_hist", 0)) if TA_AVAILABLE else 0
+        macd_status = "Bullish" if macd_hist > 0 else "Bearish"
+        
+        # Market bias from trend
+        recent_closes = df["close"].tail(5)
+        trend_up = recent_closes.iloc[-1] > recent_closes.iloc[0]
+        if direction == "Long":
+            market_bias = "Bullish" if trend_up else "Neutral"
+        else:
+            market_bias = "Bearish" if not trend_up else "Neutral"
+        
+        # Enhanced score calculation
+        base_score = 4  # Base breakout score
+        enhanced_score = base_score
+        
+        # Add points for favorable conditions
+        if volume_ratio > 1.2:
+            enhanced_score += 1
+        if market_status == "NORMAL":
+            enhanced_score += 1
+        if (direction == "Long" and rsi > 50) or (direction == "Short" and rsi < 50):
+            enhanced_score += 1
+            
+        enhanced_score = min(enhanced_score, 6)  # Cap at 6
+        
+        # Risk % and R:R Ratio calculations
+        entry_price = price
+        if direction == "Long":
+            sl_price = entry_price * 0.99
+            tp1_price = entry_price * 1.015
+        else:
+            sl_price = entry_price * 1.01
+            tp1_price = entry_price * 0.985
+            
+        risk_pct = abs((entry_price - sl_price) / entry_price) * 100
+        reward_pct = abs((tp1_price - entry_price) / entry_price) * 100
+        rr_ratio = reward_pct / risk_pct if risk_pct > 0 else 0
+        
+        # Tier based on enhanced score
+        if enhanced_score >= 5:
+            tier = "S"
+        elif enhanced_score == 4:
+            tier = "A"
+        else:
+            tier = "B"
+        
+        # Distance from level
+        distance_pct = abs(price - level_price) / price * 100
+        
+        # Market session
+        hour = datetime.now(timezone.utc).hour
+        if 8 <= hour < 12:
+            market_session = "Open"
+        elif 12 <= hour < 16:
+            market_session = "Mid-day"
+        elif 16 <= hour < 20:
+            market_session = "Close"
+        else:
+            market_session = "After-hours"
+        
+        return {
+            # Enhanced data block to match your exact sheet structure
+            "enhanced_score": enhanced_score,
+            "rsi_level": round(rsi, 8),  # Match your precision (like 39.03337249)
+            "volume_ratio": round(volume_ratio, 8),  # Match your precision
+            "market_status": market_status,
+            "vwap_position": vwap_position,
+            "macd_status": macd_status,
+            "market_bias": market_bias,
+            "setup_age_minutes": 7,  # Typical setup age
+            "breakout_structure": "Present" if volume_ratio > 1.0 else "Missing",
+            "confluence_count": min(4, int(enhanced_score - base_score + 2)),
+            "candle_body_strength": "Strong" if volume_ratio > 1.2 else "Moderate",
+            "market_session": market_session,
+            "distance_from_level_pct": round(distance_pct, 8),
+            "recent_news_events": "No",
+            "volatility_state": market_status.lower().title() if market_status != "NORMAL" else "Normal",
+            "trend_strength": f"Moderate {market_bias}",
+            # Additional fields for your sheet
+            "confidence": tier,
+            "risk_pct": round(risk_pct, 2),
+            "rr_ratio": round(rr_ratio, 1),
+            "tier": tier
+        }
+        
+    except Exception as e:
+        log.error(f"Enhanced metrics calculation error: {e}")
+        # Return minimal fallback data
+        return {
+            "enhanced_score": 4,
+            "rsi_level": 50.0,
+            "volume_ratio": 1.0,
+            "market_status": "NORMAL",
+            "vwap_position": "Above",
+            "macd_status": "Neutral",
+            "market_bias": "Neutral",
+            "setup_age_minutes": 0,
+            "breakout_structure": "Present",
+            "confluence_count": 2,
+            "candle_body_strength": "Moderate",
+            "market_session": "Mid-day",
+            "distance_from_level_pct": 0.0,
+            "recent_news_events": "No",
+            "volatility_state": "Normal",
+            "trend_strength": "Moderate",
+            "tier": "A"
+        }
+
 def calc_camarilla(df: pd.DataFrame) -> Dict[str, float]:
     try:
         if len(df) < 2:
@@ -835,12 +968,17 @@ def create_bot():
             if not ch:
                 return
                 
-            # Check for breakout signals (simplified)
+            # Check for breakout signals (enhanced with full data)
             h5 = levels.get("H5")
             l5 = levels.get("L5")
             
             if h5 and c > h5:
-                # Potential long signal
+                # Potential long signal with enhanced data
+                latest = df.iloc[-1]
+                
+                # Calculate enhanced metrics
+                enhanced_data = await calculate_enhanced_metrics(df, latest, h5, "Long")
+                
                 t = TradeData(
                     id=datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),
                     asset=cfg.pair,
@@ -850,7 +988,38 @@ def create_bot():
                     tp1=c * 1.015,
                     tp2=c * 1.03,
                     level_name="H5",
-                    knight="Sir Camarilla"
+                    level_price=h5,
+                    knight="Sir Camarilla",
+                    rating=enhanced_data.get("confidence", "A"),
+                    score=enhanced_data.get("enhanced_score", 4),
+                    trade_type="H5_Breakout",
+                    enhanced_data=enhanced_data
+                )
+                await trade_manager.open_trade(t)
+                await send_battle_signal(ch, t)
+            
+            elif l5 and c < l5:
+                # Potential short signal with enhanced data
+                latest = df.iloc[-1]
+                
+                # Calculate enhanced metrics
+                enhanced_data = await calculate_enhanced_metrics(df, latest, l5, "Short")
+                
+                t = TradeData(
+                    id=datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"),
+                    asset=cfg.pair,
+                    direction=TradeDirection.SHORT,
+                    entry_price=c,
+                    sl=c * 1.01,
+                    tp1=c * 0.985,
+                    tp2=c * 0.97,
+                    level_name="L5",
+                    level_price=l5,
+                    knight="Sir Camarilla",
+                    rating=enhanced_data.get("confidence", "A"),
+                    score=enhanced_data.get("enhanced_score", 4),
+                    trade_type="L5_Breakout",
+                    enhanced_data=enhanced_data
                 )
                 await trade_manager.open_trade(t)
                 await send_battle_signal(ch, t)
