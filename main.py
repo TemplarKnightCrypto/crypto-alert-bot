@@ -1,5 +1,5 @@
 # =====================================================================
-# Control Tower - v11.7 Advanced + Channels
+# Control Tower - v11.8 Advanced + Channels
 # =====================================================================
 # What's included
 # - Channel routing (Scorecard, Battle, 100x, Proximity, Battleground, Setup)
@@ -253,6 +253,23 @@ class GoogleSheetsIntegration:
     def __init__(self, url: Optional[str], token: Optional[str]):
         self.url = url
         self.token = token
+        # Optional JSON mapping from env to rename fields, e.g. {"entry_price":"Entry","tp1":"TP1"}
+        import os, json
+        self.field_map = {}
+        try:
+            raw = os.getenv("SHEETS_FIELD_MAP", "")
+            if raw.strip():
+                self.field_map = json.loads(raw)
+        except Exception:
+            self.field_map = {}
+
+    def _apply_field_map(self, payload: dict) -> dict:
+        if not self.field_map:
+            return payload
+        out = {}
+        for k, v in payload.items():
+            out[self.field_map.get(k, k)] = v
+        return out
 
     async def _post(self, session: aiohttp.ClientSession, payload: Dict[str, Any]):
         if not self.url or not self.token:
@@ -265,19 +282,95 @@ class GoogleSheetsIntegration:
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
+    
     async def send_trade_entry(self, session, t: TradeData):
-        payload = {
+        # Flatten metrics to explicit fields
+        ed = t.enhanced_data or {}
+        # Derive a few if missing
+        try:
+            rsi = float(ed.get("rsi_level", 50))
+        except Exception:
+            rsi = 50.0
+        # Market Status from RSI
+        market_status = ed.get("market_status")
+        if not market_status:
+            if rsi >= 75:
+                market_status = "OVERBOUGHT"
+            elif rsi <= 25:
+                market_status = "OVERSOLD"
+            else:
+                market_status = "NORMAL"
+        trend_bias = ed.get("trend_bias") or ed.get("market_bias") or "-"
+        # vwap position if available in ed; leave blank otherwise
+        vwap_position = ed.get("vwap_position") or "-"
+        macd_status = ed.get("macd_status") or "-"
+        # Risk & RR from entry/sl/tp1 (fallbacks)
+        try:
+            risk_pct = abs((t.entry_price - t.sl) / t.entry_price) * 100.0
+        except Exception:
+            risk_pct = None
+        try:
+            reward_pct = abs(((t.tp1 or t.tp2) - t.entry_price) / t.entry_price) * 100.0 if (t.tp1 or t.tp2) else None
+            rr_ratio = (reward_pct / risk_pct) if (reward_pct and risk_pct) else None
+        except Exception:
+            rr_ratio = None
+        # Body strength heuristic (if present in ed)
+        candle_body_strength = ed.get("candle_body_strength") or "-"
+        # Setup age
+        setup_age_minutes = ed.get("setup_age_minutes") or ""
+        # Breakout structure/confluence
+        breakout_structure = ed.get("breakout_structure") or ""
+        confluence_count = ed.get("confluence_count") or ""
+        market_session = ed.get("market_session") or ""
+        distance_from_level_pct = ed.get("distance_from_level_pct") or ""
+        recent_news_events = ed.get("recent_news_events") or "No"
+        volatility_state = ed.get("volatility_state") or ""
+        trend_strength = ed.get("trend_strength") or (f"Moderate {trend_bias}" if trend_bias not in ("-", "") else "")
+
+        base = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "trade_id": t.id, "asset": t.asset,
+            "trade_id": t.id,
+            "asset": t.asset,
             "direction": t.direction.name.title(),
-            "entry_price": t.entry_price, "stop_loss": t.sl,
-            "target1": t.tp1, "target2": t.tp2,
             "status": "OPEN",
             "level_name": t.level_name or "",
-            "score": t.score or 0, "confidence": t.rating or "",
-            "knight": t.knight or "", "trade_type": t.trade_type or "",
-            "enhanced_data": t.enhanced_data or {},
+            "trade_type": t.trade_type or "",
+            "score": t.score or 0,                         # Original Score (legacy)
+            "enhanced_score": ed.get("enhanced_score", t.score or 0),
+            "confidence": t.rating or "",
+            "knight": t.knight or "",
+            # Flat metrics for your sheet
+            "rsi_level": rsi,
+            "volume_ratio": ed.get("volume_ratio"),
+            "market_status": market_status,
+            "vwap_position": vwap_position,
+            "macd_status": macd_status,
+            "trend_bias": trend_bias,
+            "risk_pct": round(risk_pct, 2) if risk_pct is not None else "",
+            "rr_ratio": round(rr_ratio, 2) if rr_ratio is not None else "",
+            "setup_age_minutes": setup_age_minutes,
+            "breakout_structure": breakout_structure,
+            "confluence_count": confluence_count,
+            "candle_body_strength": candle_body_strength,
+            "market_session": market_session,
+            "distance_from_level_pct": distance_from_level_pct,
+            "recent_news_events": recent_news_events,
+            "volatility_state": volatility_state,
+            "trend_strength": trend_strength,
+            "enhanced_data": ed,   # still include the blob for compatibility
         }
+        price_block = {
+            "entry_price": t.entry_price,
+            "entry": t.entry_price,          # alias
+            "stop_loss": t.sl,
+            "stop": t.sl,                    # alias
+            "tp1": t.tp1,
+            "target1": t.tp1,                # alias
+            "tp2": t.tp2,
+            "target2": t.tp2,                # alias
+        }
+        payload = {**base, **price_block}
+        payload = self._apply_field_map(payload)
         return await self._post(session, payload)
 
     async def rehydrate_open_trades(self, session) -> List[TradeData]:
@@ -314,6 +407,23 @@ class GoogleSheetsIntegration:
             except Exception:
                 continue
         return out
+
+    async def send_trade_exit(self, session, trade_id: str, reason: str, price: float, time_iso: str, pnl_pct: float):
+        base = {
+            "action": "update",
+            "trade_id": trade_id,
+            "exit_price": price,
+            "exit": price,             # alias
+            "exit_reason": reason,
+            "pnl_pct": pnl_pct,
+            "pnl": pnl_pct,            # alias
+            "exit_time": time_iso,
+            "closed_at": time_iso,     # alias
+            "status": "CLOSED",
+        }
+        payload = self._apply_field_map(base)
+        return await self._post(session, payload)
+
 
 # -------- Trade Manager --------
 class TradeManager:
