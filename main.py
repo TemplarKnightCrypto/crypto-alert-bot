@@ -1,5 +1,5 @@
 # ============================================
-# Control Tower - Complete v11.11.5 + Trade Closure System
+# Control Tower - Complete v11.11.6
 # ============================================
 
 import os
@@ -335,7 +335,7 @@ class BotConfig:
             trail_atr_mult = 3.0
             
         try:
-            chand_lookback = int(os.getenv("CHAN_LOOKBOOK", "22"))
+            chand_lookback = int(os.getenv("CHAN_LOOKBACK", "22"))
         except (ValueError, TypeError):
             chand_lookback = 22
             
@@ -510,6 +510,7 @@ class TradeData:
     trade_type: Optional[str] = None
     enhanced_data: Optional[Dict[str, Any]] = field(default_factory=dict)
     tp1_done: bool = False
+    be_active: bool = False
     partial_fraction: float = 0.0
     exit_reason: Optional[str] = None
     exit_price: Optional[float] = None
@@ -522,148 +523,228 @@ class GoogleSheetsIntegration:
         self.token = token
 
     async def _post(self, session: aiohttp.ClientSession, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        POST to Apps Script with real retries on non-2xx and exceptions.
+        Include 'action' when doing updates (e.g., {'action': 'update', ...}).
+        """
         if not self.url or not self.token:
-            log.warning("Sheets not configured - skipping POST")
+            log.warning("[Sheets] not configured - skipping POST")
             return {"status": "skipped", "reason": "no_config"}
-        
+
         # Store payload for debugging
         global last_sheets_payload
         last_sheets_payload = payload.copy()
-        
+
         headers = {"x-app-secret": self.token, "content-type": "application/json"}
-        
-        log.info(f"Posting to sheets URL: {self.url}")
-        log.info(f"Headers: x-app-secret: {self.token[:10]}...")
-        
+        log.info(f"[Sheets] POST -> {self.url}")
+
+        last_status = None
+        last_body = None
+
         for attempt in range(1, 4):
             try:
-                timeout = aiohttp.ClientTimeout(total=15)
+                timeout = aiohttp.ClientTimeout(total=20)
                 async with session.post(self.url, headers=headers, json=payload, timeout=timeout) as resp:
                     txt = await resp.text()
-                    log.info(f"Sheets attempt {attempt}: status={resp.status}, response={txt[:200]}")
-                    
-                    if resp.status < 300:
-                        return {"status": "success", "response": txt}
-                    else:
-                        log.warning(f"Sheets POST attempt {attempt}: {resp.status} - {txt[:200]}")
-                        return {"status": resp.status, "body": txt}
+                    last_status, last_body = resp.status, txt
+                    if 200 <= resp.status < 300:
+                        log.info(f"[Sheets] attempt {attempt}: {resp.status}")
+                        return {"status": "success", "response": txt, "code": resp.status}
+                    log.warning(f"[Sheets] attempt {attempt} non-2xx {resp.status}: {txt[:300]}")
             except Exception as e:
-                log.warning(f"Sheets POST attempt {attempt} error: {e}")
-                if attempt == 3:
-                    return {"status": "error", "error": str(e)}
-            await asyncio.sleep(1.0 * attempt)
+                log.warning(f"[Sheets] attempt {attempt} exception: {e}")
 
-        return {"status": "failed", "reason": "max_retries_exceeded"}
+            await asyncio.sleep(1.5 * attempt)
+
+        return {"status": "error", "message": "All retries failed", "code": last_status, "body": (last_body or "")}
 
     async def send_trade_entry(self, session: aiohttp.ClientSession, t):
-        # Create clean trade ID
-        clean_trade_id = t.id
-        if len(clean_trade_id) > 16:
-            clean_trade_id = clean_trade_id[-8:]
-        
-        # Build base payload matching sheet structure
+        # SAME trade_id everywhere (no truncation)
+        trade_id = t.id
+
         payload = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "trade_id": clean_trade_id,
+            "trade_id": trade_id,
             "asset": t.asset,
-            "direction": t.direction.name.title(),
+            "direction": t.direction.name.title(),      # "Long"/"Short"
             "entry_price": float(t.entry_price),
             "stop_loss": float(t.sl),
-            "take_profit_1": float(t.tp1), 
+            "take_profit_1": float(t.tp1),
             "take_profit_2": float(t.tp2),
             "status": "OPEN",
             "original_score": int(t.score or 0),
         }
-        
-        # Enhanced data fields
-        enhanced_data = t.enhanced_data or {}
+
+        # Enhanced (optional)
+        ed = t.enhanced_data or {}
         payload.update({
-            "enhanced_score": enhanced_data.get("enhanced_score", t.score or 0),
-            "rsi_level": enhanced_data.get("rsi_level", 50.0),
-            "volume_ratio": enhanced_data.get("volume_ratio", 1.0),
-            "market_status": enhanced_data.get("market_status", "NORMAL"),
-            "vwap_position": enhanced_data.get("vwap_position", "Above"),
-            "macd_status": enhanced_data.get("macd_status", "Neutral"),
-            "market_bias": enhanced_data.get("market_bias", "Neutral"),
+            "enhanced_score": ed.get("enhanced_score", t.score or 0),
+            "rsi_level": ed.get("rsi_level", 50.0),
+            "volume_ratio": ed.get("volume_ratio", 1.0),
+            "market_status": ed.get("market_status", "NORMAL"),
+            "vwap_position": ed.get("vwap_position", "Above"),
+            "macd_status": ed.get("macd_status", "Neutral"),
+            "market_bias": ed.get("market_bias", "Neutral"),
             "level_name": t.level_name or "Unknown",
             "knight": t.knight or "Unknown",
             "trade_type": t.trade_type or "Breakout",
             "confidence": t.rating or "A",
-            "risk_pct": enhanced_data.get("risk_pct", 1.0),
-            "rr_ratio": enhanced_data.get("rr_ratio", 1.5),
+            "risk_pct": ed.get("risk_pct", 1.0),
+            "rr_ratio": ed.get("rr_ratio", 1.5),
         })
-        
-        log.info(f"Sending to sheets - Trade ID: {clean_trade_id}, Level: {t.level_name}")
+
+        log.info(f"[Sheets] Entry -> {trade_id} ({t.level_name})")
         result = await self._post(session, payload)
-        log.info(f"Sheets response: {result}")
-        
+        log.info(f"[Sheets] Entry response: {result}")
         return result
 
-    async def send_trade_exit(self, session: aiohttp.ClientSession, trade_id: str, reason: str, price: float, time_iso: str, pnl_pct: float):
+    async def send_trade_exit(
+        self,
+        session: aiohttp.ClientSession,
+        trade_id: str,
+        reason: str,
+        price: float,
+        time_iso: str,
+        pnl_pct: float
+    ):
         payload = {
             "action": "update",
-            "trade_id": trade_id,
+            "trade_id": trade_id,                 # SAME id as entry
             "exit_price": float(price),
             "exit_reason": str(reason),
             "pnl_pct": float(pnl_pct),
             "exit_time": time_iso,
         }
-        
-        log.info(f"Sending trade exit to sheets: {trade_id} - {reason} - {pnl_pct:+.2f}%")
+
+        log.info(f"[Sheets] Exit -> {trade_id} | {reason} | {pnl_pct:+.2f}%")
         result = await self._post(session, payload)
-        
         if result.get("status") == "success":
-            log.info(f"Trade exit sent to sheets: {trade_id}")
+            log.info(f"[Sheets] Exit sent: {trade_id}")
         else:
-            log.warning(f"Trade exit failed for {trade_id}: {result}")
+            log.warning(f"[Sheets] Exit failed for {trade_id}: {result}")
         return result
 
+    async def send_partial_update(
+        self,
+        session: aiohttp.ClientSession,
+        trade_id: str,
+        partial_fraction: float,
+        partial_price: float
+    ):
+        """Record TP1 partial exits to Sheets (optional)."""
+        payload = {
+            "action": "update",
+            "trade_id": trade_id,
+            "status": "PARTIAL",
+            "partial_fraction": float(partial_fraction),
+            "partial_price": float(partial_price),
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        log.info(f"[Sheets] Partial -> {trade_id} | {partial_fraction*100:.0f}% @ {partial_price:.2f}")
+        return await self._post(session, payload)
+
     async def rehydrate_open_trades(self, session) -> List:
+        """Fetch OPEN trades and rebuild TradeData, accepting multiple header variants."""
         if not self.url or not self.token:
-            log.info("Sheets not configured, skipping rehydration")
-            return []
-        
-        params = {"action": "open", "key": self.token}
-        try:
-            timeout = aiohttp.ClientTimeout(total=15)
-            async with session.get(self.url, params=params, timeout=timeout) as resp:
-                if resp.status != 200:
-                    log.warning(f"Rehydrate GET failed: {resp.status}")
-                    return []
-                txt = await resp.text()
-                data = json.loads(txt) if txt else {}
-                rows = data.get("rows", [])
-                log.info(f"Fetched {len(rows)} trades from sheets for rehydration")
-        except Exception as e:
-            log.warning(f"Rehydrate GET failed: {e}")
+            log.info("[Sheets] not configured, skipping rehydration")
             return []
 
-        out = []
+        params = {"action": "open", "key": self.token}
+        rows: List[Dict[str, Any]] = []
+        try:
+            timeout = aiohttp.ClientTimeout(total=20)
+            async with session.get(self.url, params=params, timeout=timeout) as resp:
+                if resp.status != 200:
+                    log.warning(f"[Sheets] Rehydrate GET failed: {resp.status}")
+                    return []
+                # Try JSON first (even if content-type is wrong), fallback to text->json
+                try:
+                    data = await resp.json(content_type=None)
+                except Exception:
+                    txt = await resp.text()
+                    data = json.loads(txt) if txt else {}
+                rows = (data.get("rows") or data.get("data") or [])  # tolerate different roots
+                log.info(f"[Sheets] Rehydrate fetched {len(rows)} row(s)")
+        except Exception as e:
+            log.warning(f"[Sheets] Rehydrate GET exception: {e}")
+            return []
+
+        # ---------- helpers ----------
+        def pick(row: Dict[str, Any], *names, default=None):
+            for n in names:
+                if n in row and row[n] not in (None, ""):
+                    return row[n]
+            return default
+
+        def to_float(v: Any, default: float = 0.0) -> float:
+            try:
+                if isinstance(v, str):
+                    s = v.strip().replace(",", "")
+                    if s.endswith("%"):
+                        s = s[:-1]
+                    return float(s)
+                return float(v)
+            except Exception:
+                return default
+
+        def to_int(v: Any, default: int = 0) -> int:
+            try:
+                return int(float(v))  # tolerate "3.0"
+            except Exception:
+                return default
+
+        def to_bool(v: Any) -> bool:
+            if isinstance(v, bool):
+                return v
+            s = str(v).strip().lower()
+            return s in ("1", "true", "t", "yes", "y")
+
+        out: List[TradeData] = []
         for r in rows:
             try:
-                dir_raw = str(r.get("direction", "Long")).strip().upper()
+                # id & asset
+                trade_id = str(pick(r, "trade_id", "id", "TradeID", default=f"rehydrated_{len(out)}"))
+                asset    = str(pick(r, "asset", "symbol", "ticker", "pair", "instrument", default="ETH"))
+
+                # direction
+                dir_raw = str(pick(r, "direction", "side", "dir", default="Long")).strip().upper()
                 direction = TradeDirection.LONG if dir_raw.startswith("L") else TradeDirection.SHORT
-                
+
+                # prices (accept multiple header variants)
+                entry = to_float(pick(r, "entry_price", "entry", "avg_entry", "Entry"), 0.0)
+                sl    = to_float(pick(r, "stop_loss", "sl", "stop", "stop_price"), 0.0)
+                tp1   = to_float(pick(r, "take_profit_1", "tp1", "target1", "tp_1"), 0.0)
+                tp2   = to_float(pick(r, "take_profit_2", "tp2", "target2", "tp_2"), 0.0)
+
+                # misc / optional
+                score       = to_int(pick(r, "score", "original_score", "enhanced_score", "Score"), 0)
+                rating      = str(pick(r, "confidence", "rating", "grade", default=""))
+                knight      = str(pick(r, "knight", default=""))
+                level_name  = str(pick(r, "level_name", "level", "zone", default=""))
+                tp1_done    = to_bool(pick(r, "tp1_done", "partial_taken", "tp1_hit", "tp1Reached", default=False))
+                partial_fr  = to_float(pick(r, "partial_fraction", "partial", "partial_size", default=0.0), 0.0)
+
                 trade = TradeData(
-                    id=str(r.get("trade_id") or r.get("id") or f"rehydrated_{len(out)}"),
-                    asset=str(r.get("asset") or "ETH"),
+                    id=trade_id,
+                    asset=asset,
                     direction=direction,
-                    entry_price=float(r.get("entry_price") or 0),
-                    sl=float(r.get("stop_loss") or 0),
-                    tp1=float(r.get("tp1") or r.get("target1") or 0),
-                    tp2=float(r.get("tp2") or r.get("target2") or 0),
-                    score=int(r.get("score") or 0),
-                    rating=str(r.get("confidence") or ""),
-                    knight=str(r.get("knight") or ""),
-                    level_name=str(r.get("level_name") or ""),
-                    tp1_done=bool(r.get("tp1_done", False)),
-                    partial_fraction=float(r.get("partial_fraction", 0.0))
+                    entry_price=entry,
+                    sl=sl,
+                    tp1=tp1,
+                    tp2=tp2,
+                    score=score,
+                    rating=rating,
+                    knight=knight,
+                    level_name=level_name,
+                    tp1_done=tp1_done,
+                    partial_fraction=partial_fr
                 )
                 out.append(trade)
+
             except Exception as e:
-                log.warning(f"Bad row in rehydrate: {e}")
-                
-        log.info(f"Successfully rehydrated {len(out)} trades")
+                log.warning(f"[Sheets] Bad rehydrate row: {e}")
+
+        log.info(f"[Sheets] Rehydrated {len(out)} trade(s)")
         return out
 
 # -------- Trade Manager --------
@@ -843,16 +924,169 @@ class TradeManager:
         except Exception as e:
             log.error(f"Exit notification error: {e}")
 
+def compute_trailing_stop(trade: "TradeData", df: pd.DataFrame) -> Optional[float]:
+    """
+    Returns a tighter SL if trailing should move it, else None.
+    Modes:
+      - cfg.trail_mode == "atr" uses cfg.trail_atr_mult (default 2.0)
+      - cfg.trail_mode == "chandelier" uses CHAND_LOOKBACK & CHAND_ATR_MULT envs
+    Never loosens the stop.
+    """
+    mode = str(getattr(cfg, "trail_mode", "off")).lower()
+    if mode == "off" or df is None or len(df) < 20:
+        return None
+
+    # ATR (14) — simple average true range
+    def _atr(arr: pd.DataFrame, period: int = 14) -> Optional[float]:
+        if len(arr) < period + 1:
+            return None
+        h, l, c = arr["high"].to_numpy(), arr["low"].to_numpy(), arr["close"].to_numpy()
+        trs = [max(h[i]-l[i], abs(h[i]-c[i-1]), abs(l[i]-c[i-1])) for i in range(1, len(arr))]
+        if len(trs) < period:
+            return None
+        return float(sum(trs[-period:]) / period)
+
+    atr = _atr(df, 14) or 0.0
+    close = float(df.iloc[-1]["close"])
+
+    if mode == "atr":
+        mult = float(getattr(cfg, "trail_atr_mult", 2.0))
+        if trade.direction == TradeDirection.LONG:
+            return max(trade.sl, close - mult * atr)
+        else:
+            return min(trade.sl, close + mult * atr)
+
+    if mode == "chandelier":
+        lookback = int(os.getenv("CHAND_LOOKBACK", "22"))
+        mult     = float(os.getenv("CHAND_ATR_MULT", "3.0"))
+        if len(df) < lookback:
+            return None
+        highN = float(df["high"].tail(lookback).max())
+        lowN  = float(df["low"].tail(lookback).min())
+
+        if trade.direction == TradeDirection.LONG:
+            chand = highN - mult * atr
+            return max(trade.sl, chand)
+        else:
+            chand = lowN + mult * atr
+            return min(trade.sl, chand)
+
+    return None
+
+# ---- Active trade monitor (TP1 -> BE, TP2/SL closes, trailing) ----
+async def monitor_active_trades(df: pd.DataFrame, current_price: float):
+    """
+    Checks each active trade for TP1/TP2/SL.
+    - On TP1: logs partial, moves SL to BE (with optional offset), notifies Sheets/Discord.
+    - On TP2 or SL: closes the trade.
+    - Applies trailing stop tightening if enabled (uses compute_trailing_stop if present).
+    """
+    if not trade_manager.active:
+        return
+
+    for trade_id, trade in list(trade_manager.active.items()):
+        try:
+            if trade.direction == TradeDirection.LONG:
+                hit_sl  = current_price <= trade.sl
+                hit_tp1 = (not trade.tp1_done) and current_price >= trade.tp1
+                hit_tp2 = current_price >= trade.tp2
+            else:
+                hit_sl  = current_price >= trade.sl
+                hit_tp1 = (not trade.tp1_done) and current_price <= trade.tp1
+                hit_tp2 = current_price <= trade.tp2
+
+            # ---- TP1 partial ----
+            if hit_tp1:
+                trade.tp1_done = True
+
+                # record partial in DB
+                fraction = float(getattr(cfg, "partial_fraction", 0.5))
+                trade_manager.db.add_partial(
+                    trade.id, fraction, current_price, datetime.now(timezone.utc)
+                )
+
+                # ---- Break-even move after TP1 ----
+                be_enabled = bool(getattr(cfg, "be_after_tp1", True))
+                be_offset  = float(getattr(cfg, "be_offset_pct", 0.0)) / 100.0  # e.g., 0.05 -> 0.05%
+                if be_enabled and not getattr(trade, "be_active", False):
+                    trade.be_active = True
+                    if trade.direction == TradeDirection.LONG:
+                        new_sl = trade.entry_price * (1 - be_offset)
+                        trade.sl = max(trade.sl, new_sl)  # never loosen
+                    else:
+                        new_sl = trade.entry_price * (1 + be_offset)
+                        trade.sl = min(trade.sl, new_sl)
+                    log.info(f"[BE] {trade.id} SL -> {trade.sl:.4f}")
+
+                # Optional: Sheets partial
+                try:
+                    if sheets and getattr(trade_manager, "session", None) and hasattr(sheets, "send_partial_update"):
+                        await sheets.send_partial_update(
+                            trade_manager.session, trade.id, fraction, current_price
+                        )
+                except Exception as e:
+                    log.warning(f"[Sheets] partial update failed: {e}")
+
+                # Optional: Discord partial embed
+                try:
+                    ch = bot.get_channel(cfg.channels.scrolls_order_id)
+                    if ch:
+                        e = discord.Embed(
+                            title="⚖️ TP1 Hit — Partial Exit",
+                            color=discord.Color.teal(),
+                            timestamp=datetime.now(timezone.utc),
+                        )
+                        e.add_field(name="Trade", value=trade.id, inline=True)
+                        e.add_field(name="Side", value=trade.direction.name, inline=True)
+                        e.add_field(name="Partial", value=f"{fraction*100:.0f}%", inline=True)
+                        e.add_field(name="Price", value=f"${current_price:.2f}", inline=True)
+                        e.add_field(name="New SL", value=f"${trade.sl:.2f}", inline=True)
+                        await ch.send(embed=e)
+                except Exception as e:
+                    log.warning(f"[Discord] partial embed failed: {e}")
+
+                trade_manager.db.save_trade(trade)
+                continue  # move to next trade
+
+            # ---- TP2 or SL full exit ----
+            if hit_tp2 or hit_sl:
+                reason = "TP2" if hit_tp2 else "SL"
+                await trade_manager.close_trade(trade_id, reason, current_price)
+                continue
+
+            # ---- Trailing stop tighten (if compute_trailing_stop exists) ----
+            try:
+                if "compute_trailing_stop" in globals():
+                    new_sl = compute_trailing_stop(trade, df)
+                else:
+                    new_sl = None
+
+                if new_sl is not None:
+                    if trade.direction == TradeDirection.LONG and new_sl > trade.sl:
+                        trade.sl = new_sl
+                        trade_manager.db.save_trade(trade)
+                    elif trade.direction == TradeDirection.SHORT and new_sl < trade.sl:
+                        trade.sl = new_sl
+                        trade_manager.db.save_trade(trade)
+            except Exception as e:
+                log.warning(f"[trail] error for {trade.id}: {e}")
+
+        except Exception as e:
+            log.error(f"[monitor] error on {trade_id}: {e}")
+
+
 # -------- Market Data --------
 class MarketDataProvider:
     KRAKEN_PAIR_MAP = {
         "ETHUSD": "ETHUSD",
-        "BTCUSD": "XBTUSD",
-        "SOLUSD": "SOLUSD"
+        "BTCUSD": "XBTUSD",  # Kraken uses XBT
+        "SOLUSD": "SOLUSD",
     }
 
     def __init__(self, pair: str, interval_min: int):
-        self.pair = self.KRAKEN_PAIR_MAP.get(pair, pair)
+        # Normalize requested pair for Kraken
+        self.requested_pair = pair  # keep original for logs
+        self.pair = self.KRAKEN_PAIR_MAP.get(pair.upper().replace("/", ""), pair.upper().replace("/", ""))
         self.interval_min = interval_min
         self.session = None
 
@@ -866,40 +1100,99 @@ class MarketDataProvider:
             await self.session.close()
             self.session = None
 
+    # ---------- Kraken key helpers ----------
+    @staticmethod
+    def _kraken_norm_req(pair: str) -> str:
+        # Normalize requested pair: BTC->XBT, remove slash
+        s = (pair or "").upper().replace("/", "")
+        return s.replace("BTC", "XBT")
+
+    @staticmethod
+    def _kraken_norm_key(key: str) -> str:
+        # Normalize Kraken result key (e.g., XXBTZUSD -> XBTUSD, XETHZUSD -> ETHUSD)
+        s = (key or "").upper().replace("/", "")
+        # Strip 'Z' prefix from common quotes
+        for q in ("USDT", "USDC", "USD", "EUR", "GBP", "CAD", "JPY", "CHF", "AUD"):
+            s = s.replace("Z" + q, q)
+        # Drop a single leading 'X' from base (XXBT -> XBT, XETH -> ETH)
+        if len(s) >= 2 and s[0] == "X" and s[1].isalpha():
+            s = s[1:]
+        # Canonicalize BTC->XBT
+        s = s.replace("BTC", "XBT")
+        return s
+
+    def _kraken_pick_pair_key(self, result: dict) -> str:
+        """
+        Pick the correct OHLC key from Kraken 'result', skipping 'last'.
+        Tries exact normalized match, then fuzzy, then quote suffix, then first non-'last'.
+        """
+        if not isinstance(result, dict):
+            raise RuntimeError("Invalid Kraken result payload")
+
+        keys = [k for k in result.keys() if str(k).lower() != "last"]
+        if not keys:
+            raise RuntimeError("No OHLC keys in Kraken result")
+
+        req_norm = self._kraken_norm_req(self.pair)
+
+        # 1) Exact normalized match
+        for k in keys:
+            if self._kraken_norm_key(k) == req_norm:
+                return k
+
+        # 2) Fuzzy contains
+        for k in keys:
+            kn = self._kraken_norm_key(k)
+            if req_norm in kn or kn in req_norm:
+                return k
+
+        # 3) Prefer same quote (e.g., *USD / *USDT)
+        for q in ("USDT", "USDC", "USD", "EUR", "GBP", "CAD", "JPY", "CHF", "AUD"):
+            if req_norm.endswith(q):
+                for k in keys:
+                    if self._kraken_norm_key(k).endswith(q):
+                        return k
+
+        # 4) Fallback
+        log.warning(f"[Kraken] Fallback key for '{self.requested_pair}' (norm={req_norm}). Keys: {keys}")
+        return keys[0]
+
+    # ---------- Fetch OHLC ----------
     async def fetch_ohlc(self, n: int = 500) -> pd.DataFrame:
         await self.start()
         url = "https://api.kraken.com/0/public/OHLC"
         params = {"pair": self.pair, "interval": self.interval_min}
-        
+
         try:
             async with self.session.get(url, params=params) as resp:
                 if resp.status != 200:
-                    raise Exception(f"Kraken API error: {resp.status}")
-                data = await resp.json()
-                
-            if "error" in data and data["error"]:
+                    raise Exception(f"Kraken API HTTP {resp.status}")
+                data = await resp.json(content_type=None)
+
+            # Kraken error array
+            if data.get("error"):
                 raise Exception(f"Kraken API error: {data['error']}")
-                
-            result_keys = list(data["result"].keys())
-            if not result_keys:
-                raise Exception("No data returned from Kraken")
-                
-            key = result_keys[0]
-            rows = data["result"][key][-n:]
-            
-            df = pd.DataFrame(rows, columns=["time","open","high","low","close","vwap","volume","count"])
-            df = df.astype({
-                "time": int, 
-                "open": float, 
-                "high": float, 
-                "low": float, 
-                "close": float, 
-                "volume": float
-            })
+
+            result = data.get("result") or {}
+            pair_key = self._kraken_pick_pair_key(result)
+            rows = (result.get(pair_key) or [])[-n:]
+            if not rows:
+                raise Exception(f"No OHLC rows for key '{pair_key}' (requested {self.requested_pair} / sent {self.pair})")
+
+            # Kraken OHLC columns: [time, open, high, low, close, vwap, volume, count]
+            cols = ["time", "open", "high", "low", "close", "vwap", "volume", "count"]
+            df = pd.DataFrame(rows, columns=cols)
+
+            # Types + derived dt
+            df["time"] = df["time"].astype(int)
+            for c in ("open", "high", "low", "close", "volume"):
+                df[c] = df[c].astype(float)
             df["dt"] = pd.to_datetime(df["time"], unit="s", utc=True)
+
             return df
+
         except Exception as e:
-            log.error(f"OHLC fetch error: {e}")
+            log.error(f"[Kraken] OHLC fetch error for {self.requested_pair}/{self.pair}: {e}")
             raise
 
 # -------- Enhanced Market Analysis Functions --------
@@ -1116,362 +1409,90 @@ def status_embed() -> discord.Embed:
         return discord.Embed(title="Status Error", description=str(e), color=discord.Color.red())
 
 async def send_battle_signal(channel, t: TradeData):
-    """Send enhanced battle signal"""
+    """Send enhanced battle signal (close+body+vol confirmed, BE after TP1, optional trailing)."""
     try:
-        color = discord.Color.green() if t.direction == TradeDirection.LONG else discord.Color.red()
+        side_is_long = (t.direction == TradeDirection.LONG)
+        color = discord.Color.green() if side_is_long else discord.Color.red()
+        side_label = "🟢 Long" if side_is_long else "🔴 Short"
+
+        # --- Risk/RR math (defensive against div-by-zero) ---
+        entry = float(t.entry_price)
+        sl    = float(t.sl)
+        tp1   = float(t.tp1)
+        tp2   = float(t.tp2)
+
+        if side_is_long:
+            risk_abs = max(entry - sl, 0.0)
+            r1_abs   = max(tp1 - entry, 0.0)
+            r2_abs   = max(tp2 - entry, 0.0)
+        else:
+            risk_abs = max(sl - entry, 0.0)
+            r1_abs   = max(entry - tp1, 0.0)
+            r2_abs   = max(entry - tp2, 0.0)
+
+        risk_pct = (risk_abs / entry * 100.0) if entry else 0.0
+        rr1 = (r1_abs / risk_abs) if risk_abs > 0 else 0.0
+        rr2 = (r2_abs / risk_abs) if risk_abs > 0 else 0.0
+
+        # Enhanced details / reason from signal engine if present
+        ed = t.enhanced_data or {}
+        reason = ed.get("reason") or ed.get("signal_reason") or "Level break/continuation"
+
+        # Level context (optional price if provided)
+        level_name = getattr(t, "level_name", "") or "Unknown"
+        level_price = getattr(t, "level_price", None)
+        level_val = f"{level_name}" if level_price is None else f"{level_name} @ ${float(level_price):.2f}"
+
+        # Footer reflects BE/trailing config
+        trail_mode = str(getattr(cfg, "trail_mode", "off")).lower()
+        be_after_tp1 = bool(getattr(cfg, "be_after_tp1", True))
+        be_offset_pct = float(getattr(cfg, "be_offset_pct", 0.0))
+        footer_bits = [
+            "Close>Level + Body + Vol",
+            "BE after TP1" if be_after_tp1 else "No BE after TP1",
+        ]
+        if be_after_tp1 and be_offset_pct:
+            footer_bits[-1] += f" (+{be_offset_pct:.2f}%)"
+        if trail_mode != "off":
+            footer_bits.append(f"Trailing: {trail_mode}")
+
+        title_asset = getattr(t, "asset", "—")
         e = discord.Embed(
-            title=f"⚔️ Battle Signal - {t.asset} {t.direction.name}",
+            title=f"⚔️ Battle Signal • {title_asset} • {side_label}",
             color=color,
             timestamp=datetime.now(timezone.utc)
         )
-        e.add_field(name="🎯 Entry", value=f"${t.entry_price:.2f}", inline=True)
-        e.add_field(name="🛑 Stop", value=f"${t.sl:.2f}", inline=True)
-        e.add_field(name="🎪 TP1/TP2", value=f"${t.tp1:.2f} / ${t.tp2:.2f}", inline=True)
-        e.add_field(name="⚔️ Knight", value=t.knight or "Unknown", inline=True)
-        e.add_field(name="📊 Score", value=f"{t.score or 0}/6", inline=True)
-        e.add_field(name="🏆 Level", value=t.level_name or "Unknown", inline=True)
-        
-        # Enhanced data if available
-        if t.enhanced_data:
-            enhanced_score = t.enhanced_data.get("enhanced_score", t.score or 0)
-            tier = t.enhanced_data.get("tier", "A")
-            e.add_field(name="✨ Enhanced Score", value=f"{enhanced_score}/6 ({tier})", inline=True)
-        
+
+        # Top-line trade info
+        e.add_field(name="🆔 Trade ID", value=t.id, inline=False)
+        e.add_field(name="🎯 Entry / 🛑 SL", value=f"${entry:.2f} / ${sl:.2f}", inline=True)
+        e.add_field(name="🎪 TP1 / TP2", value=f"${tp1:.2f} / ${tp2:.2f}", inline=True)
+        e.add_field(name="🏆 Level", value=level_val, inline=True)
+
+        # Meta
+        e.add_field(name="⚔️ Knight", value=(t.knight or "Unknown"), inline=True)
+        e.add_field(name="🧭 Type", value=(t.trade_type or "Breakout"), inline=True)
+        e.add_field(name="📊 Score", value=f"{int(t.score or 0)}/6", inline=True)
+
+        # Analytics
+        e.add_field(name="📏 Risk", value=f"{risk_pct:.2f}%", inline=True)
+        e.add_field(name="📐 RR (TP1/TP2)", value=f"{rr1:.2f} / {rr2:.2f}", inline=True)
+
+        # Enhanced score / tier
+        enh_score = ed.get("enhanced_score", t.score or 0)
+        tier = ed.get("tier", "A")
+        e.add_field(name="✨ Enhanced", value=f"{enh_score}/6 ({tier})", inline=True)
+
+        # Reason / context
+        e.add_field(name="🧠 Reason", value=reason, inline=False)
+
+        e.set_footer(text=" • ".join(footer_bits))
+
         await channel.send(embed=e)
-            
+
     except Exception as e:
         log.error(f"Battle signal error: {e}")
 
-def create_bot():
-    bot = commands.Bot(command_prefix="!", intents=INTENTS, help_command=None)
-
-    # ----------------------- Commands -----------------------
-
-    @bot.command(name="status")
-    async def _status(ctx):
-        try:
-            await ctx.send(embed=status_embed())
-        except Exception as e:
-            await ctx.send(f"Status error: {e}")
-
-    @bot.command(name="trades")
-    async def _trades(ctx):
-        try:
-            if not trade_manager.active:
-                await ctx.send("📊 No active trades currently")
-                return
-
-            e = discord.Embed(
-                title="📊 Active Trades",
-                description=f"Currently tracking {len(trade_manager.active)} trade(s)",
-                color=discord.Color.green()
-            )
-
-            for trade_id, trade in list(trade_manager.active.items())[:10]:
-                trade_info = (
-                    f"**Direction:** {trade.direction.name}\n"
-                    f"**Entry:** ${trade.entry_price:.2f}\n"
-                    f"**TP1/TP2:** ${trade.tp1:.2f} / ${trade.tp2:.2f}\n"
-                    f"**Stop:** ${trade.sl:.2f}\n"
-                    f"**TP1 Done:** {'✅' if trade.tp1_done else '❌'}"
-                )
-                e.add_field(name=f"🎯 {trade_id[:8]}", value=trade_info, inline=True)
-
-            await ctx.send(embed=e)
-        except Exception as e:
-            await ctx.send(f"Trades error: {e}")
-
-    @bot.command(name="performance")
-    async def _performance(ctx):
-        """Show trading performance statistics"""
-        try:
-            stats = db.get_trade_performance()
-
-            if not stats or stats.get("total_trades", 0) == 0:
-                await ctx.send("📊 No completed trades yet")
-                return
-
-            embed = discord.Embed(
-                title="📈 Trading Performance",
-                color=discord.Color.gold() if stats.get("win_rate", 0) > 50 else discord.Color.orange(),
-                timestamp=datetime.now(timezone.utc)
-            )
-
-            embed.add_field(name="📊 Total Trades", value=str(stats.get("total_trades", 0)), inline=True)
-            embed.add_field(name="✅ Winners", value=str(stats.get("winners", 0)), inline=True)
-            embed.add_field(name="❌ Losers", value=str(stats.get("losers", 0)), inline=True)
-
-            embed.add_field(name="🎯 Win Rate", value=f"{stats.get('win_rate', 0):.1f}%", inline=True)
-            embed.add_field(name="📈 Avg P&L", value=f"{stats.get('avg_pnl', 0):+.2f}%", inline=True)
-            embed.add_field(name="💰 Total P&L", value=f"{stats.get('total_pnl', 0):+.2f}%", inline=True)
-
-            # Performance rating
-            win_rate = stats.get("win_rate", 0)
-            if win_rate >= 70:
-                rating = "🌟 Excellent"
-            elif win_rate >= 60:
-                rating = "✅ Good"
-            elif win_rate >= 50:
-                rating = "⚖️ Average"
-            else:
-                rating = "⚠️ Needs Improvement"
-
-            embed.add_field(name="🏆 Rating", value=rating, inline=False)
-
-            await ctx.send(embed=embed)
-
-        except Exception as e:
-            await ctx.send(f"Performance error: {e}")
-
-    @bot.command(name="test_close")
-    async def _test_close(ctx, trade_id: str = None):
-        """Test closing a trade manually"""
-        if not ctx.author.guild_permissions.administrator:
-            await ctx.send("⚠️ Administrator permissions required")
-            return
-
-        try:
-            if not trade_id:
-                if not trade_manager.active:
-                    await ctx.send("❌ No active trades to close")
-                    return
-                trade_id = list(trade_manager.active.keys())[0]
-
-            if trade_id not in trade_manager.active:
-                await ctx.send(f"❌ Trade {trade_id} not found")
-                return
-
-            trade = trade_manager.active[trade_id]
-            test_exit_price = trade.entry_price * 1.01  # Simulate small profit
-
-            result = await trade_manager.close_trade(trade_id, "Manual Test", test_exit_price)
-
-            if result.get("success"):
-                pnl = result.get("pnl_pct", 0)
-                await ctx.send(f"✅ Test closure completed for trade {trade_id} - P&L: {pnl:+.2f}%")
-            else:
-                await ctx.send(f"❌ Test close failed: {result.get('error', 'Unknown error')}")
-
-        except Exception as e:
-            await ctx.send(f"❌ Test close failed: {e}")
-
-    @bot.command(name="force_monitor")
-    async def _force_monitor(ctx):
-        """Force check all active trades"""
-        if not ctx.author.guild_permissions.administrator:
-            await ctx.send("⚠️ Administrator permissions required")
-            return
-
-        try:
-            df = await mdp.fetch_ohlc(100)
-            if df is None:
-                await ctx.send("❌ Failed to fetch market data")
-                return
-
-            current_price = float(df.iloc[-1]["close"])
-            before_count = len(trade_manager.active)
-
-            await monitor_active_trades(df, current_price)
-
-            after_count = len(trade_manager.active)
-            closed_count = before_count - after_count
-
-            embed = discord.Embed(
-                title="🔍 Force Monitor Complete",
-                color=discord.Color.blue(),
-                timestamp=datetime.now(timezone.utc)
-            )
-
-            embed.add_field(name="💰 Current Price", value=f"${current_price:.2f}", inline=True)
-            embed.add_field(name="📊 Trades Before", value=str(before_count), inline=True)
-            embed.add_field(name="📊 Trades After", value=str(after_count), inline=True)
-            embed.add_field(name="🏁 Trades Closed", value=str(closed_count), inline=True)
-
-            await ctx.send(embed=embed)
-
-        except Exception as e:
-            await ctx.send(f"❌ Force monitor failed: {e}")
-
-    @bot.command(name="market")
-    async def _market(ctx):
-        """Show current market analysis"""
-        try:
-            df = await mdp.fetch_ohlc(100)
-            if df is None:
-                await ctx.send("❌ Failed to fetch market data")
-                return
-
-            df = add_indicators(df)
-            levels = calc_camarilla(df)
-
-            if not levels:
-                await ctx.send("❌ Failed to calculate Camarilla levels")
-                return
-
-            latest = df.iloc[-1]
-            price = float(latest["close"])
-            rsi = float(latest.get("rsi", 50))
-
-            embed = discord.Embed(
-                title="📊 Current Market Analysis",
-                color=discord.Color.blue(),
-                timestamp=datetime.now(timezone.utc)
-            )
-
-            embed.add_field(name="💰 Price", value=f"${price:.2f}", inline=True)
-            embed.add_field(name="📈 RSI", value=f"{rsi:.1f}", inline=True)
-            embed.add_field(name="🌊 Regime", value="NORMAL", inline=True)
-
-            # Show key levels
-            level_text = []
-            for name, level in levels.items():
-                distance = price - level
-                distance_pct = (distance / price) * 100
-                level_text.append(f"**{name}:** ${level:.2f} ({distance_pct:+.2f}%)")
-
-            embed.add_field(
-                name="🎯 Camarilla Levels",
-                value="\n".join(level_text[:6]),
-                inline=False
-            )
-
-            await ctx.send(embed=embed)
-
-        except Exception as e:
-            await ctx.send(f"Market analysis error: {e}")
-
-    # ----------------------- Scanner Loop -----------------------
-
-    @tasks.loop(minutes=2)
-    async def enhanced_scanner():
-        """Enhanced scanner with trade monitoring"""
-        try:
-            await mdp.start()
-            await trade_manager.start()
-
-            df = await mdp.fetch_ohlc(100)
-            if df is None:
-                return
-
-            df = add_indicators(df)
-            levels = calc_camarilla(df)
-            if not levels:
-                return
-
-            latest = df.iloc[-1]
-            current_price = float(latest["close"])
-
-            # 1) Monitor existing trades FIRST
-            await monitor_active_trades(df, current_price)
-
-            # 2) Generate new signals via the engine (close+body+volume + cooldown + continuation)
-            await scan_for_signals(df, levels)
-
-        except Exception as e:
-            log.error(f"Enhanced scanner error: {e}")
-
-    async def scan_for_signals(df: pd.DataFrame, levels: Dict[str, float]):
-        """Scan for trading signals using the TradeSignalEngine"""
-        try:
-            sig = signal_engine.get_signal(df, levels, pair=cfg.pair, now_ts=int(time.time()))
-            if not sig:
-                return
-
-            # Optional: keep enhanced metrics for Sheets/embeds
-            latest = df.iloc[-1]
-            direction_str = "Long" if sig.side == "long" else "Short"
-            enhanced_data = await calculate_enhanced_metrics(df, latest, sig.level_price, direction_str)
-
-            timestamp = datetime.now(timezone.utc)
-            trade_id = ("L" if sig.side == "long" else "S") + timestamp.strftime("%m%d%H%M")
-
-            t = TradeData(
-                id=trade_id,
-                asset=cfg.pair.replace("USD", ""),
-                direction=TradeDirection.LONG if sig.side == "long" else TradeDirection.SHORT,
-                entry_price=float(sig.entry),
-                sl=float(sig.sl),
-                tp1=float(sig.tp1),
-                tp2=float(sig.tp2),
-                level_name=sig.level_name,
-                level_price=float(sig.level_price),
-                knight="Sir Leonis" if sig.kind == "breakout" else "Sir Lucien",
-                rating=enhanced_data.get("tier", "A"),
-                score=enhanced_data.get("enhanced_score", 4),
-                trade_type=f"{sig.level_name}_{sig.kind.capitalize()}",
-                enhanced_data={**enhanced_data, "reason": sig.reason}
-            )
-
-            await trade_manager.open_trade(t)
-
-            # Send battle signal
-            channel = bot.get_channel(cfg.channels.battle_signals_id)
-            if channel:
-                await send_battle_signal(channel, t)
-
-        except Exception as e:
-            log.error(f"Signal scanning error: {e}")
-
-    # ----------------------- Lifecycle Hooks -----------------------
-
-    @enhanced_scanner.before_loop
-    async def before_scanner():
-        await bot.wait_until_ready()
-        await trade_manager.start()
-        await mdp.start()
-
-    @bot.event
-    async def on_ready():
-        log.info(f"Logged in as {bot.user}")
-
-        try:
-            await trade_manager.rehydrate()
-            if not enhanced_scanner.is_running():
-                enhanced_scanner.start()
-
-            # Startup notification
-            embed = discord.Embed(
-                title="🏰 Complete Control Tower v11.11 Online",
-                description="*Trade closure system implemented - Full automation ready*",
-                color=discord.Color.gold(),
-                timestamp=datetime.now(timezone.utc)
-            )
-
-            embed.add_field(
-                name="✅ System Status",
-                value=(
-                    "🤖 **Discord Bot**: Connected\n"
-                    "📊 **Google Sheets**: Ready\n"
-                    "📈 **Market Scanner**: Running\n"
-                    "🏁 **Trade Closure**: IMPLEMENTED\n"
-                    "🔄 **Trade Monitoring**: Active"
-                ),
-                inline=False
-            )
-
-            embed.add_field(
-                name="🎯 Trade Closure Logic",
-                value=(
-                    "• **Long Stop Loss**: Price ≤ SL\n"
-                    "• **Long TP1**: Price ≥ TP1 (50% exit)\n"
-                    "• **Long TP2**: Price ≥ TP2 (full exit)\n"
-                    "• **Short Stop Loss**: Price ≥ SL\n"
-                    "• **Short TP1**: Price ≤ TP1 (50% exit)\n"
-                    "• **Short TP2**: Price ≤ TP2 (full exit)"
-                ),
-                inline=False
-            )
-
-            channel = bot.get_channel(cfg.channels.scrolls_order_id)
-            if channel:
-                await channel.send(embed=embed)
-
-            log.info("✅ Bot ready with complete trade closure system")
-
-        except Exception as e:
-            log.error(f"Bot ready error: {e}")
-
-    return bot
 
 def _run_with_backoff(bot, token, log, max_attempts=7, base_delay=10, max_delay=300):
     """Run bot with exponential backoff on Cloudflare/Discord 429 at login."""
