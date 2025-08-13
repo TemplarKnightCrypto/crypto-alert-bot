@@ -250,11 +250,32 @@ class TradeData:
 
 # -------- Sheets --------
 class GoogleSheetsIntegration:
+    """
+    Writes trades to Google Sheets using the exact sheet headers.
+    - Entries: fills everything except Exit columns
+    - Exits: fills Exit Price / Exit Reason / PnL % and marks Status=CLOSED
+    """
     def __init__(self, url: Optional[str], token: Optional[str]):
         self.url = url
         self.token = token
-        # Optional JSON mapping from env to rename fields, e.g. {"entry_price":"Entry","tp1":"TP1"}
-        import os, json
+
+        # Exact headers in sheet (Title Case) — used as-is; do not remap these.
+        self._reserved_headers = {
+            "Timestamp", "Trade ID", "Asset", "Direction",
+            "Entry Price", "Stop Loss", "Take Profit 1", "Take Profit 2",
+            "Status",
+            "Exit Price", "Exit Reason", "PnL %",
+            "Original Score", "Enhanced Score", "RSI Level", "Volume Ratio",
+            "Market Status", "VWAP Position", "MACD Status", "Market Bias",
+            "Level Name", "Knight", "Trade Type", "Confidence",
+            "Risk %", "R:R Ratio", "Setup Age (min)", "Breakout Structure",
+            "Confluence Count", "Candle Body", "Market Session",
+            "Distance from Level %", "Recent News", "Volatility State",
+            "Trend Strength",
+        }
+
+        # Optional JSON mapping for non-reserved keys only (SHEETS_FIELD_MAP='{"foo":"Bar"}')
+        import os, json  # local import keeps module deps tidy
         self.field_map = {}
         try:
             raw = os.getenv("SHEETS_FIELD_MAP", "")
@@ -263,12 +284,16 @@ class GoogleSheetsIntegration:
         except Exception:
             self.field_map = {}
 
-    def _apply_field_map(self, payload: dict) -> dict:
+    def _apply_field_map(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply mapping only to keys that are NOT reserved sheet headers."""
         if not self.field_map:
             return payload
-        out = {}
+        out: Dict[str, Any] = {}
         for k, v in payload.items():
-            out[self.field_map.get(k, k)] = v
+            if k in self._reserved_headers:
+                out[k] = v
+            else:
+                out[self.field_map.get(k, k)] = v
         return out
 
     async def _post(self, session: aiohttp.ClientSession, payload: Dict[str, Any]):
@@ -282,98 +307,126 @@ class GoogleSheetsIntegration:
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
-    
+    # ------------------ ENTRY ------------------
     async def send_trade_entry(self, session, t: TradeData):
-        # Flatten metrics to explicit fields
         ed = t.enhanced_data or {}
-        # Derive a few if missing
+
+        # Core metrics
         try:
-            rsi = float(ed.get("rsi_level", 50))
+            rsi_level = float(ed.get("rsi_level", 50) or 50)
         except Exception:
-            rsi = 50.0
-        # Market Status from RSI
-        market_status = ed.get("market_status")
-        if not market_status:
-            if rsi >= 75:
-                market_status = "OVERBOUGHT"
-            elif rsi <= 25:
-                market_status = "OVERSOLD"
-            else:
-                market_status = "NORMAL"
-        trend_bias = ed.get("trend_bias") or ed.get("market_bias") or "-"
-        # vwap position if available in ed; leave blank otherwise
-        vwap_position = ed.get("vwap_position") or "-"
-        macd_status = ed.get("macd_status") or "-"
-        # Risk & RR from entry/sl/tp1 (fallbacks)
+            rsi_level = 50.0
+        if rsi_level >= 75:
+            market_status = "OVERBOUGHT"
+        elif rsi_level <= 25:
+            market_status = "OVERSOLD"
+        else:
+            market_status = "NORMAL"
+
+        market_bias    = ed.get("trend_bias") or ed.get("market_bias") or "-"
+        volume_ratio   = ed.get("volume_ratio")
+        vwap_position  = ed.get("vwap_position", "-")
+        macd_status    = ed.get("macd_status", "-")
+
+        # Risk / Reward
         try:
-            risk_pct = abs((t.entry_price - t.sl) / t.entry_price) * 100.0
+            risk_pct = abs((t.entry_price - t.sl) / max(t.entry_price, 1e-9)) * 100.0
         except Exception:
             risk_pct = None
         try:
-            reward_pct = abs(((t.tp1 or t.tp2) - t.entry_price) / t.entry_price) * 100.0 if (t.tp1 or t.tp2) else None
-            rr_ratio = (reward_pct / risk_pct) if (reward_pct and risk_pct) else None
+            reward_pct = None
+            if t.tp1:
+                reward_pct = abs((t.tp1 - t.entry_price) / max(t.entry_price, 1e-9)) * 100.0
+            elif t.tp2:
+                reward_pct = abs((t.tp2 - t.entry_price) / max(t.entry_price, 1e-9)) * 100.0
+            rr_ratio = (reward_pct / risk_pct) if (reward_pct is not None and risk_pct not in (None, 0)) else None
         except Exception:
             rr_ratio = None
-        # Body strength heuristic (if present in ed)
-        candle_body_strength = ed.get("candle_body_strength") or "-"
-        # Setup age
-        setup_age_minutes = ed.get("setup_age_minutes") or ""
-        # Breakout structure/confluence
-        breakout_structure = ed.get("breakout_structure") or ""
-        confluence_count = ed.get("confluence_count") or ""
-        market_session = ed.get("market_session") or ""
-        distance_from_level_pct = ed.get("distance_from_level_pct") or ""
-        recent_news_events = ed.get("recent_news_events") or "No"
-        volatility_state = ed.get("volatility_state") or ""
-        trend_strength = ed.get("trend_strength") or (f"Moderate {trend_bias}" if trend_bias not in ("-", "") else "")
 
-        base = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "trade_id": t.id,
-            "asset": t.asset,
-            "direction": t.direction.name.title(),
-            "status": "OPEN",
-            "level_name": t.level_name or "",
-            "trade_type": t.trade_type or "",
-            "score": t.score or 0,                         # Original Score (legacy)
-            "enhanced_score": ed.get("enhanced_score", t.score or 0),
-            "confidence": t.rating or "",
-            "knight": t.knight or "",
-            # Flat metrics for your sheet
-            "rsi_level": rsi,
-            "volume_ratio": ed.get("volume_ratio"),
-            "market_status": market_status,
-            "vwap_position": vwap_position,
-            "macd_status": macd_status,
-            "trend_bias": trend_bias,
-            "risk_pct": round(risk_pct, 2) if risk_pct is not None else "",
-            "rr_ratio": round(rr_ratio, 2) if rr_ratio is not None else "",
-            "setup_age_minutes": setup_age_minutes,
-            "breakout_structure": breakout_structure,
-            "confluence_count": confluence_count,
-            "candle_body_strength": candle_body_strength,
-            "market_session": market_session,
-            "distance_from_level_pct": distance_from_level_pct,
-            "recent_news_events": recent_news_events,
-            "volatility_state": volatility_state,
-            "trend_strength": trend_strength,
-            "enhanced_data": ed,   # still include the blob for compatibility
+        # Optional extras
+        setup_age_minutes     = ed.get("setup_age_minutes", "")
+        breakout_structure    = ed.get("breakout_structure", "")
+        confluence_count      = ed.get("confluence_count", "")
+        candle_body_strength  = ed.get("candle_body_strength", "")
+        market_session        = ed.get("market_session", "")
+        distance_from_level   = ed.get("distance_from_level_pct", "")
+        recent_news_events    = ed.get("recent_news_events", "")
+        volatility_state      = ed.get("volatility_state", "")
+        trend_strength        = ed.get("trend_strength", f"Moderate {market_bias}" if market_bias not in ("-", "") else "")
+
+        # Build payload using EXACT sheet headers (entries do NOT include Exit fields)
+        row = {
+            "Timestamp": datetime.now(timezone.utc).isoformat(),
+            "Trade ID": t.id,
+            "Asset": t.asset,
+            "Direction": t.direction.name.title(),
+            "Entry Price": t.entry_price,
+            "Stop Loss": t.sl,
+            "Take Profit 1": t.tp1,
+            "Take Profit 2": t.tp2,
+            "Status": "OPEN",
+
+            "Original Score": t.score or 0,
+            "Enhanced Score": int(ed.get("enhanced_score", t.score or 0)),
+            "RSI Level": rsi_level,
+            "Volume Ratio": volume_ratio if volume_ratio is not None else "",
+            "Market Status": market_status,
+            "VWAP Position": vwap_position,
+            "MACD Status": macd_status,
+            "Market Bias": market_bias,
+            "Level Name": t.level_name or "",
+            "Knight": t.knight or "",
+            "Trade Type": t.trade_type or "",
+            "Confidence": t.rating or "",
+            "Risk %": round(risk_pct, 2) if risk_pct is not None else "",
+            "R:R Ratio": round(rr_ratio, 2) if rr_ratio is not None else "",
+            "Setup Age (min)": setup_age_minutes,
+            "Breakout Structure": breakout_structure,
+            "Confluence Count": confluence_count,
+            "Candle Body": candle_body_strength,
+            "Market Session": market_session,
+            "Distance from Level %": distance_from_level,
+            "Recent News": recent_news_events,
+            "Volatility State": volatility_state,
+            "Trend Strength": trend_strength,
         }
-        price_block = {
-            "entry_price": t.entry_price,
-            "entry": t.entry_price,          # alias
-            "stop_loss": t.sl,
-            "stop": t.sl,                    # alias
-            "tp1": t.tp1,
-            "target1": t.tp1,                # alias
-            "tp2": t.tp2,
-            "target2": t.tp2,                # alias
-        }
-        payload = {**base, **price_block}
-        payload = self._apply_field_map(payload)
+
+        # Keep reserved header keys intact; allow optional mapping for any non-reserved (none by default).
+        payload = self._apply_field_map(row)
         return await self._post(session, payload)
 
+    # ------------------ EXIT ------------------
+    async def send_trade_exit(self, session, trade_id: str, reason: str, price: float, time_iso: str, pnl_pct: float):
+        """
+        Update/close a trade. We include both the unique ID and the Exit fields, plus headers that
+        your script may want to re-write (Status).
+        """
+        row = {
+            # Minimal identifiers for your script to locate the row
+            "Trade ID": trade_id,
+            "Status": "CLOSED",
+
+            # Exit fields (exact headers)
+            "Exit Price": price,
+            "Exit Reason": reason,
+            "PnL %": round(pnl_pct, 2),
+
+            # Optional: timestamp the close in the 'Timestamp' column (helps audit)
+            "Timestamp": time_iso,
+        }
+
+        # If your Apps Script expects an action flag, keep it (not a reserved header)
+        row["action"] = "update"
+
+        payload = self._apply_field_map(row)
+        return await self._post(session, payload)
+
+    # ------------------ REHYDRATE ------------------
     async def rehydrate_open_trades(self, session) -> List[TradeData]:
+        """
+        Fetch open trades via your webhook (action=open). This remains tolerant to several
+        key variants so it works regardless of how your endpoint labels fields.
+        """
         if not self.url or not self.token:
             return []
         params = {"action": "open", "key": self.token}
@@ -385,45 +438,35 @@ class GoogleSheetsIntegration:
                 js = json.loads(txt) if txt else {}
         except Exception:
             return []
-        out = []
+        out: List[TradeData] = []
+
+        def _pick(d, *names, default=None):
+            for n in names:
+                if n in d and d[n] not in (None, ""):
+                    return d[n]
+            return default
+
         for row in js.get("rows", []):
             try:
-                dir_raw = str(row.get("direction","Long")).upper()
+                dir_raw = str(_pick(row, "Direction", "direction", default="Long")).upper()
                 direction = TradeDirection.LONG if dir_raw.startswith("L") else TradeDirection.SHORT
                 out.append(TradeData(
-                    id=str(row.get("trade_id") or f"rehyd_{len(out)}"),
-                    asset=str(row.get("asset") or "ETHUSD"),
+                    id=str(_pick(row, "Trade ID", "trade_id", default=f"rehyd_{len(out)}")),
+                    asset=str(_pick(row, "Asset", "asset", default="ETHUSD")),
                     direction=direction,
-                    entry_price=float(row.get("entry_price") or 0),
-                    sl=float(row.get("stop_loss") or 0),
-                    tp1=float(row.get("tp1") or row.get("target1") or 0),
-                    tp2=float(row.get("tp2") or row.get("target2") or 0),
-                    score=int(row.get("score") or 0),
-                    rating=str(row.get("confidence") or ""),
-                    knight=str(row.get("knight") or ""),
-                    level_name=str(row.get("level_name") or ""),
-                    trade_type=str(row.get("trade_type") or ""),
+                    entry_price=float(_pick(row, "Entry Price", "entry_price", default=0)),
+                    sl=float(_pick(row, "Stop Loss", "stop_loss", default=0)),
+                    tp1=float(_pick(row, "Take Profit 1", "tp1", "target1", default=0)),
+                    tp2=float(_pick(row, "Take Profit 2", "tp2", "target2", default=0)),
+                    score=int(_pick(row, "Original Score", "score", default=0)),
+                    rating=str(_pick(row, "Confidence", "confidence", default="")),
+                    knight=str(_pick(row, "Knight", "knight", default="")),
+                    level_name=str(_pick(row, "Level Name", "level_name", default="")),
+                    trade_type=str(_pick(row, "Trade Type", "trade_type", default="")),
                 ))
             except Exception:
                 continue
         return out
-
-    async def send_trade_exit(self, session, trade_id: str, reason: str, price: float, time_iso: str, pnl_pct: float):
-        base = {
-            "action": "update",
-            "trade_id": trade_id,
-            "exit_price": price,
-            "exit": price,             # alias
-            "exit_reason": reason,
-            "pnl_pct": pnl_pct,
-            "pnl": pnl_pct,            # alias
-            "exit_time": time_iso,
-            "closed_at": time_iso,     # alias
-            "status": "CLOSED",
-        }
-        payload = self._apply_field_map(base)
-        return await self._post(session, payload)
-
 
 # -------- Trade Manager --------
 class TradeManager:
