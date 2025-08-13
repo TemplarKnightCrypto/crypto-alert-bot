@@ -1,5 +1,5 @@
 # ============================================
-# Control Tower - Complete v11.11.4 + Trade Closure System
+# Control Tower - Complete v11.11.5 + Trade Closure System
 # ============================================
 
 import os
@@ -25,14 +25,8 @@ from dotenv import load_dotenv
 
 import discord
 from discord.ext import commands, tasks
-from trade_signal_engine import TradeSignalEngine
 
 # ===== Trade Signal Engine (inlined) =====
-import time
-from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
-from collections import defaultdict
-
 @dataclass
 class Signal:
     pair: str
@@ -135,7 +129,6 @@ class TradeSignalEngine:
         return True
 
     def get_signal(self, df, levels: Dict[str, float], *, pair: str, now_ts: Optional[int] = None) -> Optional[Signal]:
-        import pandas as pd
         assert isinstance(df, pd.DataFrame), "df must be a pandas DataFrame"
         if not levels or ("H5" not in levels and "L5" not in levels) or len(df) < 25:
             return None
@@ -191,7 +184,6 @@ class TradeSignalEngine:
                 return Signal(pair, "short", "L5", float(l5), entry, float(sl), float(tp1), float(tp2), cts, "continuation", f"pullback_ok ({why})")
 
         return None
-
 
 # TA imports with fallbacks
 try:
