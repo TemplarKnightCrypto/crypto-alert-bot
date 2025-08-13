@@ -1,5 +1,5 @@
 # ============================================
-# Control Tower - Complete v11.11.9
+# Control Tower - Complete v11.11.9.1
 # ============================================
 
 import os
@@ -1603,7 +1603,6 @@ def _run_with_backoff(bot, token, log, max_attempts=7, base_delay=10, max_delay=
             raise
     raise RuntimeError("Exceeded max login retries due to 429s")
 
-
 def create_bot():
     bot = commands.Bot(command_prefix="!", intents=INTENTS, help_command=None)
 
@@ -1704,7 +1703,6 @@ def create_bot():
                 return
             current_price = float(df.iloc[-1]["close"])
             before_count = len(trade_manager.active)
-            # Use the BE/trailing monitor (ensure the wrapper below is removed)
             await monitor_active_trades(df, current_price)
             after_count = len(trade_manager.active)
             closed_count = before_count - after_count
@@ -1782,50 +1780,49 @@ def create_bot():
         except Exception as e:
             log.error(f"Enhanced scanner error: {e}")
 
-async def scan_for_signals(df: pd.DataFrame, levels: Dict[str, float]):
-    """Find signals via TradeSignalEngine and open trades."""
-    try:
-        sig = signal_engine.get_signal(df, levels, pair=cfg.pair, now_ts=int(time.time()))
-        if not sig:
-            return
+    async def scan_for_signals(df: pd.DataFrame, levels: Dict[str, float]):
+        """Find signals via TradeSignalEngine and open trades."""
+        try:
+            sig = signal_engine.get_signal(df, levels, pair=cfg.pair, now_ts=int(time.time()))
+            if not sig:
+                return
 
-        latest = df.iloc[-1]
-        direction_str = "Long" if sig.side == "long" else "Short"
-        enhanced_data = await calculate_enhanced_metrics(df, latest, sig.level_price, direction_str)
+            latest = df.iloc[-1]
+            direction_str = "Long" if sig.side == "long" else "Short"
+            enhanced_data = await calculate_enhanced_metrics(df, latest, sig.level_price, direction_str)
 
-        timestamp = datetime.now(timezone.utc)
-        trade_id = ("L" if sig.side == "long" else "S") + timestamp.strftime("%m%d%H%M")
+            timestamp = datetime.now(timezone.utc)
+            trade_id = ("L" if sig.side == "long" else "S") + timestamp.strftime("%m%d%H%M")
 
-        t = TradeData(
-            id=trade_id,
-            asset=cfg.pair.replace("USD",""),
-            direction=TradeDirection.LONG if sig.side == "long" else TradeDirection.SHORT,
-            entry_price=float(sig.entry),
-            sl=float(sig.sl),
-            tp1=float(sig.tp1),
-            tp2=float(sig.tp2),
-            level_name=sig.level_name,
-            level_price=float(sig.level_price),
-            knight="Sir Leonis" if sig.kind == "breakout" else "Sir Lucien",
-            rating=enhanced_data.get("tier", "A"),
-            score=enhanced_data.get("enhanced_score", 4),
-            trade_type=f"{sig.level_name}_{sig.kind.capitalize()}",
-            enhanced_data={**enhanced_data, "reason": sig.reason}
-        )
+            t = TradeData(
+                id=trade_id,
+                asset=cfg.pair.replace("USD",""),
+                direction=TradeDirection.LONG if sig.side == "long" else TradeDirection.SHORT,
+                entry_price=float(sig.entry),
+                sl=float(sig.sl),
+                tp1=float(sig.tp1),
+                tp2=float(sig.tp2),
+                level_name=sig.level_name,
+                level_price=float(sig.level_price),
+                knight="Sir Leonis" if sig.kind == "breakout" else "Sir Lucien",
+                rating=enhanced_data.get("tier", "A"),
+                score=enhanced_data.get("enhanced_score", 4),
+                trade_type=f"{sig.level_name}_{sig.kind.capitalize()}",
+                enhanced_data={**enhanced_data, "reason": sig.reason}
+            )
 
-        # ✅ enrich with standardized alert data (so Sheets + Discord see the same fields)
-        alert = build_trade_alert_data(df, t, sig)
-        t.enhanced_data = {**(t.enhanced_data or {}), **alert}
+            # enrich with standardized alert data (so Sheets + Discord see the same fields)
+            alert = build_trade_alert_data(df, t, sig)
+            t.enhanced_data = {**(t.enhanced_data or {}), **alert}
 
-        await trade_manager.open_trade(t)
+            await trade_manager.open_trade(t)
 
-        channel = bot.get_channel(cfg.channels.battle_signals_id)
-        if channel:
-            await send_battle_signal(channel, t)
+            channel = bot.get_channel(cfg.channels.battle_signals_id)
+            if channel:
+                await send_battle_signal(channel, t)
 
-    except Exception as e:
-        log.error(f"Signal scanning error: {e}")
-
+        except Exception as e:
+            log.error(f"Signal scanning error: {e}")
 
     @enhanced_scanner.before_loop
     async def before_scanner():
@@ -1876,37 +1873,40 @@ async def scan_for_signals(df: pd.DataFrame, levels: Dict[str, float]):
     return bot
 
 def main():
+    global cfg, bot, db, sheets, trade_manager, mdp
     try:
-        global cfg, bot, db, sheets, trade_manager, mdp
-        
         log.info("Starting Complete Control Tower v11.11...")
-        
+
         # Load configuration
         cfg = BotConfig.from_env()
-        log.info(f"Configuration loaded successfully")
-        
+        log.info("Configuration loaded successfully")
+
+        if not cfg.token:
+            raise RuntimeError("[Boot] Missing DISCORD token (cfg.token is empty)")
+
         # Initialize components
         db = DatabaseManager("trades.db")
         sheets = GoogleSheetsIntegration(cfg.sheets_url, cfg.sheets_token)
         trade_manager = TradeManager(cfg, db, sheets)
         mdp = MarketDataProvider(cfg.pair, cfg.interval_min)
-        
+
         # Create bot
         bot = create_bot()
-        
-        # Start Flask
+        if bot is None:
+            raise RuntimeError("[Boot] create_bot() returned None (missing `return bot`?)")
+
+        # Start Flask health server in background
         log.info("Starting Flask health server...")
         threading.Thread(target=run_flask, daemon=True).start()
-        
-        # Start Discord bot
+
+        # Start Discord bot (blocks)
         log.info("Starting Discord bot with complete trade closure system...")
         _run_with_backoff(bot, cfg.token, log)
-        
+
     except Exception as e:
-        log.error(f"Main execution error: {e}")
+        log.exception(f"Main execution error: {e}")
         raise
+
 
 if __name__ == "__main__":
     main()
-
-# End of Control Tower v11.11 - Complete Trade Closure System
