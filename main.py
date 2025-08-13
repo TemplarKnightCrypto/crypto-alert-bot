@@ -1,5 +1,5 @@
 # ============================================
-# Control Tower - Clean v11.10 + Enhanced Alert System
+# Control Tower - Clean v11.10.1 + Enhanced Alert System
 # ============================================
 
 import os
@@ -300,12 +300,12 @@ class AlertManager:
         self.config = config
         self.last_scorecard_time = None
         self.last_100x_time = None
-        self.cooldowns = defaultdict(lambda: datetime.min)
-        self.battleground_cooldown = datetime.min
+        self.cooldowns = defaultdict(lambda: datetime.min.replace(tzinfo=timezone.utc))
+        self.battleground_cooldown = datetime.min.replace(tzinfo=timezone.utc)
         self.enhanced_cooldowns = {
             "setup": {},
             "warning": {},
-            "battleground": datetime.min
+            "battleground": datetime.min.replace(tzinfo=timezone.utc)
         }
         self.setup_tracking = {}
         self.setup_success_rates = defaultdict(lambda: {"attempts": 0, "conversions": 0})
@@ -501,7 +501,8 @@ class AlertManager:
             setup_key = f"{level_name}_{direction}_setup"
             cooldown_minutes = 5 if score >= 4 else 10
             
-            if (now - self.enhanced_cooldowns["setup"].get(setup_key, datetime.min)).total_seconds() < cooldown_minutes * 60:
+            last_setup_time = self.enhanced_cooldowns["setup"].get(setup_key, datetime.min.replace(tzinfo=timezone.utc))
+            if (now - last_setup_time).total_seconds() < cooldown_minutes * 60:
                 return
                 
             self.enhanced_cooldowns["setup"][setup_key] = now
