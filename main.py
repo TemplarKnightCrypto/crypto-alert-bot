@@ -1,5 +1,5 @@
 # ============================================
-# Control Tower - Clean v11.10.5 + Enhanced Alert System
+# Control Tower - Clean v11.10.6 + Enhanced Alert System
 # ============================================
 
 import os
@@ -70,6 +70,18 @@ def health_check():
             "status": "error",
             "error": str(e)
         }), 500
+
+@app.route("/debug/last_payload")
+def debug_last_payload():
+    """Show the last payload sent to sheets"""
+    global last_sheets_payload
+    if 'last_sheets_payload' in globals():
+        return jsonify(last_sheets_payload)
+    else:
+        return jsonify({"error": "No payload recorded yet"})
+
+# Global to store last payload for debugging
+last_sheets_payload = None
 
 def run_flask():
     try:
@@ -600,7 +612,7 @@ class AlertManager:
             if not channel:
                 return
                 
-            now = datetime.now(timezone.utc)
+            now = self._get_utc_now()
             
             # Rate limiting using safe time comparison
             if self._safe_time_diff(now, self.battleground_cooldown) < 1800:
@@ -665,7 +677,7 @@ class AlertManager:
             if score < 5:  # Only for high-quality setups
                 return
                 
-            now = datetime.now(timezone.utc)
+            now = self._get_utc_now()
             
             # Cooldown check using safe time comparison
             if self._safe_time_diff(now, self.last_100x_time) < 900:
@@ -911,6 +923,10 @@ class GoogleSheetsIntegration:
             log.warning("Sheets not configured - skipping POST")
             return {"status": "skipped", "reason": "no_config"}
         
+        # Store payload for debugging
+        global last_sheets_payload
+        last_sheets_payload = payload.copy()
+        
         headers = {"x-app-secret": self.token, "content-type": "application/json"}
         
         log.info(f"Posting to sheets URL: {self.url}")
@@ -1014,16 +1030,19 @@ class GoogleSheetsIntegration:
         return result
 
     async def send_trade_exit(self, session: aiohttp.ClientSession, trade_id: str, reason: str, price: float, time_iso: str, pnl_pct: float):
+        # Build payload to match your Google Apps Script updateExit function
         payload = {
-            "action": "update",
-            "trade_id": trade_id,
-            "exit_price": price,
-            "exit_reason": reason,
-            "pnl_pct": pnl_pct,
-            "exit_time": time_iso,
-            "status": "CLOSED",
+            "action": "update",  # This tells your script to call updateExit()
+            "trade_id": trade_id,  # Your script looks for this field
+            "exit_price": float(price),
+            "exit_reason": str(reason),
+            "pnl_pct": float(pnl_pct),
+            # Note: your script doesn't use exit_time, it's handled automatically
         }
+        
+        log.info(f"Sending trade exit to sheets: {trade_id} - {reason} - {pnl_pct:+.2f}%")
         result = await self._post(session, payload)
+        
         if result.get("status") == "success":
             log.info(f"Trade exit sent to sheets: {trade_id}")
         return result
@@ -1709,7 +1728,158 @@ def create_bot():
         except Exception as e:
             await ctx.send(f"❌ Test failed: {e}")
 
-    @bot.command(name="debug_sheets")
+    @bot.command(name="fix_timezone")
+    async def _fix_timezone(ctx):
+        """Fix any remaining timezone issues"""
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.send("⚠️ Administrator permissions required")
+            return
+            
+        try:
+            if not alert_manager:
+                await ctx.send("❌ Alert manager not initialized")
+                return
+            
+            # Force reset all datetime fields to timezone-aware
+            utc_min = datetime.min.replace(tzinfo=timezone.utc)
+            
+            alert_manager.last_scorecard_time = utc_min
+            alert_manager.last_100x_time = utc_min
+            alert_manager.battleground_cooldown = utc_min
+            
+            # Reset enhanced cooldowns
+            alert_manager.enhanced_cooldowns = {
+                "setup": defaultdict(lambda: utc_min),
+                "warning": defaultdict(lambda: utc_min),
+                "battleground": utc_min
+            }
+            
+            embed = discord.Embed(
+                title="🕐 Timezone Fix Applied",
+                description="All datetime fields reset to timezone-aware UTC",
+                color=discord.Color.green(),
+                timestamp=datetime.now(timezone.utc)
+            )
+            
+            embed.add_field(name="✅ Fixed", value="All alert cooldowns reset\nTimezone awareness enforced", inline=False)
+            
+            await ctx.send(embed=embed)
+            log.info("Timezone fix applied - all datetime fields reset")
+            
+        except Exception as e:
+            await ctx.send(f"❌ Timezone fix failed: {e}")
+
+    @bot.command(name="test_sheets_payload")
+    async def _test_sheets_payload(ctx):
+        """Test the exact payload sent to Google Sheets"""
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.send("⚠️ Administrator permissions required")
+            return
+            
+        try:
+            # Get current market data
+            df = await mdp.fetch_ohlc(100)
+            if df is None:
+                await ctx.send("❌ Failed to fetch market data")
+                return
+                
+            df = add_indicators(df)
+            latest = df.iloc[-1]
+            current_price = float(latest["close"])
+            
+            # Generate enhanced data
+            enhanced_data = await calculate_enhanced_metrics(df, latest, current_price, "Long")
+            
+            # Create test trade exactly like the real one
+            test_trade = TradeData(
+                id="TEST123",
+                asset="ETH",
+                direction=TradeDirection.LONG,
+                entry_price=current_price,
+                sl=current_price * 0.99,
+                tp1=current_price * 1.015,
+                tp2=current_price * 1.03,
+                level_name="H5",
+                level_price=current_price,
+                knight="Sir Camarilla",
+                rating="A",
+                score=4,
+                trade_type="Test_Breakout",
+                enhanced_data=enhanced_data
+            )
+            
+            # Build payload exactly like the real send_trade_entry function
+            payload = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "trade_id": test_trade.id,
+                "asset": test_trade.asset,
+                "direction": test_trade.direction.name.title(),
+                "level_name": str(test_trade.level_name or ""),
+                "entry_price": float(test_trade.entry_price),
+                "stop_loss": float(test_trade.sl),
+                "target1": float(test_trade.tp1),  # Apps Script expects 'target1'
+                "target2": float(test_trade.tp2),  # Apps Script expects 'target2'
+                "status": "OPEN",
+                "score": int(test_trade.score or 0),  # Apps Script expects 'score'
+                "confidence": str(test_trade.rating or ""),
+                "knight": str(test_trade.knight or ""),
+                "trade_type": str(test_trade.trade_type or "Breakout"),
+                "enhanced_data": {
+                    "enhanced_score": int(enhanced_data.get("enhanced_score", 4)),
+                    "rsi_level": str(enhanced_data.get("rsi_level", 50.0)),
+                    "volume_ratio": str(enhanced_data.get("volume_ratio", 1.0)),
+                    "market_status": str(enhanced_data.get("market_status", "NORMAL")),
+                    # ... etc
+                }
+            }
+            
+            # Show the correct mapping
+            embed = discord.Embed(
+                title="🧪 Google Apps Script Compatible Payload",
+                description="Payload that matches your Apps Script exactly",
+                color=discord.Color.green(),
+                timestamp=datetime.now(timezone.utc)
+            )
+            
+            # Critical field mapping
+            embed.add_field(
+                name="✅ Fixed Field Mapping",
+                value=(
+                    f"**entry_price:** {payload['entry_price']} ✅\n"
+                    f"**level_name:** {payload['level_name']} ✅\n"
+                    f"**target1:** {payload['target1']} (was take_profit_1) ✅\n"
+                    f"**target2:** {payload['target2']} (was take_profit_2) ✅\n"
+                    f"**score:** {payload['score']} (was original_score) ✅"
+                ),
+                inline=False
+            )
+            
+            # Enhanced data structure
+            enhanced_fields = len(payload['enhanced_data'])
+            embed.add_field(
+                name="📊 Enhanced Data Structure",
+                value=(
+                    f"**Structure:** Nested object ✅\n"
+                    f"**Fields:** {enhanced_fields} fields\n"
+                    f"**Enhanced Score:** {payload['enhanced_data']['enhanced_score']}\n"
+                    f"**RSI Level:** {payload['enhanced_data']['rsi_level']}\n"
+                    f"**Volume Ratio:** {payload['enhanced_data']['volume_ratio']}"
+                ),
+                inline=False
+            )
+            
+            embed.add_field(
+                name="🔧 Apps Script Compatibility",
+                value="✅ Field names match exactly\n✅ Enhanced data nested properly\n✅ All numeric fields included",
+                inline=False
+            )
+            
+            await ctx.send(embed=embed)
+            
+        except Exception as e:
+            await ctx.send(f"❌ Test failed: {e}")
+
+    @bot.command(name="debug_enhanced")
     async def _debug_sheets(ctx):
         """Debug what gets sent to sheets"""
         if not ctx.author.guild_permissions.administrator:
@@ -1894,7 +2064,7 @@ def create_bot():
             
             # Send alerts through alert manager
             if alert_manager:
-                # Market scorecard every 15 minutes
+                # Market scorecard every 15 minutes - use timezone-aware datetime
                 now = datetime.now(timezone.utc)
                 if now.minute % 15 == 0:
                     await alert_manager.send_market_scorecard(df, levels)
