@@ -789,6 +789,46 @@ def build_trade(last: pd.Series, levels: Dict[str,float], signal: Dict[str,Any])
         enhanced_data=conf
     )
 
+# --- test helper (put below build_trade) ---
+def build_test_trade(
+    direction: str = "LONG",
+    entry: float = 2700.0,
+    sl: float = 2650.0,
+    tp1: float = 2740.0,
+    tp2: float = 2790.0,
+    score: int = 5,
+    tier: str = "S",
+    trade_type: str | None = None,
+    level_name: str | None = None,
+    level_price: float | None = None,
+) -> TradeData:
+    direction_enum = TradeDirection.LONG if str(direction).upper().startswith("L") else TradeDirection.SHORT
+    trade_type = trade_type or ("H5_Breakout" if direction_enum == TradeDirection.LONG else "L5_Breakout")
+    level_name = level_name or ("H5" if direction_enum == TradeDirection.LONG else "L5")
+    level_price = level_price if level_price is not None else entry
+
+    t = TradeData(
+        id=datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"),
+        asset=cfg.pair,
+        direction=direction_enum,
+        entry_price=float(entry),
+        sl=float(sl),
+        tp1=float(tp1),
+        tp2=float(tp2),
+        trade_type=trade_type,
+        level_name=level_name,
+        level_price=float(level_price),
+        rating=tier,
+        score=int(score),
+        knight=knight_for(trade_type),
+        enhanced_data={
+            "enhanced_score": int(score),
+            "volume_ratio": 1.5,
+            "rsi_level": 62.0 if direction_enum == TradeDirection.LONG else 38.0,
+            "trend_bias": "Bullish" if direction_enum == TradeDirection.LONG else "Bearish",
+        },
+    )
+    return t
 
 async def _close_trade_and_notify(t: TradeData, exit_price: float, reason: str):
     # Compute PnL %
@@ -965,6 +1005,92 @@ def status_embed() -> discord.Embed:
 def create_bot():
     bot = commands.Bot(command_prefix="!", intents=INTENTS, help_command=None)
 
+    # ---- helpers (local to create_bot) ----
+    def _build_test_trade(
+        direction: str = "LONG",
+        entry: float = 2700.0,
+        sl: float = 2650.0,
+        tp1: float = 2740.0,
+        tp2: float = 2790.0,
+        score: int = 5,
+        tier: str = "S",
+        trade_type: str | None = None,
+        level_name: str | None = None,
+        level_price: float | None = None,
+    ) -> TradeData:
+        direction_enum = TradeDirection.LONG if str(direction).upper().startswith("L") else TradeDirection.SHORT
+        trade_type = trade_type or ("H5_Breakout" if direction_enum == TradeDirection.LONG else "L5_Breakout")
+        level_name = level_name or ("H5" if direction_enum == TradeDirection.LONG else "L5")
+        level_price = float(level_price) if level_price is not None else float(entry)
+
+        return TradeData(
+            id=datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"),
+            asset=cfg.pair,
+            direction=direction_enum,
+            entry_price=float(entry),
+            sl=float(sl),
+            tp1=float(tp1),
+            tp2=float(tp2),
+            trade_type=trade_type,
+            level_name=level_name,
+            level_price=level_price,
+            rating=tier,
+            score=int(score),
+            knight=knight_for(trade_type),
+            enhanced_data={
+                "enhanced_score": int(score),
+                "volume_ratio": 1.5,
+                "rsi_level": 62.0 if direction_enum == TradeDirection.LONG else 38.0,
+                "trend_bias": "Bullish" if direction_enum == TradeDirection.LONG else "Bearish",
+            },
+        )
+
+    async def _send_exit_inline(t: TradeData, exit_price: float, reason: str):
+        # Compute PnL %
+        try:
+            if t.direction == TradeDirection.LONG:
+                pnl_pct = (exit_price / t.entry_price - 1.0) * 100.0
+            else:
+                pnl_pct = (1.0 - exit_price / t.entry_price) * 100.0
+        except Exception:
+            pnl_pct = 0.0
+
+        # Close & persist
+        t.status = TradeStatus.CLOSED
+        t.closed_at = datetime.now(timezone.utc)
+        db.save_trade(t)
+
+        # Sheets update (if method exists)
+        try:
+            await trade_manager.start()
+            time_iso = t.closed_at.isoformat()
+            if hasattr(sheets, "send_trade_exit"):
+                await sheets.send_trade_exit(trade_manager.session, t.id, reason, exit_price, time_iso, round(pnl_pct, 2))
+        except Exception as e:
+            log.warning(f"Sheets exit update failed: {e}")
+
+        # Send exit alert (use route_exit_alert if present, else inline)
+        if "route_exit_alert" in globals():
+            await route_exit_alert(t, exit_price, reason, round(pnl_pct, 2))
+        else:
+            color = discord.Color.light_grey() if "TP2" in reason else discord.Color.dark_red()
+            title_icon = "🏁" if "TP2" in reason else "⛔"
+            e = discord.Embed(
+                title=f"{title_icon} Exit — {t.asset} {t.direction.name} ({reason})",
+                color=color,
+                timestamp=datetime.now(timezone.utc),
+            )
+            e.add_field(name="Entry", value=f"{t.entry_price:.2f}", inline=True)
+            e.add_field(name="Exit", value=f"{exit_price:.2f}", inline=True)
+            e.add_field(name="PnL %", value=f"{pnl_pct:.2f}", inline=True)
+            e.add_field(name="Level", value=f"{t.level_name or '-'}", inline=True)
+            e.set_footer(text=f"Trade ID: {t.id}")
+            await send_to_channel(cfg.battle_signals_id, e)
+
+        # Remove from active list
+        trade_manager.active.pop(t.id, None)
+
+    # ---- existing commands ----
     @bot.command(name="status")
     async def _status(ctx):
         await ctx.send(embed=status_embed())
@@ -997,6 +1123,124 @@ def create_bot():
         e.add_field(name="After", value=str(after), inline=True)
         await ctx.send(embed=e)
 
+    # ---- new commands ----
+    @bot.command(name="test_entry")
+    async def _test_entry(
+        ctx,
+        direction: str = "LONG",
+        entry: float = 2700.0,
+        sl: float = 2650.0,
+        tp1: float = 2740.0,
+        tp2: float = 2790.0,
+        score: int = 5,
+        tier: str = "S",
+        show_payload: str = "no",
+    ):
+        """Send a test trade entry, route an alert, and write to Sheets. Add 'yes' to preview the mapped JSON."""
+        t = _build_test_trade(direction, entry, sl, tp1, tp2, score, tier)
+        await trade_manager.open_trade(t)     # persists & writes to Sheets
+        await route_battle_signal(t)          # alert
+
+        # Optional 100x test gate
+        try:
+            if (t.score or 0) >= 5 and not should_throttle("__100x__", cfg.hundred_x_cooldown_min):
+                await route_100x_alert(t)
+        except Exception:
+            pass
+
+        # Payload preview (after mapping)
+        if show_payload.lower() in ("yes", "y", "true", "1"):
+            ed = t.enhanced_data or {}
+            base = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "trade_id": t.id, "asset": t.asset,
+                "direction": t.direction.name.title(),
+                "status": "OPEN",
+                "level_name": t.level_name or "",
+                "trade_type": t.trade_type or "",
+                "score": t.score or 0,
+                "enhanced_score": ed.get("enhanced_score", t.score or 0),
+                "confidence": t.rating or "",
+                "knight": t.knight or "",
+                "rsi_level": ed.get("rsi_level"),
+                "volume_ratio": ed.get("volume_ratio"),
+                "market_status": ("OVERBOUGHT" if (ed.get("rsi_level", 50) >= 75) else "OVERSOLD" if (ed.get("rsi_level", 50) <= 25) else "NORMAL"),
+                "vwap_position": ed.get("vwap_position", "-"),
+                "macd_status": ed.get("macd_status", "-"),
+                "trend_bias": ed.get("trend_bias") or ed.get("market_bias") or "-",
+                "risk_pct": round(abs((t.entry_price - t.sl) / t.entry_price) * 100.0, 2) if t.entry_price else "",
+                "rr_ratio": round(
+                    (abs(((t.tp1 or t.tp2) - t.entry_price) / t.entry_price) * 100.0) /
+                    (abs((t.entry_price - t.sl) / t.entry_price) * 100.0)
+                , 2) if (t.entry_price and t.sl and (t.tp1 or t.tp2)) else "",
+                "setup_age_minutes": ed.get("setup_age_minutes", ""),
+                "breakout_structure": ed.get("breakout_structure", ""),
+                "confluence_count": ed.get("confluence_count", ""),
+                "candle_body_strength": ed.get("candle_body_strength", "-"),
+                "market_session": ed.get("market_session", ""),
+                "distance_from_level_pct": ed.get("distance_from_level_pct", ""),
+                "recent_news_events": ed.get("recent_news_events", "No"),
+                "volatility_state": ed.get("volatility_state", ""),
+                "trend_strength": ed.get("trend_strength", f"Moderate {ed.get('trend_bias', '-')}".strip()),
+                "enhanced_data": ed,
+            }
+            price_block = {
+                "entry_price": t.entry_price, "entry": t.entry_price,
+                "stop_loss": t.sl, "stop": t.sl,
+                "tp1": t.tp1, "target1": t.tp1,
+                "tp2": t.tp2, "target2": t.tp2,
+            }
+            try:
+                mapped = sheets._apply_field_map({**base, **price_block})  # type: ignore[attr-defined]
+            except Exception:
+                mapped = {**base, **price_block}
+
+            import json as _json
+            j = _json.dumps(mapped, indent=2, default=str)
+            if len(j) > 1900:
+                j = j[:1900] + "... (truncated)"
+            await ctx.send(f"```json\n{j}\n```")
+
+        await ctx.send(f"✅ Test entry sent. Trade ID: `{t.id}`")
+
+    @bot.command(name="test_exit")
+    async def _test_exit(ctx, reason: str = "TP2"):
+        """Close the most recent active trade as TP2 or SL and send exit alert + Sheets update."""
+        t = None
+        if trade_manager.active:
+            # pick the most recent OPEN trade
+            open_trades = [x for x in trade_manager.active.values() if x.status == TradeStatus.OPEN]
+            t = sorted(open_trades, key=lambda x: x.opened_at)[-1] if open_trades else None
+        if t is None:
+            # If none active, create one so you can test exit path
+            t = _build_test_trade()
+            await trade_manager.open_trade(t)
+            await route_battle_signal(t)
+
+        label = "TP2 Hit" if str(reason).upper().startswith("TP") else "Stop Loss Hit"
+        price = t.tp2 if "TP" in label else t.sl
+
+        # Prefer module helper if available; otherwise do inline close
+        if "_close_trade_and_notify" in globals():
+            await _close_trade_and_notify(t, price, label)
+        else:
+            await _send_exit_inline(t, price, label)
+
+        await ctx.send(f"🏁 Test exit sent for `{t.id}` ({label}).")
+
+    @bot.command(name="scorecard_now")
+    async def _scorecard_now(ctx):
+        """Force a scorecard to post immediately."""
+        await mdp.start()
+        df = await mdp.fetch_ohlc(120)
+        df = compute_indicators(df)
+        levels = calc_camarilla(df)
+        if levels:
+            await route_market_scorecard(df, levels)
+            await ctx.send("📜 Scorecard sent.")
+        else:
+            await ctx.send("No levels computed; scorecard skipped.")
+
     @bot.event
     async def on_ready():
         log.info(f"Logged in as {bot.user}")
@@ -1008,8 +1252,10 @@ def create_bot():
             for cid in [cfg.scribes_keep_id, cfg.battle_signals_id, cfg.eagle_signal_id,
                         cfg.knights_watch_id, cfg.eth_battleground_id, cfg.setup_alerts_id]:
                 if cid:
-                    try: await resolve_channel(cid)
-                    except Exception: pass
+                    try:
+                        await resolve_channel(cid)
+                    except Exception:
+                        pass
         except Exception as e:
             log.error(f"on_ready error: {e}")
 
