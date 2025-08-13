@@ -704,51 +704,59 @@ async def route_market_scorecard(df: pd.DataFrame, levels: Dict[str, float]):
     await send_to_channel(cfg.scribes_keep_id, e)
 
 # ---------- Advanced Detection Blocks ----------
-def detect_continuation(last: pd.Series, levels: Dict[str,float]) -> Optional[Dict[str,Any]]:
+def detect_continuation(last: pd.Series, levels: Dict[str, float]) -> Optional[Dict[str, Any]]:
     """Continuation above H5 / below L5: momentum follow-through after prior breakout."""
-    c,o,h,l = float(last["close"]), float(last["open"]), float(last["high"]), float(last["low"])
-    v, avg_vol = float(last["volume"]), float(last.get("vol_avg10", v if "v" in locals() else 0) or v)
+    c, o, h, l = float(last["close"]), float(last["open"]), float(last["high"]), float(last["low"])
+    v = float(last["volume"])
+    avg_vol = float(last.get("vol_avg10", v))
     ema_fast, ema_slow = float(last.get("ema_fast", c)), float(last.get("ema_slow", c))
     H5, L5 = levels.get("H5"), levels.get("L5")
-    if H5 and c>H5 and ema_fast>ema_slow and v>(avg_vol*1.1):
-        return {"type":"H5_Continuation","direction":TradeDirection.LONG,"level":"H5","level_price":H5}
-    if L5 and c<L5 and ema_fast<ema_slow and v>(avg_vol*1.1):
-        return {"type":"L5_Continuation","direction":TradeDirection.SHORT,"level":"L5","level_price":L5}
+    if H5 and c > H5 and ema_fast > ema_slow and v > (avg_vol * 1.1):
+        return {"type": "H5_Continuation", "direction": TradeDirection.LONG, "level": "H5", "level_price": H5}
+    if L5 and c < L5 and ema_fast < ema_slow and v > (avg_vol * 1.1):
+        return {"type": "L5_Continuation", "direction": TradeDirection.SHORT, "level": "L5", "level_price": L5}
     return None
 
-def detect_pullback(df: pd.DataFrame, levels: Dict[str,float]) -> Optional[Dict[str,Any]]:
+
+def detect_pullback(df: pd.DataFrame, levels: Dict[str, float]) -> Optional[Dict[str, Any]]:
     """Pullback near H4/L4 with retake + body/volume confirmation."""
-    if len(df)<2: return None
+    if len(df) < 2:
+        return None
     last = df.iloc[-1]; prev = df.iloc[-2]
-    c,o,h,l = float(last["close"]), float(last["open"]), float(last["high"]), float(last["low"])
-    v, avg_vol = float(last["volume"]), float(last.get("vol_avg10", v))
+    c, o, h, l = float(last["close"]), float(last["open"]), float(last["high"]), float(last["low"])
+    v = float(last["volume"])
+    avg_vol = float(last.get("vol_avg10", v))
     rsi = float(last.get("rsi", 50))
     H4, L4 = levels.get("H4"), levels.get("L4")
-    rng = max(h-l, 1e-9)
-    body_ratio = abs(c-o)/rng
+    rng = max(h - l, 1e-9)
+    body_ratio = abs(c - o) / rng
     # Long pullback: wick into/near H4 then close back above
-    if H4 and (l<=H4*(1.001)) and (c>H4) and body_ratio>0.4 and v>(avg_vol*1.1) and rsi>50:
-        return {"type":"H4_Pullback_Long","direction":TradeDirection.LONG,"level":"H4","level_price":H4}
+    if H4 and (l <= H4 * 1.001) and (c > H4) and body_ratio > 0.4 and v > (avg_vol * 1.1) and rsi > 50:
+        return {"type": "H4_Pullback_Long", "direction": TradeDirection.LONG, "level": "H4", "level_price": H4}
     # Short pullback: wick into/near L4 then close back below
-    if L4 and (h>=L4*(0.999)) and (c<L4) and body_ratio>0.4 and v>(avg_vol*1.1) and rsi<50:
-        return {"type":"L4_Pullback_Short","direction":TradeDirection.SHORT,"level":"L4","level_price":L4}
+    if L4 and (h >= L4 * 0.999) and (c < L4) and body_ratio > 0.4 and v > (avg_vol * 1.1) and rsi < 50:
+        return {"type": "L4_Pullback_Short", "direction": TradeDirection.SHORT, "level": "L4", "level_price": L4}
     return None
 
-def detect_reversal(df: pd.DataFrame, levels: Dict[str,float]) -> Optional[Dict[str,Any]]:
+
+def detect_reversal(df: pd.DataFrame, levels: Dict[str, float]) -> Optional[Dict[str, Any]]:
     """Structure failure at H4/L4 -> reversal back inside range."""
-    if len(df)<2: return None
+    if len(df) < 2:
+        return None
     last = df.iloc[-1]; prev = df.iloc[-2]
-    c,o,h,l = float(last["close"]), float(last["open"]), float(last["high"]), float(last["low"])
-    v, avg_vol = float(last["volume"]), float(last.get("vol_avg10", v))
+    c, o, h, l = float(last["close"]), float(last["open"]), float(last["high"]), float(last["low"])
+    v = float(last["volume"])
+    avg_vol = float(last.get("vol_avg10", v))
     H4, L4 = levels.get("H4"), levels.get("L4")
-    rng = max(h-l, 1e-9); body_ratio = abs(c-o)/rng
+    rng = max(h - l, 1e-9)
+    body_ratio = abs(c - o) / rng
 
     # From above H4 failing back under -> short reversal
-    if H4 and prev["close"]>H4 and c<H4 and body_ratio>0.5 and v>(avg_vol*1.2):
-        return {"type":"H4_Reversal_Short","direction":TradeDirection.SHORT,"level":"H4","level_price":H4}
+    if H4 and prev["close"] > H4 and c < H4 and body_ratio > 0.5 and v > (avg_vol * 1.2):
+        return {"type": "H4_Reversal_Short", "direction": TradeDirection.SHORT, "level": "H4", "level_price": H4}
     # From below L4 failing back over -> long reversal
-    if L4 and prev["close"]<L4 and c>L4 and body_ratio>0.5 and v>(avg_vol*1.2):
-        return {"type":"L4_Reversal_Long","direction":TradeDirection.LONG,"level":"L4","level_price":L4}
+    if L4 and prev["close"] < L4 and c > L4 and body_ratio > 0.5 and v > (avg_vol * 1.2):
+        return {"type": "L4_Reversal_Long", "direction": TradeDirection.LONG, "level": "L4", "level_price": L4}
     return None
 
 def build_trade(last: pd.Series, levels: Dict[str,float], signal: Dict[str,Any]) -> TradeData:
@@ -822,7 +830,8 @@ async def scan_loop():
     if not levels: return
     last = df.iloc[-1]
     c,o,h,l = float(last["close"]), float(last["open"]), float(last["high"]), float(last["low"])
-    v, avg_vol = float(last["volume"]), float(last.get("vol_avg10", v))
+    v = float(last["volume"])
+    avg_vol = float(last.get("vol_avg10", v))
     H5, L5 = levels.get("H5"), levels.get("L5")
     H4, L4 = levels.get("H4"), levels.get("L4")
 
