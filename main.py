@@ -1,7 +1,5 @@
 # ============================================
-# Production_ControlTower_v12x.py
-# Merged Production Trading Bot v12 + Control Tower 11.x integrations
-# (Patched: 4H Camarilla buckets w/ timezone support)
+# Production_ControlTower_v12.1
 # ============================================
 
 import os
@@ -320,12 +318,12 @@ class MarketDataProvider:
                 hc = (df["high"] - df["close"].shift()).abs()
                 lc = (df["low"] - df["close"].shift()).abs()
                 tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
-                df["atr"] = tr.rolling(14).mean().fillna(method="bfill").fillna(0.01)
+                df["atr"] = tr.rolling(14).mean().bfill().fillna(0.01)
 
             # VWAP
             tp = (df["high"] + df["low"] + df["close"]) / 3
             df["vwap"] = (tp * df["volume"]).cumsum() / df["volume"].replace(0, np.nan).cumsum()
-            df["vwap"] = df["vwap"].fillna(method="ffill").fillna(df["close"])
+            df["vwap"] = df["vwap"].ffill().fillna(df["close"])
 
             return df
         except Exception as e:
@@ -364,7 +362,8 @@ class CamarillaCalculator:
                     except Exception:
                         pass
 
-                grouped = dfx.resample(freq, label="right", closed="right").agg({
+                norm_freq = str(freq).lower() if freq else None
+                grouped = dfx.resample(norm_freq, label="right", closed="right").agg({
                     "high": "max",
                     "low": "min",
                     "close": "last"
@@ -1477,6 +1476,13 @@ class TradingBot:
                 }), (200 if healthy else 503)
             except Exception as e:
                 return jsonify({"status":"error","error":str(e)}), 500
+
+        @app.route("/", methods=["GET","HEAD"])
+        def root():
+            try:
+                return jsonify({"ok": True, "message": "Service up. See /health, /metrics, /debug/last_payload"}), 200
+            except Exception as e:
+                return jsonify({"error": str(e)}), 500
 
         @app.route("/metrics")
         def metrics():
