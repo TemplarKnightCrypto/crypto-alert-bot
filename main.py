@@ -1,5 +1,5 @@
 # ============================================
-# Control Tower - Complete v11.11.1 + Trade Closure System
+# Control Tower - Complete v11.11.3 + Trade Closure System
 # ============================================
 
 import os
@@ -25,6 +25,8 @@ from dotenv import load_dotenv
 
 import discord
 from discord.ext import commands, tasks
+from trade_signal_engine import TradeSignalEngine
+
 
 # TA imports with fallbacks
 try:
@@ -936,6 +938,10 @@ sheets = None
 trade_manager = None
 mdp = None
 
+# Trade signal engine (cooldown is env-tunable)
+SIGNAL_COOLDOWN_S = int(os.getenv("SIGNAL_COOLDOWN_S", "1800"))  # 30 min default
+signal_engine = TradeSignalEngine(cooldown_s=SIGNAL_COOLDOWN_S)
+
 def status_embed() -> discord.Embed:
     try:
         e = discord.Embed(
@@ -981,7 +987,9 @@ async def send_battle_signal(channel, t: TradeData):
 
 def create_bot():
     bot = commands.Bot(command_prefix="!", intents=INTENTS, help_command=None)
-    
+
+    # ----------------------- Commands -----------------------
+
     @bot.command(name="status")
     async def _status(ctx):
         try:
@@ -995,13 +1003,13 @@ def create_bot():
             if not trade_manager.active:
                 await ctx.send("📊 No active trades currently")
                 return
-            
+
             e = discord.Embed(
-                title="📊 Active Trades", 
+                title="📊 Active Trades",
                 description=f"Currently tracking {len(trade_manager.active)} trade(s)",
                 color=discord.Color.green()
             )
-            
+
             for trade_id, trade in list(trade_manager.active.items())[:10]:
                 trade_info = (
                     f"**Direction:** {trade.direction.name}\n"
@@ -1011,7 +1019,7 @@ def create_bot():
                     f"**TP1 Done:** {'✅' if trade.tp1_done else '❌'}"
                 )
                 e.add_field(name=f"🎯 {trade_id[:8]}", value=trade_info, inline=True)
-            
+
             await ctx.send(embed=e)
         except Exception as e:
             await ctx.send(f"Trades error: {e}")
@@ -1021,25 +1029,25 @@ def create_bot():
         """Show trading performance statistics"""
         try:
             stats = db.get_trade_performance()
-            
+
             if not stats or stats.get("total_trades", 0) == 0:
                 await ctx.send("📊 No completed trades yet")
                 return
-            
+
             embed = discord.Embed(
                 title="📈 Trading Performance",
                 color=discord.Color.gold() if stats.get("win_rate", 0) > 50 else discord.Color.orange(),
                 timestamp=datetime.now(timezone.utc)
             )
-            
+
             embed.add_field(name="📊 Total Trades", value=str(stats.get("total_trades", 0)), inline=True)
             embed.add_field(name="✅ Winners", value=str(stats.get("winners", 0)), inline=True)
             embed.add_field(name="❌ Losers", value=str(stats.get("losers", 0)), inline=True)
-            
+
             embed.add_field(name="🎯 Win Rate", value=f"{stats.get('win_rate', 0):.1f}%", inline=True)
             embed.add_field(name="📈 Avg P&L", value=f"{stats.get('avg_pnl', 0):+.2f}%", inline=True)
             embed.add_field(name="💰 Total P&L", value=f"{stats.get('total_pnl', 0):+.2f}%", inline=True)
-            
+
             # Performance rating
             win_rate = stats.get("win_rate", 0)
             if win_rate >= 70:
@@ -1050,11 +1058,11 @@ def create_bot():
                 rating = "⚖️ Average"
             else:
                 rating = "⚠️ Needs Improvement"
-            
+
             embed.add_field(name="🏆 Rating", value=rating, inline=False)
-            
+
             await ctx.send(embed=embed)
-            
+
         except Exception as e:
             await ctx.send(f"Performance error: {e}")
 
@@ -1064,29 +1072,29 @@ def create_bot():
         if not ctx.author.guild_permissions.administrator:
             await ctx.send("⚠️ Administrator permissions required")
             return
-        
+
         try:
             if not trade_id:
                 if not trade_manager.active:
                     await ctx.send("❌ No active trades to close")
                     return
                 trade_id = list(trade_manager.active.keys())[0]
-            
+
             if trade_id not in trade_manager.active:
                 await ctx.send(f"❌ Trade {trade_id} not found")
                 return
-            
+
             trade = trade_manager.active[trade_id]
             test_exit_price = trade.entry_price * 1.01  # Simulate small profit
-            
+
             result = await trade_manager.close_trade(trade_id, "Manual Test", test_exit_price)
-            
+
             if result.get("success"):
                 pnl = result.get("pnl_pct", 0)
                 await ctx.send(f"✅ Test closure completed for trade {trade_id} - P&L: {pnl:+.2f}%")
             else:
                 await ctx.send(f"❌ Test close failed: {result.get('error', 'Unknown error')}")
-                
+
         except Exception as e:
             await ctx.send(f"❌ Test close failed: {e}")
 
@@ -1096,34 +1104,34 @@ def create_bot():
         if not ctx.author.guild_permissions.administrator:
             await ctx.send("⚠️ Administrator permissions required")
             return
-        
+
         try:
             df = await mdp.fetch_ohlc(100)
             if df is None:
                 await ctx.send("❌ Failed to fetch market data")
                 return
-            
+
             current_price = float(df.iloc[-1]["close"])
             before_count = len(trade_manager.active)
-            
+
             await monitor_active_trades(df, current_price)
-            
+
             after_count = len(trade_manager.active)
             closed_count = before_count - after_count
-            
+
             embed = discord.Embed(
                 title="🔍 Force Monitor Complete",
                 color=discord.Color.blue(),
                 timestamp=datetime.now(timezone.utc)
             )
-            
+
             embed.add_field(name="💰 Current Price", value=f"${current_price:.2f}", inline=True)
             embed.add_field(name="📊 Trades Before", value=str(before_count), inline=True)
             embed.add_field(name="📊 Trades After", value=str(after_count), inline=True)
             embed.add_field(name="🏁 Trades Closed", value=str(closed_count), inline=True)
-            
+
             await ctx.send(embed=embed)
-            
+
         except Exception as e:
             await ctx.send(f"❌ Force monitor failed: {e}")
 
@@ -1135,45 +1143,47 @@ def create_bot():
             if df is None:
                 await ctx.send("❌ Failed to fetch market data")
                 return
-                
+
             df = add_indicators(df)
             levels = calc_camarilla(df)
-            
+
             if not levels:
                 await ctx.send("❌ Failed to calculate Camarilla levels")
                 return
-                
+
             latest = df.iloc[-1]
             price = float(latest["close"])
             rsi = float(latest.get("rsi", 50))
-            
+
             embed = discord.Embed(
                 title="📊 Current Market Analysis",
                 color=discord.Color.blue(),
                 timestamp=datetime.now(timezone.utc)
             )
-            
+
             embed.add_field(name="💰 Price", value=f"${price:.2f}", inline=True)
             embed.add_field(name="📈 RSI", value=f"{rsi:.1f}", inline=True)
             embed.add_field(name="🌊 Regime", value="NORMAL", inline=True)
-            
+
             # Show key levels
             level_text = []
             for name, level in levels.items():
                 distance = price - level
                 distance_pct = (distance / price) * 100
                 level_text.append(f"**{name}:** ${level:.2f} ({distance_pct:+.2f}%)")
-            
+
             embed.add_field(
                 name="🎯 Camarilla Levels",
                 value="\n".join(level_text[:6]),
                 inline=False
             )
-            
+
             await ctx.send(embed=embed)
-            
+
         except Exception as e:
             await ctx.send(f"Market analysis error: {e}")
+
+    # ----------------------- Scanner Loop -----------------------
 
     @tasks.loop(minutes=2)
     async def enhanced_scanner():
@@ -1181,107 +1191,71 @@ def create_bot():
         try:
             await mdp.start()
             await trade_manager.start()
-            
+
             df = await mdp.fetch_ohlc(100)
             if df is None:
                 return
-                
+
             df = add_indicators(df)
             levels = calc_camarilla(df)
-            
             if not levels:
                 return
-                
+
             latest = df.iloc[-1]
             current_price = float(latest["close"])
-            
-            # CRITICAL: Monitor existing trades FIRST
+
+            # 1) Monitor existing trades FIRST
             await monitor_active_trades(df, current_price)
-            
-            # Traditional signal generation
+
+            # 2) Generate new signals via the engine (close+body+volume + cooldown + continuation)
             await scan_for_signals(df, levels)
-                
+
         except Exception as e:
             log.error(f"Enhanced scanner error: {e}")
 
     async def scan_for_signals(df: pd.DataFrame, levels: Dict[str, float]):
-        """Scan for trading signals"""
+        """Scan for trading signals using the TradeSignalEngine"""
         try:
+            sig = signal_engine.get_signal(df, levels, pair=cfg.pair, now_ts=int(time.time()))
+            if not sig:
+                return
+
+            # Optional: keep enhanced metrics for Sheets/embeds
             latest = df.iloc[-1]
-            current_price = float(latest["close"])
-            
-            # Check for H5/L5 breakouts
-            h5 = levels.get("H5")
-            l5 = levels.get("L5")
-            
-            if h5 and current_price > h5:
-                # Potential long signal
-                enhanced_data = await calculate_enhanced_metrics(df, latest, h5, "Long")
-                
-                log.info(f"H5 breakout detected at ${current_price:.2f}")
-                
-                timestamp = datetime.now(timezone.utc)
-                trade_id = f"L{timestamp.strftime('%m%d%H%M')}"
-                
-                t = TradeData(
-                    id=trade_id,
-                    asset=cfg.pair.replace("USD", ""),
-                    direction=TradeDirection.LONG,
-                    entry_price=float(current_price),
-                    sl=float(current_price * 0.99),
-                    tp1=float(current_price * 1.015),
-                    tp2=float(current_price * 1.03),
-                    level_name="H5",
-                    level_price=float(h5),
-                    knight="Sir Camarilla",
-                    rating=enhanced_data.get("tier", "A"),
-                    score=enhanced_data.get("enhanced_score", 4),
-                    trade_type="H5_Breakout",
-                    enhanced_data=enhanced_data
-                )
-                
-                await trade_manager.open_trade(t)
-                
-                # Send battle signal
-                channel = bot.get_channel(cfg.channels.battle_signals_id)
-                if channel:
-                    await send_battle_signal(channel, t)
-                    
-            elif l5 and current_price < l5:
-                # Potential short signal
-                enhanced_data = await calculate_enhanced_metrics(df, latest, l5, "Short")
-                
-                log.info(f"L5 breakout detected at ${current_price:.2f}")
-                
-                timestamp = datetime.now(timezone.utc)
-                trade_id = f"S{timestamp.strftime('%m%d%H%M')}"
-                
-                t = TradeData(
-                    id=trade_id,
-                    asset=cfg.pair.replace("USD", ""),
-                    direction=TradeDirection.SHORT,
-                    entry_price=float(current_price),
-                    sl=float(current_price * 1.01),
-                    tp1=float(current_price * 0.985),
-                    tp2=float(current_price * 0.97),
-                    level_name="L5",
-                    level_price=float(l5),
-                    knight="Sir Camarilla",
-                    rating=enhanced_data.get("tier", "A"),
-                    score=enhanced_data.get("enhanced_score", 4),
-                    trade_type="L5_Breakout",
-                    enhanced_data=enhanced_data
-                )
-                
-                await trade_manager.open_trade(t)
-                
-                # Send battle signal
-                channel = bot.get_channel(cfg.channels.battle_signals_id)
-                if channel:
-                    await send_battle_signal(channel, t)
-                
+            direction_str = "Long" if sig.side == "long" else "Short"
+            enhanced_data = await calculate_enhanced_metrics(df, latest, sig.level_price, direction_str)
+
+            timestamp = datetime.now(timezone.utc)
+            trade_id = ("L" if sig.side == "long" else "S") + timestamp.strftime("%m%d%H%M")
+
+            t = TradeData(
+                id=trade_id,
+                asset=cfg.pair.replace("USD", ""),
+                direction=TradeDirection.LONG if sig.side == "long" else TradeDirection.SHORT,
+                entry_price=float(sig.entry),
+                sl=float(sig.sl),
+                tp1=float(sig.tp1),
+                tp2=float(sig.tp2),
+                level_name=sig.level_name,
+                level_price=float(sig.level_price),
+                knight="Sir Leonis" if sig.kind == "breakout" else "Sir Lucien",
+                rating=enhanced_data.get("tier", "A"),
+                score=enhanced_data.get("enhanced_score", 4),
+                trade_type=f"{sig.level_name}_{sig.kind.capitalize()}",
+                enhanced_data={**enhanced_data, "reason": sig.reason}
+            )
+
+            await trade_manager.open_trade(t)
+
+            # Send battle signal
+            channel = bot.get_channel(cfg.channels.battle_signals_id)
+            if channel:
+                await send_battle_signal(channel, t)
+
         except Exception as e:
             log.error(f"Signal scanning error: {e}")
+
+    # ----------------------- Lifecycle Hooks -----------------------
 
     @enhanced_scanner.before_loop
     async def before_scanner():
@@ -1291,57 +1265,56 @@ def create_bot():
 
     @bot.event
     async def on_ready():
-            log.info(f"Logged in as {bot.user}")
-            
-            try:
-                await trade_manager.rehydrate()
-                if not enhanced_scanner.is_running():
-                    enhanced_scanner.start()
-                    
-                # Send startup notification
-                embed = discord.Embed(
-                    title="🏰 Complete Control Tower v11.11 Online",
-                    description="*Trade closure system implemented - Full automation ready*",
-                    color=discord.Color.gold(),
-                    timestamp=datetime.now(timezone.utc)
-                )
-                
-                embed.add_field(
-                    name="✅ System Status",
-                    value=(
-                        "🤖 **Discord Bot**: Connected\n"
-                        "📊 **Google Sheets**: Ready\n"
-                        "📈 **Market Scanner**: Running\n"
-                        "🏁 **Trade Closure**: IMPLEMENTED\n"
-                        "🔄 **Trade Monitoring**: Active"
-                    ),
-                    inline=False
-                )
-                
-                embed.add_field(
-                    name="🎯 Trade Closure Logic",
-                    value=(
-                        "• **Long Stop Loss**: Price ≤ SL\n"
-                        "• **Long TP1**: Price ≥ TP1 (50% exit)\n"
-                        "• **Long TP2**: Price ≥ TP2 (full exit)\n"
-                        "• **Short Stop Loss**: Price ≥ SL\n"
-                        "• **Short TP1**: Price ≤ TP1 (50% exit)\n"
-                        "• **Short TP2**: Price ≤ TP2 (full exit)"
-                    ),
-                    inline=False
-                )
-                
-                channel = bot.get_channel(cfg.channels.scrolls_order_id)
-                if channel:
-                    await channel.send(embed=embed)
-                    
-                log.info("✅ Bot ready with complete trade closure system")
-                    
-            except Exception as e:
-                log.error(f"Bot ready error: {e}")
-    
-    return bot
+        log.info(f"Logged in as {bot.user}")
 
+        try:
+            await trade_manager.rehydrate()
+            if not enhanced_scanner.is_running():
+                enhanced_scanner.start()
+
+            # Startup notification
+            embed = discord.Embed(
+                title="🏰 Complete Control Tower v11.11 Online",
+                description="*Trade closure system implemented - Full automation ready*",
+                color=discord.Color.gold(),
+                timestamp=datetime.now(timezone.utc)
+            )
+
+            embed.add_field(
+                name="✅ System Status",
+                value=(
+                    "🤖 **Discord Bot**: Connected\n"
+                    "📊 **Google Sheets**: Ready\n"
+                    "📈 **Market Scanner**: Running\n"
+                    "🏁 **Trade Closure**: IMPLEMENTED\n"
+                    "🔄 **Trade Monitoring**: Active"
+                ),
+                inline=False
+            )
+
+            embed.add_field(
+                name="🎯 Trade Closure Logic",
+                value=(
+                    "• **Long Stop Loss**: Price ≤ SL\n"
+                    "• **Long TP1**: Price ≥ TP1 (50% exit)\n"
+                    "• **Long TP2**: Price ≥ TP2 (full exit)\n"
+                    "• **Short Stop Loss**: Price ≥ SL\n"
+                    "• **Short TP1**: Price ≤ TP1 (50% exit)\n"
+                    "• **Short TP2**: Price ≤ TP2 (full exit)"
+                ),
+                inline=False
+            )
+
+            channel = bot.get_channel(cfg.channels.scrolls_order_id)
+            if channel:
+                await channel.send(embed=embed)
+
+            log.info("✅ Bot ready with complete trade closure system")
+
+        except Exception as e:
+            log.error(f"Bot ready error: {e}")
+
+    return bot
 
 def _run_with_backoff(bot, token, log, max_attempts=7, base_delay=10, max_delay=300):
     """Run bot with exponential backoff on Cloudflare/Discord 429 at login."""
