@@ -854,7 +854,7 @@ async def scan_loop():
             await trade_manager.open_trade(t)
             await route_battle_signal(t)
             # 100x gate
-                        if (t.score or 0) >= 5:
+            if (t.score or 0) >= 5:
                 now = datetime.now(timezone.utc)
                 if not _hundred_x_cooldown_at or (now - _hundred_x_cooldown_at) >= timedelta(minutes=cfg.hundred_x_cooldown_min):
                     await route_100x_alert(t); _hundred_x_cooldown_at = now
@@ -865,7 +865,7 @@ async def scan_loop():
             t = build_trade(last, levels, {"type":"L5_Breakout","direction":TradeDirection.SHORT,"level":"L5","level_price":L5})
             await trade_manager.open_trade(t)
             await route_battle_signal(t)
-                        if (t.score or 0) >= 5:
+            if (t.score or 0) >= 5:
                 now = datetime.now(timezone.utc)
                 if not _hundred_x_cooldown_at or (now - _hundred_x_cooldown_at) >= timedelta(minutes=cfg.hundred_x_cooldown_min):
                     await route_100x_alert(t); _hundred_x_cooldown_at = now
@@ -880,7 +880,7 @@ async def scan_loop():
             await route_battle_signal(t)
             if (t.score or 0) >= 5:
                 now = datetime.now(timezone.utc)
-                                if not _hundred_x_cooldown_at or (now - _hundred_x_cooldown_at) >= timedelta(minutes=cfg.hundred_x_cooldown_min):
+                if not _hundred_x_cooldown_at or (now - _hundred_x_cooldown_at) >= timedelta(minutes=cfg.hundred_x_cooldown_min):
                     await route_100x_alert(t); _hundred_x_cooldown_at = now
 
     # ---------- Tertiary: Pullbacks & Reversals ----------
