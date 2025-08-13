@@ -1,5 +1,5 @@
 # ============================================
-# Control Tower - Clean v11.10.2 + Enhanced Alert System
+# Control Tower - Clean v11.10.3 + Enhanced Alert System
 # ============================================
 
 import os
@@ -310,6 +310,19 @@ class AlertManager:
         self.setup_tracking = {}
         self.setup_success_rates = defaultdict(lambda: {"attempts": 0, "conversions": 0})
         
+    def _ensure_timezone_aware(self, dt: Optional[datetime]) -> datetime:
+        """Ensure datetime is timezone-aware (UTC)"""
+        if dt is None:
+            return datetime.min.replace(tzinfo=timezone.utc)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt
+    
+    def _safe_time_diff(self, dt1: datetime, dt2: Optional[datetime]) -> float:
+        """Safely calculate time difference in seconds"""
+        dt2_aware = self._ensure_timezone_aware(dt2)
+        return (dt1 - dt2_aware).total_seconds()
+        
     async def send_market_scorecard(self, df: pd.DataFrame, levels: Dict[str, float]):
         """📜 Send enhanced market scorecard to Scribes Keep"""
         try:
@@ -497,12 +510,11 @@ class AlertManager:
             if score < 3:
                 return
             
-            # Enhanced cooldown based on setup quality
+            # Enhanced cooldown using safe time comparison
             setup_key = f"{level_name}_{direction}_setup"
             cooldown_minutes = 5 if score >= 4 else 10
             
-            last_setup_time = self.enhanced_cooldowns["setup"].get(setup_key, datetime.min.replace(tzinfo=timezone.utc))
-            if (now - last_setup_time).total_seconds() < cooldown_minutes * 60:
+            if self._safe_time_diff(now, self.enhanced_cooldowns["setup"].get(setup_key)) < cooldown_minutes * 60:
                 return
                 
             self.enhanced_cooldowns["setup"][setup_key] = now
@@ -583,8 +595,8 @@ class AlertManager:
                 
             now = datetime.now(timezone.utc)
             
-            # Rate limiting - max once per 30 minutes
-            if (now - self.battleground_cooldown).total_seconds() < 1800:
+            # Rate limiting using safe time comparison
+            if self._safe_time_diff(now, self.battleground_cooldown) < 1800:
                 return
                 
             latest = df.iloc[-1]
@@ -648,8 +660,8 @@ class AlertManager:
                 
             now = datetime.now(timezone.utc)
             
-            # Cooldown check
-            if self.last_100x_time and (now - self.last_100x_time).total_seconds() < 900:
+            # Cooldown check using safe time comparison
+            if self._safe_time_diff(now, self.last_100x_time) < 900:
                 return
                 
             channel = self.bot.get_channel(self.config.channels.eagle_signal_id)
@@ -1555,23 +1567,18 @@ def create_bot():
                 timestamp=datetime.now(timezone.utc)
             )
             
-            # Active cooldowns - fix timezone issue
+            # Active cooldowns - using safe time comparison
             active_cooldowns = 0
             now = datetime.now(timezone.utc)
+            
             for cd_dict in alert_manager.enhanced_cooldowns.values():
                 if isinstance(cd_dict, dict):
                     for cd_time in cd_dict.values():
-                        if isinstance(cd_time, datetime):
-                            # Ensure timezone awareness
-                            if cd_time.tzinfo is None:
-                                cd_time = cd_time.replace(tzinfo=timezone.utc)
-                            if (now - cd_time).total_seconds() < 3600:
-                                active_cooldowns += 1
+                        if alert_manager._safe_time_diff(now, cd_time) < 3600:
+                            active_cooldowns += 1
                 elif isinstance(cd_dict, datetime):
                     # Handle battleground cooldown
-                    if cd_dict.tzinfo is None:
-                        cd_dict = cd_dict.replace(tzinfo=timezone.utc)
-                    if (now - cd_dict).total_seconds() < 3600:
+                    if alert_manager._safe_time_diff(now, cd_dict) < 3600:
                         active_cooldowns += 1
             
             e.add_field(name="📜 Market Scorecard", value="✅ Active", inline=True)
@@ -1638,6 +1645,131 @@ def create_bot():
                 
         except Exception as e:
             await ctx.send(f"Test alert error: {e}")
+
+    @bot.command(name="test_enhanced")
+    async def _test_enhanced(ctx):
+        """Test enhanced metrics calculation"""
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.send("⚠️ Administrator permissions required")
+            return
+            
+        try:
+            # Get market data
+            df = await mdp.fetch_ohlc(100)
+            if df is None:
+                await ctx.send("❌ Failed to fetch market data")
+                return
+                
+            df = add_indicators(df)
+            levels = calc_camarilla(df)
+            
+            if not levels:
+                await ctx.send("❌ Failed to calculate levels")
+                return
+                
+            latest = df.iloc[-1]
+            current_price = float(latest["close"])
+            h5 = levels.get("H5", current_price)
+            
+            # Test enhanced metrics calculation
+            enhanced_data = await calculate_enhanced_metrics(df, latest, h5, "Long")
+            
+            embed = discord.Embed(
+                title="🧪 Enhanced Metrics Test",
+                color=discord.Color.blue(),
+                timestamp=datetime.now(timezone.utc)
+            )
+            
+            embed.add_field(name="💰 Current Price", value=f"${current_price:.2f}", inline=True)
+            embed.add_field(name="🎯 H5 Level", value=f"${h5:.2f}", inline=True)
+            embed.add_field(name="📊 Fields Generated", value=str(len(enhanced_data)), inline=True)
+            
+            # Show key enhanced data
+            key_fields = ["enhanced_score", "rsi_level", "volume_ratio", "market_status", "vwap_position"]
+            field_text = []
+            for field in key_fields:
+                value = enhanced_data.get(field, "N/A")
+                field_text.append(f"**{field}:** {value}")
+            
+            embed.add_field(name="🔍 Sample Enhanced Data", value="\n".join(field_text), inline=False)
+            
+            # Show all available fields
+            all_fields = list(enhanced_data.keys())
+            embed.add_field(name="📋 All Fields", value=", ".join(all_fields), inline=False)
+            
+            await ctx.send(embed=embed)
+            
+        except Exception as e:
+            await ctx.send(f"❌ Test failed: {e}")
+
+    @bot.command(name="debug_sheets")
+    async def _debug_sheets(ctx):
+        """Debug what gets sent to sheets"""
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.send("⚠️ Administrator permissions required")
+            return
+            
+        try:
+            # Create a test trade with enhanced data
+            df = await mdp.fetch_ohlc(100)
+            if df is None:
+                await ctx.send("❌ Failed to fetch market data")
+                return
+                
+            df = add_indicators(df)
+            latest = df.iloc[-1]
+            current_price = float(latest["close"])
+            
+            # Generate enhanced data
+            enhanced_data = await calculate_enhanced_metrics(df, latest, current_price, "Long")
+            
+            # Create test trade
+            test_trade = TradeData(
+                id="TEST123",
+                asset="ETH", 
+                direction=TradeDirection.LONG,
+                entry_price=float(current_price),
+                sl=float(current_price * 0.99),
+                tp1=float(current_price * 1.015),
+                tp2=float(current_price * 1.03),
+                level_name="TEST",
+                level_price=float(current_price),
+                knight="Test Knight",
+                rating="A",
+                score=4,
+                trade_type="Test",
+                enhanced_data=enhanced_data
+            )
+            
+            # Show what would be sent to sheets
+            embed = discord.Embed(
+                title="🔍 Sheets Debug - What Gets Sent",
+                color=discord.Color.orange(),
+                timestamp=datetime.now(timezone.utc)
+            )
+            
+            embed.add_field(name="Trade ID", value=test_trade.id, inline=True)
+            embed.add_field(name="Entry Price", value=f"${test_trade.entry_price:.2f}", inline=True)
+            embed.add_field(name="Level Name", value=test_trade.level_name, inline=True)
+            
+            embed.add_field(name="Enhanced Fields", value=str(len(enhanced_data)), inline=True)
+            embed.add_field(name="Enhanced Score", value=enhanced_data.get("enhanced_score", "N/A"), inline=True)
+            embed.add_field(name="RSI Level", value=enhanced_data.get("rsi_level", "N/A"), inline=True)
+            
+            # Show mapping
+            mapping_text = (
+                f"**Column E (Entry Price):** {test_trade.entry_price}\n"
+                f"**Column U (Level Name):** {test_trade.level_name}\n"
+                f"**Column N (Enhanced Score):** {enhanced_data.get('enhanced_score')}\n"
+                f"**Column O (RSI Level):** {enhanced_data.get('rsi_level')}\n"
+                f"**Column P (Volume Ratio):** {enhanced_data.get('volume_ratio')}"
+            )
+            embed.add_field(name="📊 Column Mapping", value=mapping_text, inline=False)
+            
+            await ctx.send(embed=embed)
+            
+        except Exception as e:
+            await ctx.send(f"❌ Debug failed: {e}")
 
     @bot.command(name="export")
     async def _export(ctx):
@@ -1793,6 +1925,10 @@ def create_bot():
                 # Potential long signal
                 enhanced_data = await calculate_enhanced_metrics(df, latest, h5, "Long")
                 
+                # Log enhanced data calculation
+                log.info(f"H5 breakout detected at ${current_price:.2f}")
+                log.info(f"Enhanced data calculated: {list(enhanced_data.keys())}")
+                
                 # Create shorter, cleaner trade ID
                 timestamp = datetime.now(timezone.utc)
                 trade_id = f"L{timestamp.strftime('%m%d%H%M')}"  # L08131430 format
@@ -1801,18 +1937,20 @@ def create_bot():
                     id=trade_id,
                     asset=cfg.pair.replace("USD", ""),  # ETH instead of ETHUSD
                     direction=TradeDirection.LONG,
-                    entry_price=current_price,
-                    sl=current_price * 0.99,
-                    tp1=current_price * 1.015,
-                    tp2=current_price * 1.03,
-                    level_name="H5",
-                    level_price=h5,
+                    entry_price=float(current_price),  # Ensure this is a number
+                    sl=float(current_price * 0.99),
+                    tp1=float(current_price * 1.015),
+                    tp2=float(current_price * 1.03),
+                    level_name="H5",  # This should go in column U, not E
+                    level_price=float(h5),
                     knight="Sir Camarilla",
                     rating=enhanced_data.get("tier", "A"),
                     score=enhanced_data.get("enhanced_score", 4),
                     trade_type="H5_Breakout",
-                    enhanced_data=enhanced_data
+                    enhanced_data=enhanced_data  # This contains all the N-AI data
                 )
+                
+                log.info(f"Trade created: ID={t.id}, Entry=${t.entry_price}, Level={t.level_name}")
                 
                 await trade_manager.open_trade(t)
                 
@@ -1825,6 +1963,10 @@ def create_bot():
                 # Potential short signal
                 enhanced_data = await calculate_enhanced_metrics(df, latest, l5, "Short")
                 
+                # Log enhanced data calculation
+                log.info(f"L5 breakout detected at ${current_price:.2f}")
+                log.info(f"Enhanced data calculated: {list(enhanced_data.keys())}")
+                
                 # Create shorter, cleaner trade ID
                 timestamp = datetime.now(timezone.utc)
                 trade_id = f"S{timestamp.strftime('%m%d%H%M')}"  # S08131430 format
@@ -1833,18 +1975,20 @@ def create_bot():
                     id=trade_id,
                     asset=cfg.pair.replace("USD", ""),  # ETH instead of ETHUSD
                     direction=TradeDirection.SHORT,
-                    entry_price=current_price,
-                    sl=current_price * 1.01,
-                    tp1=current_price * 0.985,
-                    tp2=current_price * 0.97,
-                    level_name="L5",
-                    level_price=l5,
+                    entry_price=float(current_price),  # Ensure this is a number
+                    sl=float(current_price * 1.01),
+                    tp1=float(current_price * 0.985),
+                    tp2=float(current_price * 0.97),
+                    level_name="L5",  # This should go in column U, not E
+                    level_price=float(l5),
                     knight="Sir Camarilla",
                     rating=enhanced_data.get("tier", "A"),
                     score=enhanced_data.get("enhanced_score", 4),
                     trade_type="L5_Breakout",
-                    enhanced_data=enhanced_data
+                    enhanced_data=enhanced_data  # This contains all the N-AI data
                 )
+                
+                log.info(f"Trade created: ID={t.id}, Entry=${t.entry_price}, Level={t.level_name}")
                 
                 await trade_manager.open_trade(t)
                 
