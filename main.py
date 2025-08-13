@@ -561,6 +561,7 @@ class GoogleSheetsIntegration:
         # SAME trade_id everywhere (no truncation)
         trade_id = t.id
 
+        # Base payload
         payload = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "trade_id": trade_id,
@@ -588,9 +589,34 @@ class GoogleSheetsIntegration:
             "knight": t.knight or "Unknown",
             "trade_type": t.trade_type or "Breakout",
             "confidence": t.rating or "A",
-            "risk_pct": ed.get("risk_pct", 1.0),
-            "rr_ratio": ed.get("rr_ratio", 1.5),
+            "risk_pct": ed.get("risk_pct", 0.0),
         })
+
+        # --- Extra standardized alert fields from enhanced_data ---
+        # Prefer rr_tp1/rr_tp2 over a single rr_ratio
+        extra = {
+            "rr_tp1":            ed.get("rr_tp1"),
+            "rr_tp2":            ed.get("rr_tp2"),
+            "signal_kind":       ed.get("signal_kind"),
+            "signal_reason":     ed.get("reason"),
+            "level_price":       ed.get("level_price", getattr(t, "level_price", None)),
+            "atr14":             ed.get("atr14"),
+            "candle_iso":        ed.get("candle_iso"),
+            "timeframe_min":     ed.get("timeframe_min"),
+            "engine_body_ratio": ed.get("engine_body_ratio"),
+            "engine_vol_mult":   ed.get("engine_vol_mult"),
+            "cooldown_s":        ed.get("cooldown_s"),
+            "be_after_tp1":      ed.get("be_after_tp1"),
+            "be_offset_pct":     ed.get("be_offset_pct"),
+            "trail_mode":        ed.get("trail_mode"),
+            "trail_atr_mult":    ed.get("trail_atr_mult"),
+        }
+        payload.update({k: v for k, v in extra.items() if v is not None})
+
+        # Optional strict ID guard
+        STRICT_IDS = os.getenv("STRICT_IDS", "1") == "1"
+        if STRICT_IDS and trade_id != payload["trade_id"]:
+            raise RuntimeError(f"[Sheets] Trade ID mismatch! t.id={trade_id} payload={payload['trade_id']}")
 
         log.info(f"[Sheets] Entry -> {trade_id} ({t.level_name})")
         result = await self._post(session, payload)
@@ -606,16 +632,32 @@ class GoogleSheetsIntegration:
         time_iso: str,
         pnl_pct: float
     ):
+        exit_price = float(price)
         payload = {
             "action": "update",
+            "update_mode": "EXIT",
             "trade_id": trade_id,                 # SAME id as entry
-            "exit_price": float(price),
+
+            # status & reason (dup keys for robustness)
+            "status": "CLOSED",
             "exit_reason": str(reason),
+            "exitReason": str(reason),
+
+            # exit price (several aliases)
+            "exit_price": exit_price,
+            "exitPrice": exit_price,
+            "exit": exit_price,
+
+            # PnL (aliases)
             "pnl_pct": float(pnl_pct),
+            "pnlPct": float(pnl_pct),
+
+            # time (aliases)
             "exit_time": time_iso,
+            "exitTime": time_iso,
         }
 
-        log.info(f"[Sheets] Exit -> {trade_id} | {reason} | {pnl_pct:+.2f}%")
+        log.info(f"[Sheets] Exit -> {trade_id} | {reason} | {pnl_pct:+.2f}% | price={exit_price}")
         result = await self._post(session, payload)
         if result.get("status") == "success":
             log.info(f"[Sheets] Exit sent: {trade_id}")
@@ -630,11 +672,12 @@ class GoogleSheetsIntegration:
         partial_fraction: float,
         partial_price: float
     ):
-        """Record TP1 partial exits to Sheets (optional)."""
+        """Record TP1 partial; do NOT mutate Status in Sheets."""
         payload = {
             "action": "update",
+            "update_mode": "PARTIAL",
             "trade_id": trade_id,
-            "status": "PARTIAL",
+            "is_partial": True,
             "partial_fraction": float(partial_fraction),
             "partial_price": float(partial_price),
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -745,6 +788,7 @@ class GoogleSheetsIntegration:
 
         log.info(f"[Sheets] Rehydrated {len(out)} trade(s)")
         return out
+
 
 # -------- Trade Manager --------
 class TradeManager:
@@ -1712,6 +1756,10 @@ def create_bot():
                 trade_type=f"{sig.level_name}_{sig.kind.capitalize()}",
                 enhanced_data={**enhanced_data, "reason": sig.reason}
             )
+
+    # ✅ enrich with standardized alert data (so Sheets + Discord see the same fields)
+    alert = build_trade_alert_data(df, t, sig)
+    t.enhanced_data = {**(t.enhanced_data or {}), **alert}
 
             await trade_manager.open_trade(t)
 
