@@ -251,15 +251,15 @@ class TradeData:
 # -------- Sheets --------
 class GoogleSheetsIntegration:
     """
-    Writes trades to Google Sheets using the exact sheet headers.
-    - Entries: fills everything except Exit columns
-    - Exits: fills Exit Price / Exit Reason / PnL % and marks Status=CLOSED
+    Writes trades to Google Sheets using the sheet's exact headers AND snake_case aliases.
+    - Entries: no Exit fields
+    - Exits: sets Exit Price / Exit Reason / PnL % and Status=CLOSED
     """
     def __init__(self, url: Optional[str], token: Optional[str]):
         self.url = url
         self.token = token
 
-        # Exact headers in sheet (Title Case) — used as-is; do not remap these.
+        # Exact headers present in your sheet (Title Case)
         self._reserved_headers = {
             "Timestamp", "Trade ID", "Asset", "Direction",
             "Entry Price", "Stop Loss", "Take Profit 1", "Take Profit 2",
@@ -274,8 +274,8 @@ class GoogleSheetsIntegration:
             "Trend Strength",
         }
 
-        # Optional JSON mapping for non-reserved keys only (SHEETS_FIELD_MAP='{"foo":"Bar"}')
-        import os, json  # local import keeps module deps tidy
+        # Optional mapping (only applies to NON-reserved keys)
+        import os, json
         self.field_map = {}
         try:
             raw = os.getenv("SHEETS_FIELD_MAP", "")
@@ -285,7 +285,6 @@ class GoogleSheetsIntegration:
             self.field_map = {}
 
     def _apply_field_map(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Apply mapping only to keys that are NOT reserved sheet headers."""
         if not self.field_map:
             return payload
         out: Dict[str, Any] = {}
@@ -311,11 +310,12 @@ class GoogleSheetsIntegration:
     async def send_trade_entry(self, session, t: TradeData):
         ed = t.enhanced_data or {}
 
-        # Core metrics
+        # Basics & derived
         try:
             rsi_level = float(ed.get("rsi_level", 50) or 50)
         except Exception:
             rsi_level = 50.0
+
         if rsi_level >= 75:
             market_status = "OVERBOUGHT"
         elif rsi_level <= 25:
@@ -323,7 +323,8 @@ class GoogleSheetsIntegration:
         else:
             market_status = "NORMAL"
 
-        market_bias    = ed.get("trend_bias") or ed.get("market_bias") or "-"
+        trend_bias     = ed.get("trend_bias")
+        market_bias    = trend_bias or ed.get("market_bias") or "-"
         volume_ratio   = ed.get("volume_ratio")
         vwap_position  = ed.get("vwap_position", "-")
         macd_status    = ed.get("macd_status", "-")
@@ -343,7 +344,7 @@ class GoogleSheetsIntegration:
         except Exception:
             rr_ratio = None
 
-        # Optional extras
+        # Extras
         setup_age_minutes     = ed.get("setup_age_minutes", "")
         breakout_structure    = ed.get("breakout_structure", "")
         confluence_count      = ed.get("confluence_count", "")
@@ -354,7 +355,7 @@ class GoogleSheetsIntegration:
         volatility_state      = ed.get("volatility_state", "")
         trend_strength        = ed.get("trend_strength", f"Moderate {market_bias}" if market_bias not in ("-", "") else "")
 
-        # Build payload using EXACT sheet headers (entries do NOT include Exit fields)
+        # Title Case headers (your exact sheet)
         row = {
             "Timestamp": datetime.now(timezone.utc).isoformat(),
             "Trade ID": t.id,
@@ -391,42 +392,74 @@ class GoogleSheetsIntegration:
             "Trend Strength": trend_strength,
         }
 
-        # Keep reserved header keys intact; allow optional mapping for any non-reserved (none by default).
-        payload = self._apply_field_map(row)
+        # Snake_case aliases for the same columns (to satisfy scripts expecting snake_case)
+        aliases = {
+            "trade_id": t.id,
+            "asset": t.asset,
+            "direction": t.direction.name.title(),
+            "entry_price": t.entry_price,
+            "stop_loss": t.sl,
+            "target1": t.tp1,
+            "target2": t.tp2,
+            "status": "OPEN",
+
+            "score": t.score or 0,
+            "enhanced_score": int(ed.get("enhanced_score", t.score or 0)),
+            "rsi_level": rsi_level,
+            "volume_ratio": volume_ratio if volume_ratio is not None else "",
+            "market_status": market_status,
+            "vwap_position": vwap_position,
+            "macd_status": macd_status,
+            "market_bias": market_bias,
+            "level_name": t.level_name or "",
+            "knight": t.knight or "",
+            "trade_type": t.trade_type or "",
+            "confidence": t.rating or "",
+            "risk_pct": round(risk_pct, 2) if risk_pct is not None else "",
+            "rr_ratio": round(rr_ratio, 2) if rr_ratio is not None else "",
+            "setup_age_minutes": setup_age_minutes,
+            "breakout_structure": breakout_structure,
+            "confluence_count": confluence_count,
+            "candle_body_strength": candle_body_strength,
+            "market_session": market_session,
+            "distance_from_level_pct": distance_from_level,
+            "recent_news_events": recent_news_events,
+            "volatility_state": volatility_state,
+            "trend_strength": trend_strength,
+        }
+
+        payload = {**row, **aliases}
+        payload = self._apply_field_map(payload)
         return await self._post(session, payload)
 
     # ------------------ EXIT ------------------
     async def send_trade_exit(self, session, trade_id: str, reason: str, price: float, time_iso: str, pnl_pct: float):
-        """
-        Update/close a trade. We include both the unique ID and the Exit fields, plus headers that
-        your script may want to re-write (Status).
-        """
+        # Title Case headers for exits
         row = {
-            # Minimal identifiers for your script to locate the row
             "Trade ID": trade_id,
             "Status": "CLOSED",
-
-            # Exit fields (exact headers)
             "Exit Price": price,
             "Exit Reason": reason,
             "PnL %": round(pnl_pct, 2),
-
-            # Optional: timestamp the close in the 'Timestamp' column (helps audit)
             "Timestamp": time_iso,
         }
+        # Snake_case aliases
+        aliases = {
+            "trade_id": trade_id,
+            "status": "CLOSED",
+            "exit_price": price,
+            "exit_reason": reason,
+            "pnl_pct": round(pnl_pct, 2),
+            "closed_at": time_iso,
+            "action": "update",  # optional signal for your webhook
+        }
 
-        # If your Apps Script expects an action flag, keep it (not a reserved header)
-        row["action"] = "update"
-
-        payload = self._apply_field_map(row)
+        payload = {**row, **aliases}
+        payload = self._apply_field_map(payload)
         return await self._post(session, payload)
 
     # ------------------ REHYDRATE ------------------
     async def rehydrate_open_trades(self, session) -> List[TradeData]:
-        """
-        Fetch open trades via your webhook (action=open). This remains tolerant to several
-        key variants so it works regardless of how your endpoint labels fields.
-        """
         if not self.url or not self.token:
             return []
         params = {"action": "open", "key": self.token}
@@ -1048,92 +1081,7 @@ def status_embed() -> discord.Embed:
 def create_bot():
     bot = commands.Bot(command_prefix="!", intents=INTENTS, help_command=None)
 
-    # ---- helpers (local to create_bot) ----
-    def _build_test_trade(
-        direction: str = "LONG",
-        entry: float = 2700.0,
-        sl: float = 2650.0,
-        tp1: float = 2740.0,
-        tp2: float = 2790.0,
-        score: int = 5,
-        tier: str = "S",
-        trade_type: str | None = None,
-        level_name: str | None = None,
-        level_price: float | None = None,
-    ) -> TradeData:
-        direction_enum = TradeDirection.LONG if str(direction).upper().startswith("L") else TradeDirection.SHORT
-        trade_type = trade_type or ("H5_Breakout" if direction_enum == TradeDirection.LONG else "L5_Breakout")
-        level_name = level_name or ("H5" if direction_enum == TradeDirection.LONG else "L5")
-        level_price = float(level_price) if level_price is not None else float(entry)
-
-        return TradeData(
-            id=datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"),
-            asset=cfg.pair,
-            direction=direction_enum,
-            entry_price=float(entry),
-            sl=float(sl),
-            tp1=float(tp1),
-            tp2=float(tp2),
-            trade_type=trade_type,
-            level_name=level_name,
-            level_price=level_price,
-            rating=tier,
-            score=int(score),
-            knight=knight_for(trade_type),
-            enhanced_data={
-                "enhanced_score": int(score),
-                "volume_ratio": 1.5,
-                "rsi_level": 62.0 if direction_enum == TradeDirection.LONG else 38.0,
-                "trend_bias": "Bullish" if direction_enum == TradeDirection.LONG else "Bearish",
-            },
-        )
-
-    async def _send_exit_inline(t: TradeData, exit_price: float, reason: str):
-        # Compute PnL %
-        try:
-            if t.direction == TradeDirection.LONG:
-                pnl_pct = (exit_price / t.entry_price - 1.0) * 100.0
-            else:
-                pnl_pct = (1.0 - exit_price / t.entry_price) * 100.0
-        except Exception:
-            pnl_pct = 0.0
-
-        # Close & persist
-        t.status = TradeStatus.CLOSED
-        t.closed_at = datetime.now(timezone.utc)
-        db.save_trade(t)
-
-        # Sheets update (if method exists)
-        try:
-            await trade_manager.start()
-            time_iso = t.closed_at.isoformat()
-            if hasattr(sheets, "send_trade_exit"):
-                await sheets.send_trade_exit(trade_manager.session, t.id, reason, exit_price, time_iso, round(pnl_pct, 2))
-        except Exception as e:
-            log.warning(f"Sheets exit update failed: {e}")
-
-        # Send exit alert (use route_exit_alert if present, else inline)
-        if "route_exit_alert" in globals():
-            await route_exit_alert(t, exit_price, reason, round(pnl_pct, 2))
-        else:
-            color = discord.Color.light_grey() if "TP2" in reason else discord.Color.dark_red()
-            title_icon = "🏁" if "TP2" in reason else "⛔"
-            e = discord.Embed(
-                title=f"{title_icon} Exit — {t.asset} {t.direction.name} ({reason})",
-                color=color,
-                timestamp=datetime.now(timezone.utc),
-            )
-            e.add_field(name="Entry", value=f"{t.entry_price:.2f}", inline=True)
-            e.add_field(name="Exit", value=f"{exit_price:.2f}", inline=True)
-            e.add_field(name="PnL %", value=f"{pnl_pct:.2f}", inline=True)
-            e.add_field(name="Level", value=f"{t.level_name or '-'}", inline=True)
-            e.set_footer(text=f"Trade ID: {t.id}")
-            await send_to_channel(cfg.battle_signals_id, e)
-
-        # Remove from active list
-        trade_manager.active.pop(t.id, None)
-
-    # ---- existing commands ----
+    # ---- built-in commands ----
     @bot.command(name="status")
     async def _status(ctx):
         await ctx.send(embed=status_embed())
@@ -1166,78 +1114,78 @@ def create_bot():
         e.add_field(name="After", value=str(after), inline=True)
         await ctx.send(embed=e)
 
-    # ---- new commands ----
-    @bot.command(name="test_entry")
-async def _test_entry(
-    ctx,
-    direction: str = "LONG",
-    entry: float | str = "auto",
-    sl: float | None = None,
-    tp1: float | None = None,
-    tp2: float | None = None,
-    score: int = 5,
-    tier: str = "S",
-    send: str = "no",          # <-- default: preview only (no prod alerts / no Sheets)
-    sheets: str = "no",        # <-- write to Sheets without sending (optional)
-    show_payload: str = "no",  # <-- print JSON payload preview
-):
-    """Preview a test trade. Use send=yes to dispatch to production channels."""
-    # Build from live price/levels by default
-    direction_enum = TradeDirection.LONG if str(direction).upper().startswith("L") else TradeDirection.SHORT
-
+    # ---- test helpers (kept inside create_bot so they’re scoped to this bot) ----
     async def _live_price_and_levels():
         await mdp.start()
         df = await mdp.fetch_ohlc(120)
         df = compute_indicators(df)
         return float(df.iloc[-1]["close"]), (calc_camarilla(df) or {})
 
-    def _mk_trade_from_live(d_enum: TradeDirection, price: float, levels: Dict[str, float]) -> TradeData:
-        if d_enum == TradeDirection.LONG:
+    def _mk_trade_from_live(direction_enum: TradeDirection, price: float, levels: Dict[str, float],
+                            score: int = 5, tier: str = "S") -> TradeData:
+        if direction_enum == TradeDirection.LONG:
             level_name = "H5" if "H5" in levels else "H4"
             trade_type = f"{level_name}_Breakout"
-            t_sl  = round(price * 0.985, 2)
-            t_tp1 = round(price * 1.015, 2)
-            t_tp2 = round(price * 1.03,  2)
+            sl  = round(price * 0.985, 2)
+            tp1 = round(price * 1.015, 2)
+            tp2 = round(price * 1.030, 2)
         else:
             level_name = "L5" if "L5" in levels else "L4"
             trade_type = f"{level_name}_Breakout"
-            t_sl  = round(price * 1.015, 2)
-            t_tp1 = round(price * 0.985, 2)
-            t_tp2 = round(price * 0.97,  2)
+            sl  = round(price * 1.015, 2)
+            tp1 = round(price * 0.985, 2)
+            tp2 = round(price * 0.970, 2)
+
         return TradeData(
             id=datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"),
             asset=cfg.pair,
-            direction=d_enum,
+            direction=direction_enum,
             entry_price=price,
-            sl=t_sl if sl is None else float(sl),
-            tp1=t_tp1 if tp1 is None else float(tp1),
-            tp2=t_tp2 if tp2 is None else float(tp2),
+            sl=sl, tp1=tp1, tp2=tp2,
             trade_type=trade_type,
             level_name=level_name,
             level_price=levels.get(level_name, price),
             rating=tier,
-            score=int(score),
+            score=score,
             knight=knight_for(trade_type),
-            enhanced_data={"enhanced_score": int(score), "volume_ratio": 1.5,
-                           "rsi_level": 62.0 if d_enum==TradeDirection.LONG else 38.0,
-                           "trend_bias": "Bullish" if d_enum==TradeDirection.LONG else "Bearish"},
+            enhanced_data={"enhanced_score": score, "volume_ratio": 1.5,
+                           "rsi_level": 62.0 if direction_enum==TradeDirection.LONG else 38.0,
+                           "trend_bias": "Bullish" if direction_enum==TradeDirection.LONG else "Bearish"},
         )
 
-    if isinstance(entry, str) and entry.lower() == "auto":
-        px, lvls = await _live_price_and_levels()
-        t = _mk_trade_from_live(direction_enum, px, lvls)
-    else:
-        px, lvls = await _live_price_and_levels()
-        t = _mk_trade_from_live(direction_enum, float(entry), lvls)
+    # ---- test commands (preview-only by default; no prod sends unless send=yes) ----
+    @bot.command(name="test_entry")
+    async def _test_entry(
+        ctx,
+        direction: str = "LONG",
+        entry: float | str = "auto",
+        sl: float | None = None,
+        tp1: float | None = None,
+        tp2: float | None = None,
+        score: int = 5,
+        tier: str = "S",
+        send: str = "no",
+        sheets: str = "no",
+        show_payload: str = "no",
+    ):
+        direction_enum = TradeDirection.LONG if str(direction).upper().startswith("L") else TradeDirection.SHORT
 
-    # Build the same embed the real router uses, but don't send to prod by default
-    try:
-        e = routed_battle_embed(t)  # if you have a helper that returns the embed only
-    except NameError:
-        # Minimal fallback embed
+        if isinstance(entry, str) and entry.lower() == "auto":
+            px, lvls = await _live_price_and_levels()
+        else:
+            px = float(entry)
+            lvls = (await _live_price_and_levels())[1]
+
+        t = _mk_trade_from_live(direction_enum, px, lvls, score=score, tier=tier)
+        if sl is not None:  t.sl  = float(sl)
+        if tp1 is not None: t.tp1 = float(tp1)
+        if tp2 is not None: t.tp2 = float(tp2)
+
+        # Preview embed in invoking channel
         e = discord.Embed(
             title=f"⚔️ {t.trade_type} — {t.asset} {t.direction.name}",
-            color=discord.Color.blurple(), timestamp=datetime.now(timezone.utc)
+            color=discord.Color.blurple(),
+            timestamp=datetime.now(timezone.utc),
         )
         e.add_field(name="Entry", value=f"{t.entry_price:.2f}", inline=True)
         e.add_field(name="Stop", value=f"{t.sl:.2f}", inline=True)
@@ -1249,14 +1197,11 @@ async def _test_entry(
         e.add_field(name="Confluence",
                     value=f"RSI {ed.get('rsi_level','-')}, Vol× {ed.get('volume_ratio','-')}, Bias {ed.get('trend_bias','-')}",
                     inline=False)
+        await ctx.send(embed=e)
 
-    # Always preview in invoking channel
-    await ctx.send(embed=e)
-
-    # Optional: print exactly what would be sent to Sheets
-    if show_payload.lower() in ("yes","y","true","1"):
-        try:
-            mapped = sheets._apply_field_map({   # type: ignore[attr-defined]
+        # Optional: show exact Sheets payload
+        if show_payload.lower() in ("yes","y","true","1"):
+            payload = {
                 "Timestamp": datetime.now(timezone.utc).isoformat(),
                 "Trade ID": t.id, "Asset": t.asset, "Direction": t.direction.name.title(),
                 "Entry Price": t.entry_price, "Stop Loss": t.sl,
@@ -1281,72 +1226,58 @@ async def _test_entry(
                 "Recent News": t.enhanced_data.get("recent_news_events",""),
                 "Volatility State": t.enhanced_data.get("volatility_state",""),
                 "Trend Strength": t.enhanced_data.get("trend_strength",""),
-            })
-        except Exception:
-            mapped = {}
-        import json as _json
-        j = _json.dumps(mapped or {}, indent=2, default=str)
-        await ctx.send(f"```json\n{(j[:1900]+'...') if len(j)>1900 else j}\n```")
+            }
+            import json as _json
+            j = _json.dumps(payload, indent=2, default=str)
+            await ctx.send(f"```json\n{(j[:1900]+'...') if len(j)>1900 else j}\n```")
 
-    # Only send to production if explicitly requested
-    if send.lower() in ("yes","y","true","1","send"):
-        await trade_manager.open_trade(t)   # writes to DB & Sheets
-        await route_battle_signal(t)        # prod Battle Signals
-        if (t.score or 0) >= 5 and not should_throttle("__100x__", cfg.hundred_x_cooldown_min):
-            await route_100x_alert(t)       # prod 100x
+        # Only send to prod if explicitly requested
+        if send.lower() in ("yes","y","true","1","send"):
+            await trade_manager.open_trade(t)     # DB + Sheets
+            await route_battle_signal(t)          # prod Battle Signals
+            if (t.score or 0) >= 5 and not should_throttle("__100x__", cfg.hundred_x_cooldown_min):
+                await route_100x_alert(t)
+            await ctx.send(f"✅ Sent to production. Trade ID: `{t.id}`")
 
-        await ctx.send(f"✅ Sent to production. Trade ID: `{t.id}`")
+        # Optionally write to Sheets without sending alerts
+        elif sheets.lower() in ("yes","y","true","1"):
+            await trade_manager.start()
+            if hasattr(sheets, "send_trade_entry"):
+                await sheets.send_trade_entry(trade_manager.session, t)
+            await ctx.send("📝 Wrote entry to Sheets (no alerts).")
 
-@bot.command(name="test_exit")
-async def _test_exit(ctx, reason: str = "TP2", send: str = "no"):
-    """Preview a test exit; use send=yes to dispatch to production + Sheets."""
-    # pick latest open trade, or make one for preview
-    t = None
-    if trade_manager.active:
-        opens = [x for x in trade_manager.active.values() if x.status == TradeStatus.OPEN]
-        t = sorted(opens, key=lambda x: x.opened_at)[-1] if opens else None
-    if t is None:
-        # create a preview-only trade
-        price, lvls = (await _live_price_and_levels())
-        t = _mk_trade_from_live(TradeDirection.LONG, price, lvls)
+    @bot.command(name="test_exit")
+    async def _test_exit(ctx, reason: str = "TP2", send: str = "no"):
+        # pick latest open trade or create a preview
+        t = None
+        if trade_manager.active:
+            opens = [x for x in trade_manager.active.values() if x.status == TradeStatus.OPEN]
+            t = sorted(opens, key=lambda x: x.opened_at)[-1] if opens else None
+        if t is None:
+            px, lvls = await _live_price_and_levels()
+            t = _mk_trade_from_live(TradeDirection.LONG, px, lvls)
 
-    label = "TP2 Hit" if str(reason).upper().startswith("TP") else "Stop Loss Hit"
-    price = t.tp2 if "TP" in label else t.sl
+        label = "TP2 Hit" if str(reason).upper().startswith("TP") else "Stop Loss Hit"
+        price = t.tp2 if "TP" in label else t.sl
 
-    # Preview exit embed in invoking channel
-    color = discord.Color.light_grey() if "TP2" in label else discord.Color.dark_red()
-    e = discord.Embed(title=f"{'🏁' if 'TP2' in label else '⛔'} Exit — {t.asset} {t.direction.name} ({label})",
-                      color=color, timestamp=datetime.now(timezone.utc))
-    e.add_field(name="Entry", value=f"{t.entry_price:.2f}", inline=True)
-    e.add_field(name="Exit", value=f"{price:.2f}", inline=True)
-    e.add_field(name="Level", value=f"{t.level_name or '-'}", inline=True)
-    e.set_footer(text=f"Trade ID: {t.id}")
-    await ctx.send(embed=e)
+        color = discord.Color.light_grey() if "TP2" in label else discord.Color.dark_red()
+        e = discord.Embed(title=f"{'🏁' if 'TP2' in label else '⛔'} Exit — {t.asset} {t.direction.name} ({label})",
+                          color=color, timestamp=datetime.now(timezone.utc))
+        e.add_field(name="Entry", value=f"{t.entry_price:.2f}", inline=True)
+        e.add_field(name="Exit", value=f"{price:.2f}", inline=True)
+        e.add_field(name="Level", value=f"{t.level_name or '-'}", inline=True)
+        e.set_footer(text=f"Trade ID: {t.id}")
+        await ctx.send(embed=e)
 
-    if send.lower() in ("yes","y","true","1","send"):
-        # Use your real close helper to update prod + Sheets
-        if "_close_trade_and_notify" in globals():
-            await _close_trade_and_notify(t, price, label)
-        else:
-            # minimal inline close if helper not present
-            t.status = TradeStatus.CLOSED
-            t.closed_at = datetime.now(timezone.utc)
-            await route_exit_alert(t, price, label, 0.0)  # PnL% computed inside helper in your code, adjust if needed
-        await ctx.send(f"✅ Exit sent to production for `{t.id}` ({label}).")
-
-
-    @bot.command(name="scorecard_now")
-    async def _scorecard_now(ctx):
-        """Force a scorecard to post immediately."""
-        await mdp.start()
-        df = await mdp.fetch_ohlc(120)
-        df = compute_indicators(df)
-        levels = calc_camarilla(df)
-        if levels:
-            await route_market_scorecard(df, levels)
-            await ctx.send("📜 Scorecard sent.")
-        else:
-            await ctx.send("No levels computed; scorecard skipped.")
+        if send.lower() in ("yes","y","true","1","send"):
+            if "_close_trade_and_notify" in globals():
+                await _close_trade_and_notify(t, price, label)
+            else:
+                # inline fallback: close & notify
+                t.status = TradeStatus.CLOSED
+                t.closed_at = datetime.now(timezone.utc)
+                await route_exit_alert(t, price, label, 0.0)
+            await ctx.send(f"✅ Exit sent to production for `{t.id}` ({label}).")
 
     @bot.event
     async def on_ready():
