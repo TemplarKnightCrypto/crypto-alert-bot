@@ -1,5 +1,5 @@
 # ============================================
-# Control Tower - Clean v11.10.7 + Enhanced Alert System
+# Control Tower - Clean v11.10.8 + Enhanced Alert System
 # ============================================
 
 import os
