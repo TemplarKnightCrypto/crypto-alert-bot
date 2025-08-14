@@ -1174,7 +1174,7 @@ class IntegratedTradeTracker:
         headers = {"Content-Type": "application/json"}
         # If your Apps Script secures with x-app-secret, send the token here:
         if self.sheets_token:
-            headers["x-app-secret"] = self.sheets_token
+            headers["Authorization"] = f"Bearer {self.sheets_token}"
         # If your script expects Bearer auth instead, swap to:
         # if self.sheets_token: headers["Authorization"] = f"Bearer {self.sheets_token}"
 
