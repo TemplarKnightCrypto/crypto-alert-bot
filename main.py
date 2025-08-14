@@ -1,6 +1,5 @@
-from __future__ import annotations
 # ============================================
-# Production_ControlTower_v12.2.1
+# Production_ControlTower_v12.2.2
 # ============================================
 
 import os
@@ -487,7 +486,7 @@ class TradeSignalEngine:
     def _pullback_ok(self, recent: pd.DataFrame, level: float, side: str) -> bool:
         if recent is None or len(recent) < 5:
             return False
-        tol = getattr(self.cfg, "wick_tolerance", 0.0015)  # 0.15% default wick allowance
+        tol = getattr(self.cfg, "wick_tolerance", 0.0015)  # 0.15% wiggle for wicks
         pulls = 0
         for _, r in recent.iloc[:-1].iterrows():
             lo = float(r["low"]); hi = float(r["high"])
@@ -516,74 +515,30 @@ class TradeSignalEngine:
         if signal_type == "breakout":
             base += 1
         if signal_type == "continuation":
-            base += 1  # nudge continuations so good ones pass min_conf
+            base += 1
         return int(min(base, 6))
 
-    def _create_long(
-        self,
-        entry: float,
-        level: float,
-        level_name: str = "H5",
-        atr: Optional[float] = None,
-        signal_type: str = "breakout",
-        reason: str = ""
-    ) -> Signal:
-        # SL: tighter of 1% or half ATR below level (if ATR available)
+    def _create_long(self, entry: float, level: float, level_name: str, atr: Optional[float], signal_type: str, reason: str) -> Signal:
         sl = max(entry * 0.99, level - (0.5 * (atr or 0.0))) if atr else entry * 0.99
         risk = entry - sl
         tp1 = entry + (risk * 1.5)
         tp2 = entry + (risk * 3.0)
         conf = self._confidence(entry, sl, tp1, signal_type)
         rr = (tp1 - entry) / (entry - sl) if entry != sl else 0.0
-        return Signal(
-            pair="ETHUSD",
-            side="long",
-            level_name=level_name,
-            level_price=level,
-            entry=entry,
-            sl=sl,
-            tp1=tp1,
-            tp2=tp2,
-            timestamp=int(time.time()),
-            signal_type=signal_type,
-            reason=reason,
-            confidence=conf,
-            risk_reward_ratio=rr,
-            atr=atr,
-        )
+        return Signal(pair="ETHUSD", side="long", level_name=level_name, level_price=level, entry=entry,
+                      sl=sl, tp1=tp1, tp2=tp2, timestamp=int(time.time()), signal_type=signal_type,
+                      reason=reason, confidence=conf, risk_reward_ratio=rr, atr=atr)
 
-    def _create_short(
-        self,
-        entry: float,
-        level: float,
-        level_name: str = "L5",
-        atr: Optional[float] = None,
-        signal_type: str = "breakout",
-        reason: str = ""
-    ) -> Signal:
-        # SL: tighter of 1% or half ATR above level (if ATR available)
+    def _create_short(self, entry: float, level: float, level_name: str, atr: Optional[float], signal_type: str, reason: str) -> Signal:
         sl = min(entry * 1.01, level + (0.5 * (atr or 0.0))) if atr else entry * 1.01
         risk = sl - entry
         tp1 = entry - (risk * 1.5)
         tp2 = entry - (risk * 3.0)
         conf = self._confidence(entry, sl, tp1, signal_type)
         rr = (entry - tp1) / (sl - entry) if sl != entry else 0.0
-        return Signal(
-            pair="ETHUSD",
-            side="short",
-            level_name=level_name,
-            level_price=level,
-            entry=entry,
-            sl=sl,
-            tp1=tp1,
-            tp2=tp2,
-            timestamp=int(time.time()),
-            signal_type=signal_type,
-            reason=reason,
-            confidence=conf,
-            risk_reward_ratio=rr,
-            atr=atr,
-        )
+        return Signal(pair="ETHUSD", side="short", level_name=level_name, level_price=level, entry=entry,
+                      sl=sl, tp1=tp1, tp2=tp2, timestamp=int(time.time()), signal_type=signal_type,
+                      reason=reason, confidence=conf, risk_reward_ratio=rr, atr=atr)
 
     def _quality_ok(self, sig: Signal) -> bool:
         if sig.confidence < self.cfg.signal_confidence_min:
@@ -592,20 +547,18 @@ class TradeSignalEngine:
             return False
         if not self.rate_limiter.acquire():
             return False
-        key = f"{sig.pair}_{sig.side}"
         now = time.time()
+        key = f"{sig.pair}_{sig.side}"
         if now < self.cooldown_until[key]:
             return False
         if self.cfg.use_global_cooldown and now < self.global_cooldown_until[sig.pair]:
             return False
         sign = self._signature(sig)
-        # purge expired signatures
         for k, ts in list(self.recent_signatures.items()):
             if now > ts:
                 self.recent_signatures.pop(k, None)
         if sign in self.recent_signatures:
             return False
-        # accept -> set cooldowns + dedupe
         self.cooldown_until[key] = now + self.cfg.cooldown_seconds
         if self.cfg.use_global_cooldown:
             self.global_cooldown_until[sig.pair] = now + self.cfg.global_cooldown_seconds
@@ -616,46 +569,37 @@ class TradeSignalEngine:
         try:
             if df is None or len(df) < 25 or not levels:
                 return None
-            row = df.iloc[-1]
-            prev = df.iloc[-2]
-            close = float(row["close"])
-            prev_close = float(prev["close"])
-            atr = self._atr(df)
-            vol_ratio = self._volume_ratio(df)
+            row = df.iloc[-1]; prev = df.iloc[-2]
+            close = float(row["close"]); prev_close = float(prev["close"])
+            atr = self._atr(df); vol_ratio = self._volume_ratio(df)
 
-            # Scan common Camarilla levels both ways (high->low, pivot, low->high)
-            ordered_levels = [lvl for lvl in ["H5", "H4", "H3", "PIVOT", "L3", "L4", "L5"] if lvl in levels]
+            # Consider all standard levels bi-directionally
+            ordered_levels = [lvl for lvl in ["H5","H4","H3","PIVOT","L3","L4","L5"] if lvl in levels]
 
-            # Breakouts (both directions)
+            # Breakouts both ways
             for lvl in ordered_levels:
                 lv = float(levels[lvl])
-                # Upward cross -> long breakout
                 if prev_close <= lv < close and self._confirm_breakout(row, lv, "long", vol_ratio):
                     sig = self._create_long(close, lv, lvl, atr, "breakout", f"{lvl} upward breakout")
                     sig.pair = pair
-                    if self._quality_ok(sig):
-                        return sig
-                # Downward cross -> short breakout
+                    if self._quality_ok(sig): return sig
                 if prev_close >= lv > close and self._confirm_breakout(row, lv, "short", vol_ratio):
                     sig = self._create_short(close, lv, lvl, atr, "breakout", f"{lvl} downward breakout")
                     sig.pair = pair
-                    if self._quality_ok(sig):
-                        return sig
+                    if self._quality_ok(sig): return sig
 
-            # Continuations (hold beyond level with at least one pullback candle)
+            # Continuations both ways (hold above/below with pullback)
             recent = df.tail(6)
             for lvl in ordered_levels:
                 lv = float(levels[lvl])
                 if close > lv and self._pullback_ok(recent, lv, "long"):
                     sig = self._create_long(close, lv, lvl, atr, "continuation", f"{lvl} continuation after pullback")
                     sig.pair = pair
-                    if self._quality_ok(sig):
-                        return sig
+                    if self._quality_ok(sig): return sig
                 if close < lv and self._pullback_ok(recent, lv, "short"):
                     sig = self._create_short(close, lv, lvl, atr, "continuation", f"{lvl} continuation after pullback")
                     sig.pair = pair
-                    if self._quality_ok(sig):
-                        return sig
+                    if self._quality_ok(sig): return sig
 
             return None
         except Exception as e:
@@ -844,158 +788,170 @@ class DatabaseManager:
             log.error("log_event error: %s", e)
 
 # ===== Sheets Integration (Hardened) =====
-
-
-
 class GoogleSheetsIntegration:
-    """Secure Google Sheets webhook integration via Apps Script.
-    Enabled only when both webhook URL and SHEETS_TOKEN are set.
-    Supports CREATE/UPDATE writes and rehydrate (?action=open).
-    """
-    def __init__(self, url: Optional[str], token: Optional[str]):
-        self.url = (url or "").strip()
+    def __init__(self, webhook_url: Optional[str], token: Optional[str]):
+        self.url = (webhook_url or "").strip()
         self.token = (token or "").strip()
+        self.session: Optional[aiohttp.ClientSession] = None
         self.enabled = bool(self.url and self.token)
+        self._last_payload: Dict[str, Any] = {}
+        if self.url and not self.token:
+            log.warning("Sheets webhook URL provided but token missing; disabling Sheets integration.")
+            self.enabled = False
+
+        # optional field aliasing (env JSON): {"entry_price":"Entry","tp1":"TP1"}
         self.field_map: Dict[str, str] = {}
         try:
-            raw = os.getenv("SHEETS_FIELD_MAP", "").strip()
-            if raw:
-                import json as _json
-                self.field_map = _json.loads(raw)
+            raw = os.getenv("SHEETS_FIELD_MAP", "")
+            if raw.strip():
+                self.field_map = json.loads(raw)
         except Exception:
             self.field_map = {}
-        self.session: Optional[aiohttp.ClientSession] = None
 
     async def start(self):
-        """Create a persistent aiohttp session (bot calls this in on_ready)."""
-        if not self.enabled:
-            return
-        if self.session is None:
+        if not self.session and self.enabled:
             timeout = aiohttp.ClientTimeout(total=30)
             self.session = aiohttp.ClientSession(timeout=timeout)
 
     async def stop(self):
-        """Close the persistent session if opened."""
-        if self.session is not None:
+        if self.session:
             await self.session.close()
             self.session = None
 
-    def _headers(self) -> dict:
-        return {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.token}",
-        }
-
-    def _apply_field_map(self, payload: dict) -> dict:
+    def _apply_field_map(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         if not self.field_map:
             return payload
-        out = {}
+        mapped = {}
         for k, v in payload.items():
-            out[self.field_map.get(k, k)] = v
-        return out
+            mapped[self.field_map.get(k, k)] = v
+        return mapped
 
-    async def send_trade(self, payload: dict, action: str = "CREATE", session: Optional[aiohttp.ClientSession] = None) -> bool:
+    @staticmethod
+    def _sanitize(obj: Any) -> Any:
+        try:
+            if obj is None: return None
+            if isinstance(obj, (str, int, float, bool)): return obj
+            if isinstance(obj, (np.integer,)): return int(obj)
+            if isinstance(obj, (np.floating,)): return float(obj)
+            if isinstance(obj, (np.bool_,)): return bool(obj)
+            if isinstance(obj, (pd.Timestamp,)):
+                return obj.to_pydatetime().isoformat()
+            if isinstance(obj, (datetime,)):
+                return obj.astimezone(timezone.utc).isoformat()
+            if isinstance(obj, (list, tuple)):
+                return [GoogleSheetsIntegration._sanitize(x) for x in obj]
+            if isinstance(obj, dict):
+                return {str(k): GoogleSheetsIntegration._sanitize(v) for k, v in obj.items()}
+            return str(obj)
+        except Exception:
+            return str(obj)
+
+    def last_payload(self) -> Dict[str, Any]:
+        return self._last_payload
+
+    async def send_trade(self, trade_payload: Dict[str, Any], action: str) -> bool:
         if not self.enabled:
+            return True
+        try:
+            await self.start()
+            base = {"action": action, "timestamp": datetime.now(timezone.utc).isoformat()}
+            payload = {**base, **trade_payload}
+            payload = self._apply_field_map(payload)
+            payload = GoogleSheetsIntegration._sanitize(payload)
+            self._last_payload = payload
+
+            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.token}"}
+
+            # Retries
+            for attempt in range(3):
+                try:
+                    async with self.session.post(self.url, json=payload, headers=headers) as resp:
+                        if resp.status == 200:
+                            return True
+                        else:
+                            log.warning("Sheets POST HTTP %s", resp.status)
+                except Exception as e:
+                    log.warning("Sheets POST attempt %s failed: %s", attempt+1, e)
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
+            log.error("Sheets POST failed after 3 attempts")
             return False
-        body = dict(payload)
-        body["action"] = action.upper()
-        body = self._apply_field_map(body)
+        except Exception as e:
+            log.error("Sheets send_trade error: %s", e)
+            return False
 
-        sess = session or self.session
-        close_me = False
-        if sess is None:
-            timeout = aiohttp.ClientTimeout(total=30)
-            sess = aiohttp.ClientSession(timeout=timeout)
-            close_me = True
+    
+async def fetch_open_trades(self) -> List[Dict[str, Any]]:
+    """GET ?action=open and return normalized snake_case dicts."""
+    if not self.enabled:
+        return []
+    def _num(v):
         try:
-            for attempt in range(3):
-                try:
-                    async with sess.post(self.url, headers=self._headers(), json=body) as resp:
-                        ok = (200 <= resp.status < 300)
-                        if not ok:
-                            text = await resp.text()
-                            try:
-                                log.warning(f"Sheets POST status={resp.status} body={text[:200]}")
-                            except Exception:
-                                pass
-                        return ok
-                except Exception as e:
-                    if attempt == 2:
-                        try:
-                            log.error(f"Sheets POST failed: {e}")
-                        except Exception:
-                            pass
-                        return False
-        finally:
-            if close_me:
-                await sess.close()
+            if v is None: return None
+            if isinstance(v, (int,float)): return float(v)
+            s = str(v).strip().replace(',', '').replace('$','')
+            if s == '': return None
+            return float(s)
+        except Exception:
+            return None
+    def _get(r, key):
+        # try snake_case, then mapped header name from field_map
+        if key in r: return r.get(key)
+        if self.field_map:
+            alt = self.field_map.get(key)
+            if alt and alt in r: return r.get(alt)
+        return None
+    try:
+        await self.start()
+        params = {"action": "open"}
+        headers = {"Authorization": f"Bearer {self.token}"}
+        async with self.session.get(self.url, params=params, headers=headers) as resp:
+            if resp.status != 200:
+                log.warning("Sheets GET open trades HTTP %s", resp.status)
+                return []
+            data = await resp.json(content_type=None)
+        rows = data.get("rows") if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        norm: List[Dict[str, Any]] = []
+        for r in rows:
+            try:
+                side_txt = str(_get(r, "side") or _get(r, "direction") or "long").lower()
+                side = "short" if "short" in side_txt else "long"
+                entry = _num(_get(r, "entry_price") or _get(r, "entry") or _get(r, "Entry Price"))
+                stop  = _num(_get(r, "stop_loss") or _get(r, "sl") or _get(r, "Stop Loss"))
+                tp1   = _num(_get(r, "take_profit_1") or _get(r, "tp1") or _get(r, "Take Profit 1"))
+                tp2   = _num(_get(r, "take_profit_2") or _get(r, "tp2") or _get(r, "Take Profit 2"))
+                # Fallback compute TP if missing but entry/stop exist
+                if tp1 is None and entry is not None and stop is not None:
+                    risk = abs(entry - stop)
+                    if risk > 0: tp1 = entry + 1.5*risk if side == "long" else entry - 1.5*risk
+                if tp2 is None and entry is not None and stop is not None:
+                    risk = abs(entry - stop)
+                    if risk > 0: tp2 = entry + 3.0*risk if side == "long" else entry - 3.0*risk
+                rec = {
+                    "id": str(_get(r, "id") or _get(r, "trade_id") or _get(r, "Trade ID") or ""),
+                    "pair": str(_get(r, "pair") or _get(r, "asset") or _get(r, "Asset") or "ETHUSD"),
+                    "side": side,
+                    "entry_price": float(entry) if entry is not None else 0.0,
+                    "stop_loss": float(stop) if stop is not None else 0.0,
+                    "take_profit_1": float(tp1) if tp1 is not None else 0.0,
+                    "take_profit_2": float(tp2) if tp2 is not None else 0.0,
+                    "status": "OPEN",
+                    "confidence": int(float(_get(r, "confidence") or _get(r, "Original Score") or 3)),
+                    "signal_type": (_get(r, "signal_type") or _get(r, "type") or ""),
+                    "level_name": (_get(r, "level_name") or _get(r, "Level Name") or ""),
+                    "level_price": float(_num(_get(r, "level_price") or _get(r, "Level Price") or 0) or 0),
+                    "metadata": r,
+                }
+                if rec["id"]:
+                    norm.append(rec)
+            except Exception:
+                continue
+        return norm
+    except Exception as e:
+        log.error("Sheets fetch_open_trades error: %s", e)
+        return []
 
-    async def fetch_open_trades(self, session: Optional[aiohttp.ClientSession] = None) -> List[dict]:
-        """GET ?action=open and return a list[dict] of open trades (shape expected by the bot)."""
-        rows_out: List[dict] = []
-        if not self.enabled:
-            return rows_out
-
-        sess = session or self.session
-        close_me = False
-        if sess is None:
-            timeout = aiohttp.ClientTimeout(total=30)
-            sess = aiohttp.ClientSession(timeout=timeout)
-            close_me = True
-        try:
-            params = {"action": "open"}
-            for attempt in range(3):
-                try:
-                    async with sess.get(self.url, headers=self._headers(), params=params) as resp:
-                        if not (200 <= resp.status < 300):
-                            txt = await resp.text()
-                            try:
-                                log.warning(f"Sheets GET status={resp.status} body={txt[:200]}")
-                            except Exception:
-                                pass
-                            return rows_out
-                        data = await resp.json(content_type=None)
-                        rows = data.get("rows") if isinstance(data, dict) else None
-                        if not rows:
-                            return rows_out
-                        # Ensure dict shape and types are sane
-                        for r in rows:
-                            try:
-                                d = {
-                                    "id": str(r.get("id")),
-                                    "pair": str(r.get("pair", "ETHUSD")),
-                                    "side": str(r.get("side", "long")).lower(),
-                                    "entry_price": float(r.get("entry_price")) if r.get("entry_price") is not None else None,
-                                    "stop_loss": float(r.get("stop_loss")) if r.get("stop_loss") is not None else None,
-                                    "take_profit_1": float(r.get("take_profit_1")) if r.get("take_profit_1") is not None else None,
-                                    "take_profit_2": float(r.get("take_profit_2")) if r.get("take_profit_2") is not None else None,
-                                    "level_name": str(r.get("level_name", "")),
-                                    "level_price": float(r.get("level_price")) if r.get("level_price") is not None else None,
-                                    "signal_type": str(r.get("signal_type", "")),
-                                    "confidence": int(r.get("confidence", 0)),
-                                    # optional fields
-                                    "reason": r.get("reason"),
-                                    "risk_reward_ratio": float(r.get("risk_reward_ratio")) if r.get("risk_reward_ratio") is not None else None,
-                                }
-                                rows_out.append(d)
-                            except Exception:
-                                continue
-                        return rows_out
-                except Exception as e:
-                    if attempt == 2:
-                        try:
-                            log.error(f"Sheets GET failed: {e}")
-                        except Exception:
-                            pass
-                        return rows_out
-        finally:
-            if close_me:
-                await sess.close()
-        return rows_out
-
-    # Back-compat alias used by older code paths
-    async def rehydrate_open_trades(self, session: Optional[aiohttp.ClientSession] = None) -> List[dict]:
-        return await self.fetch_open_trades(session)
+# ===== Trade Manager =====
 class TradeManager:
     def __init__(self, cfg: BotConfig, db: DatabaseManager):
         self.cfg = cfg
