@@ -1,5 +1,5 @@
 # ============================================
-# Production_ControlTower_v12.2.3
+# Production_ControlTower_v12.2.4
 # ============================================
 
 import os
@@ -193,12 +193,7 @@ class MarketDataProvider:
 
     def __init__(self, pair: str, interval_minutes: int):
 
-# === Alert flow knobs ===
-self.token_bucket_max = int(os.getenv("TOKEN_BUCKET_MAX", str(getattr(self, "token_bucket_max", 0) or 0)))
-self.token_bucket_refill_per_min = int(os.getenv("TOKEN_BUCKET_REFILL_PER_MIN", str(getattr(self, "token_bucket_refill_per_min", 0) or 0)))
-self.cooldown_seconds = int(os.getenv("COOLDOWN_SECONDS", str(getattr(self, "cooldown_seconds", 60) or 60)))
-self.use_global_cooldown = bool(int(os.getenv("USE_GLOBAL_COOLDOWN", "0")))
-self.global_cooldown_seconds = int(os.getenv("GLOBAL_COOLDOWN_SECONDS", str(getattr(self, "global_cooldown_seconds", 0) or 0)))
+
         self.pair = self.PAIR_MAPPING.get(pair.upper(), pair.upper())
         self.interval_minutes = interval_minutes
         self.session: Optional[aiohttp.ClientSession] = None
@@ -961,6 +956,11 @@ async def fetch_open_trades(self) -> List[Dict[str, Any]]:
         return []
 
 # ===== Trade Manager =====
+
+async def rehydrate_open_trades(self, session=None):
+    """Alias for compatibility: returns same as fetch_open_trades()."""
+    return await self.fetch_open_trades()
+
 class TradeManager:
     def __init__(self, cfg: BotConfig, db: DatabaseManager):
         self.cfg = cfg
@@ -1035,11 +1035,41 @@ class TradeManager:
                 updates.append(u)
         return updates
 
+    
     async def _check_exit(self, t: Dict[str, Any], price: float, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
         try:
-            tid = t["id"]; side = t["side"]
-            entry = float(t["entry_price"]); sl = float(t["stop_loss"])
-            tp1 = float(t["take_profit_1"]); tp2 = float(t["take_profit_2"])
+            tid = t.get("id"); side = (t.get("side") or "long").lower()
+            def _num(v):
+                try:
+                    if v is None: return None
+                    if isinstance(v, (int, float)): return float(v)
+                    s = str(v).strip().replace(",", "").replace("$","")
+                    if s == "": return None
+                    return float(s)
+                except Exception:
+                    return None
+            entry = _num(t.get("entry_price"))
+            sl    = _num(t.get("stop_loss"))
+            tp1   = _num(t.get("take_profit_1") or t.get("tp1"))
+            tp2   = _num(t.get("take_profit_2") or t.get("tp2"))
+
+            # compute TPs if missing and we have entry/stop
+            if (tp1 is None or tp2 is None) and entry is not None and sl is not None:
+                risk = abs(entry - sl)
+                if risk > 0:
+                    if tp1 is None:
+                        tp1 = entry + 1.5 * risk if side == "long" else entry - 1.5 * risk
+                    if tp2 is None:
+                        tp2 = entry + 3.0 * risk if side == "long" else entry - 3.0 * risk
+
+            # if we still don't have essentials, skip gracefully
+            if entry is None or sl is None or tp1 is None or tp2 is None:
+                try:
+                    log.warning("check_exit skip: missing fields for %s (entry=%s sl=%s tp1=%s tp2=%s)", tid, entry, sl, tp1, tp2)
+                except Exception:
+                    pass
+                return None
+
             tp1_hit = bool(t.get("tp1_hit", False))
 
             # Stops/TPs
@@ -1062,6 +1092,7 @@ class TradeManager:
             log.error("check_exit error: %s", e)
             return None
 
+    async def _hit_tp1(self, tid: str, price: float) -> Optional[Dict[str, Any]]:
     async def _hit_tp1(self, tid: str, price: float) -> Optional[Dict[str, Any]]:
         t = self.active[tid]
         entry = float(t["entry_price"]); side = t["side"]
