@@ -1,5 +1,5 @@
 # ============================================
-# Production_ControlTower_v12.1.6
+# Production_ControlTower_v12.1.7
 # ============================================
 
 import os
@@ -904,7 +904,7 @@ class GoogleSheetsIntegration:
             if close_me:
                 await sess.close()
 
-    async def rehydrate_open_trades(self, session: Optional[aiohttp.ClientSession]) -> List[TradeData]:
+    async def rehydrate_open_trades(self, session: Optional[aiohttp.ClientSession]) -> List[\"TradeData\"]:
         """GET ?action=open and build TradeData objects. Returns [] on error/disabled."""
         out: List[TradeData] = []
         if not self.enabled:
