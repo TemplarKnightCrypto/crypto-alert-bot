@@ -1,5 +1,5 @@
 # ============================================
-# Production_ControlTower_v12.2.2
+# Production_ControlTower_v12.2.3
 # ============================================
 
 import os
@@ -192,6 +192,13 @@ class MarketDataProvider:
     }
 
     def __init__(self, pair: str, interval_minutes: int):
+
+# === Alert flow knobs ===
+self.token_bucket_max = int(os.getenv("TOKEN_BUCKET_MAX", str(getattr(self, "token_bucket_max", 0) or 0)))
+self.token_bucket_refill_per_min = int(os.getenv("TOKEN_BUCKET_REFILL_PER_MIN", str(getattr(self, "token_bucket_refill_per_min", 0) or 0)))
+self.cooldown_seconds = int(os.getenv("COOLDOWN_SECONDS", str(getattr(self, "cooldown_seconds", 60) or 60)))
+self.use_global_cooldown = bool(int(os.getenv("USE_GLOBAL_COOLDOWN", "0")))
+self.global_cooldown_seconds = int(os.getenv("GLOBAL_COOLDOWN_SECONDS", str(getattr(self, "global_cooldown_seconds", 0) or 0)))
         self.pair = self.PAIR_MAPPING.get(pair.upper(), pair.upper())
         self.interval_minutes = interval_minutes
         self.session: Optional[aiohttp.ClientSession] = None
@@ -441,7 +448,7 @@ class TradeSignalEngine:
         self.cooldown_until: Dict[str, float] = defaultdict(lambda: 0.0)
         self.global_cooldown_until: Dict[str, float] = defaultdict(lambda: 0.0)
         self.recent_signatures: Dict[str, float] = {}  # signature -> expiry ts
-        self.recent_ttl = 1800  # seconds for dedupe entries
+        self.recent_ttl = int(os.getenv('ALERT_DEDUPE_TTL_SECONDS', '0'))  # seconds for dedupe entries
         self.rate_limiter = RateLimiter(config.token_bucket_max, config.token_bucket_refill_per_min)
 
     def _signature(self, sig: Signal) -> str:
@@ -545,7 +552,7 @@ class TradeSignalEngine:
             return False
         if sig.risk_reward_ratio < 1.5:
             return False
-        if not self.rate_limiter.acquire():
+        if self.cfg.token_bucket_max > 0 and self.cfg.token_bucket_refill_per_min > 0 and not self.rate_limiter.acquire():
             return False
         now = time.time()
         key = f"{sig.pair}_{sig.side}"
@@ -554,15 +561,17 @@ class TradeSignalEngine:
         if self.cfg.use_global_cooldown and now < self.global_cooldown_until[sig.pair]:
             return False
         sign = self._signature(sig)
-        for k, ts in list(self.recent_signatures.items()):
+        if self.recent_ttl > 0:
+            for k, ts in list(self.recent_signatures.items()):
             if now > ts:
                 self.recent_signatures.pop(k, None)
-        if sign in self.recent_signatures:
+        if self.recent_ttl > 0 and sign in self.recent_signatures:
             return False
         self.cooldown_until[key] = now + self.cfg.cooldown_seconds
         if self.cfg.use_global_cooldown:
             self.global_cooldown_until[sig.pair] = now + self.cfg.global_cooldown_seconds
-        self.recent_signatures[sign] = now + self.recent_ttl
+        if self.recent_ttl > 0:
+            self.recent_signatures[sign] = now + self.recent_ttl
         return True
 
     def generate(self, df: pd.DataFrame, levels: Dict[str, float], pair: str) -> Optional[Signal]:
@@ -962,7 +971,7 @@ class TradeManager:
     def can_open(self) -> Tuple[bool, str]:
         if self.cfg.no_trade or self.cfg.dry_run:
             return False, "no-trade or dry-run mode active"
-        if len(self.active) >= self.cfg.risk.max_open_trades:
+        if len(self.active) >= getattr(self.cfg.risk, 'max_open_trades', 0) if getattr(self.cfg.risk, 'max_open_trades', 0) and getattr(self.cfg.risk, 'max_open_trades', 0) > 0 else 999999999:
             return False, f"Max open trades {self.cfg.risk.max_open_trades} reached"
         if self.daily_pnl_pct <= -self.cfg.risk.max_daily_loss_pct:
             return False, f"Daily loss limit {self.cfg.risk.max_daily_loss_pct}% hit"
