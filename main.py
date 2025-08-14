@@ -543,49 +543,48 @@ class TradeSignalEngine:
                       reason=reason, confidence=conf, risk_reward_ratio=rr, atr=atr)
 
     
+
 def _quality_ok(self, sig: Signal) -> bool:
-        # Quality gates
-        if sig.confidence < self.cfg.signal_confidence_min:
+    # Quality gates
+    if sig.confidence < self.cfg.signal_confidence_min:
+        return False
+    if sig.risk_reward_ratio < 1.5:
+        return False
+
+    # Rate limiter (only if enabled)
+    if self.cfg.token_bucket_max > 0 and self.cfg.token_bucket_refill_per_min > 0 and not self.rate_limiter.acquire():
+        return False
+
+    now = time.time()
+    key = f"{sig.pair}_{sig.side}"
+
+    # Per-side cooldown (only if > 0)
+    if self.cfg.cooldown_seconds > 0 and now < self.cooldown_until[key]:
+        return False
+
+    # Global cooldown (only if enabled and > 0)
+    if self.cfg.use_global_cooldown and self.cfg.global_cooldown_seconds > 0 and now < self.global_cooldown_until[sig.pair]:
+        return False
+
+    # Dedupe (only if TTL > 0)
+    sign = self._signature(sig)
+    if self.recent_ttl > 0:
+        # purge expired
+        for k, ts in list(self.recent_signatures.items()):
+            if now > ts:
+                self.recent_signatures.pop(k, None)
+        # drop duplicates
+        if sign in self.recent_signatures:
             return False
-        if sig.risk_reward_ratio < 1.5:
-            return False
 
-        # Rate limiter (only if enabled)
-        if self.cfg.token_bucket_max > 0 and self.cfg.token_bucket_refill_per_min > 0 and not self.rate_limiter.acquire():
-            return False
+    # Accept -> set cooldowns and dedupe
+    self.cooldown_until[key] = now + max(self.cfg.cooldown_seconds, 0)
+    if self.cfg.use_global_cooldown and self.cfg.global_cooldown_seconds > 0:
+        self.global_cooldown_until[sig.pair] = now + self.cfg.global_cooldown_seconds
+    if self.recent_ttl > 0:
+        self.recent_signatures[sign] = now + self.recent_ttl
 
-        now = time.time()
-        key = f"{sig.pair}_{sig.side}"
-
-        # Per-side cooldown (only if > 0)
-        if self.cfg.cooldown_seconds > 0 and now < self.cooldown_until[key]:
-            return False
-
-        # Global cooldown (only if enabled and > 0)
-        if self.cfg.use_global_cooldown and self.cfg.global_cooldown_seconds > 0 and now < self.global_cooldown_until[sig.pair]:
-            return False
-
-        # Dedupe (only if TTL > 0)
-        sign = self._signature(sig)
-        if self.recent_ttl > 0:
-            # purge expired
-            for k, ts in list(self.recent_signatures.items()):
-                if now > ts:
-                    self.recent_signatures.pop(k, None)
-            # drop duplicates
-            if sign in self.recent_signatures:
-                return False
-
-        # Accept -> set cooldowns and dedupe
-        self.cooldown_until[key] = now + max(self.cfg.cooldown_seconds, 0)
-        if self.cfg.use_global_cooldown and self.cfg.global_cooldown_seconds > 0:
-            self.global_cooldown_until[sig.pair] = now + self.cfg.global_cooldown_seconds
-        if self.recent_ttl > 0:
-            self.recent_signatures[sign] = now + self.recent_ttl
-
-        return True
-
-
+    return True
     def generate(self, df: pd.DataFrame, levels: Dict[str, float], pair: str) -> Optional[Signal]:
         try:
             if df is None or len(df) < 25 or not levels:
