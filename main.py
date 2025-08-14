@@ -1,5 +1,5 @@
 # ============================================
-# Production_ControlTower_v12.1.5
+# Production_ControlTower_v12.1.6
 # ============================================
 
 import os
@@ -843,144 +843,118 @@ class DatabaseManager:
             log.error("log_event error: %s", e)
 
 # ===== Sheets Integration (Hardened) =====
-class GoogleSheetsIntegration:
-    def __init__(self, webhook_url: Optional[str], token: Optional[str]):
-        self.url = (webhook_url or "").strip()
-        self.token = (token or "").strip()
-        self.session: Optional[aiohttp.ClientSession] = None
-        self.enabled = bool(self.url and self.token)
-        self._last_payload: Dict[str, Any] = {}
-        if self.url and not self.token:
-            log.warning("Sheets webhook URL provided but token missing; disabling Sheets integration.")
-            self.enabled = False
 
-        # optional field aliasing (env JSON): {"entry_price":"Entry","tp1":"TP1"}
-        self.field_map: Dict[str, str] = {}
+class GoogleSheetsIntegration:
+    """Secure Google Sheets webhook integration via Apps Script.
+    Requires both webhook URL and SHEETS_TOKEN. Optional field-map in SHEETS_FIELD_MAP.
+    """
+    def __init__(self, url: Optional[str], token: Optional[str]):
+        self.url = (url or "").strip()
+        self.token = (token or "").strip()
+        self.enabled = bool(self.url and self.token)
+        self.field_map = {}
         try:
-            raw = os.getenv("SHEETS_FIELD_MAP", "")
-            if raw.strip():
-                self.field_map = json.loads(raw)
+            raw = os.getenv("SHEETS_FIELD_MAP", "").strip()
+            if raw:
+                import json as _json
+                self.field_map = _json.loads(raw)
         except Exception:
             self.field_map = {}
 
-    async def start(self):
-        if not self.session and self.enabled:
-            timeout = aiohttp.ClientTimeout(total=30)
-            self.session = aiohttp.ClientSession(timeout=timeout)
+    def _headers(self) -> dict:
+        return {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.token}"
+        }
 
-    async def stop(self):
-        if self.session:
-            await self.session.close()
-            self.session = None
-
-    def _apply_field_map(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _apply_field_map(self, payload: dict) -> dict:
         if not self.field_map:
             return payload
-        mapped = {}
+        out = {}
         for k, v in payload.items():
-            mapped[self.field_map.get(k, k)] = v
-        return mapped
+            out[self.field_map.get(k, k)] = v
+        return out
 
-    @staticmethod
-    def _sanitize(obj: Any) -> Any:
-        try:
-            if obj is None: return None
-            if isinstance(obj, (str, int, float, bool)): return obj
-            if isinstance(obj, (np.integer,)): return int(obj)
-            if isinstance(obj, (np.floating,)): return float(obj)
-            if isinstance(obj, (np.bool_,)): return bool(obj)
-            if isinstance(obj, (pd.Timestamp,)):
-                return obj.to_pydatetime().isoformat()
-            if isinstance(obj, (datetime,)):
-                return obj.astimezone(timezone.utc).isoformat()
-            if isinstance(obj, (list, tuple)):
-                return [GoogleSheetsIntegration._sanitize(x) for x in obj]
-            if isinstance(obj, dict):
-                return {str(k): GoogleSheetsIntegration._sanitize(v) for k, v in obj.items()}
-            return str(obj)
-        except Exception:
-            return str(obj)
-
-    def last_payload(self) -> Dict[str, Any]:
-        return self._last_payload
-
-    async def send_trade(self, trade_payload: Dict[str, Any], action: str) -> bool:
+    async def send_trade(self, payload: dict, action: str = "CREATE", session: Optional[aiohttp.ClientSession] = None) -> bool:
         if not self.enabled:
-            return True
+            return False
+        body = dict(payload)
+        body["action"] = action.upper()
+        body = self._apply_field_map(body)
+        close_me = False
         try:
-            await self.start()
-            base = {"action": action, "timestamp": datetime.now(timezone.utc).isoformat()}
-            payload = {**base, **trade_payload}
-            payload = self._apply_field_map(payload)
-            payload = GoogleSheetsIntegration._sanitize(payload)
-            self._last_payload = payload
-
-            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.token}"}
-
-            # Retries
+            sess = session
+            if sess is None:
+                timeout = aiohttp.ClientTimeout(total=30)
+                sess = aiohttp.ClientSession(timeout=timeout)
+                close_me = True
             for attempt in range(3):
                 try:
-                    async with self.session.post(self.url, json=payload, headers=headers) as resp:
-                        if resp.status == 200:
-                            return True
-                        else:
-                            log.warning("Sheets POST HTTP %s", resp.status)
+                    async with sess.post(self.url, headers=self._headers(), json=body) as resp:
+                        ok = (200 <= resp.status < 300)
+                        if not ok:
+                            text = await resp.text()
+                            log.warning(f"Sheets POST status={resp.status} body={text[:200]}")
+                        return ok
                 except Exception as e:
-                    log.warning("Sheets POST attempt %s failed: %s", attempt+1, e)
-                if attempt < 2:
-                    await asyncio.sleep(2 ** attempt)
-            log.error("Sheets POST failed after 3 attempts")
-            return False
-        except Exception as e:
-            log.error("Sheets send_trade error: %s", e)
-            return False
+                    if attempt == 2:
+                        log.error(f"Sheets POST failed: {e}")
+                        return False
+        finally:
+            if close_me:
+                await sess.close()
 
-    async def fetch_open_trades(self) -> List[Dict[str, Any]]:
-        """Expect Apps Script GET /exec?action=open returning JSON list of open trades"""
+    async def rehydrate_open_trades(self, session: Optional[aiohttp.ClientSession]) -> List[TradeData]:
+        """GET ?action=open and build TradeData objects. Returns [] on error/disabled."""
+        out: List[TradeData] = []
         if not self.enabled:
-            return []
+            return out
+        if session is None:
+            timeout = aiohttp.ClientTimeout(total=30)
+            session = aiohttp.ClientSession(timeout=timeout)
+            close_me = True
+        else:
+            close_me = False
         try:
-            await self.start()
             params = {"action": "open"}
-            headers = {"Authorization": f"Bearer {self.token}"}
-            async with self.session.get(self.url, params=params, headers=headers) as resp:
-                if resp.status != 200:
-                    log.warning("Sheets GET open trades HTTP %s", resp.status)
-                    return []
-                data = await resp.json()
-                if isinstance(data, dict) and "rows" in data:
-                    rows = data["rows"]
-                elif isinstance(data, list):
-                    rows = data
-                else:
-                    rows = []
-                # Normalize
-                norm = []
-                for r in rows:
-                    try:
-                        norm.append({
-                            "id": r.get("id") or r.get("trade_id") or r.get("TradeID"),
-                            "pair": r.get("pair","ETHUSD"),
-                            "side": (r.get("side") or "").lower() or "long",
-                            "entry_price": float(r.get("entry_price") or r.get("entry") or r.get("Entry") or 0),
-                            "stop_loss": float(r.get("stop_loss") or r.get("sl") or r.get("SL") or 0),
-                            "take_profit_1": float(r.get("take_profit_1") or r.get("tp1") or r.get("TP1") or 0),
-                            "take_profit_2": float(r.get("take_profit_2") or r.get("tp2") or r.get("TP2") or 0),
-                            "status": "OPEN",
-                            "confidence": int(float(r.get("confidence") or 3)),
-                            "signal_type": r.get("signal_type") or r.get("type") or "",
-                            "level_name": r.get("level_name") or r.get("level") or "",
-                            "level_price": float(r.get("level_price") or r.get("levelPrice") or 0),
-                            "metadata": r,
-                        })
-                    except Exception:
-                        continue
-                return [x for x in norm if x.get("id")]
-        except Exception as e:
-            log.error("Sheets fetch_open_trades error: %s", e)
-            return []
-
-# ===== Trade Manager =====
+            for attempt in range(3):
+                try:
+                    async with session.get(self.url, headers=self._headers(), params=params) as resp:
+                        if not (200 <= resp.status < 300):
+                            txt = await resp.text()
+                            log.warning(f"Sheets GET status={resp.status} body={txt[:200]}")
+                            return out
+                        data = await resp.json(content_type=None)
+                        rows = data.get("rows") if isinstance(data, dict) else None
+                        if not rows:
+                            return out
+                        for r in rows:
+                            try:
+                                td = TradeData(
+                                    id=str(r.get("id")),
+                                    pair=str(r.get("pair", "ETHUSD")),
+                                    side=str(r.get("side", "long")).lower(),
+                                    entry=float(r.get("entry_price")) if r.get("entry_price") is not None else None,
+                                    stop=float(r.get("stop_loss")) if r.get("stop_loss") is not None else None,
+                                    tp1=float(r.get("take_profit_1")) if r.get("take_profit_1") is not None else None,
+                                    tp2=float(r.get("take_profit_2")) if r.get("take_profit_2") is not None else None,
+                                    level_name=str(r.get("level_name", "")),
+                                    level_price=float(r.get("level_price")) if r.get("level_price") is not None else None,
+                                    signal_type=str(r.get("signal_type", "")),
+                                    confidence=int(r.get("confidence", 0)),
+                                )
+                                out.append(td)
+                            except Exception as _:
+                                continue
+                        return out
+                except Exception as e:
+                    if attempt == 2:
+                        log.error(f"Sheets GET failed: {e}")
+                        return out
+        finally:
+            if close_me:
+                await session.close()
+        return out
 class TradeManager:
     def __init__(self, cfg: BotConfig, db: DatabaseManager):
         self.cfg = cfg
