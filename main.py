@@ -785,12 +785,13 @@ class IntegratedTradeTracker:
     """
     Tracks trade lifecycle messages (entry, partial, exit), updates daily stats,
     and mirrors entries/exits to Google Sheets (if GOOGLE_SHEETS_WEBHOOK is set).
+    Sends SHEETS_TOKEN via Authorization, x-app-secret, ?key=..., and body.token.
     Requires: discord.py context, global SCROLLS_ORDER_ID, get_tier_label(), get_http_session(),
     and a global `logger`.
     """
     def __init__(self, bot):
         self.bot = bot
-        self.trade_messages: Dict[str, int] = {}
+        self.trade_messages: dict[str, int] = {}
         self.daily_stats = {
             'date': datetime.now(timezone.utc).date(),
             'trades': 0,
@@ -802,8 +803,8 @@ class IntegratedTradeTracker:
         self.sheets_token   = (os.environ.get('SHEETS_TOKEN') or '').strip()  # optional, for secured Apps Script
 
         # Entry times & partial exits (for blended analytics)
-        self.entry_times: Dict[str, datetime] = {}      # trade_id -> datetime
-        self.partial_exits: Dict[str, List[dict]] = {}  # trade_id -> list of partial dicts
+        self.entry_times: dict[str, datetime] = {}      # trade_id -> datetime
+        self.partial_exits: dict[str, list[dict]] = {}  # trade_id -> list of partial dicts
 
     # ---------------------------
     # ENTRY
@@ -1041,7 +1042,7 @@ class IntegratedTradeTracker:
             logger.error("Error generating performance report: %s", e)
             return {'error': str(e)}
 
-    def _calculate_performance_stats_enhanced(self, trades: List[dict], days: int) -> dict:
+    def _calculate_performance_stats_enhanced(self, trades: list[dict], days: int) -> dict:
         """Enhanced performance statistics with TP1/TP2 breakdown."""
         if not trades:
             return {
@@ -1085,7 +1086,7 @@ class IntegratedTradeTracker:
         scores = [t.get('score', 0) for t in trades if t.get('score') is not None]
         avg_score = (sum(scores) / len(scores)) if scores else 0
 
-        exit_reasons: Dict[str, int] = {}
+        exit_reasons: dict[str, int] = {}
         tp_breakdown = {'TP1_ONLY': 0, 'TP2': 0, 'SL': 0}
         for trade in closed_trades:
             reason = str(trade.get('exit_reason', 'Unknown'))
@@ -1120,10 +1121,10 @@ class IntegratedTradeTracker:
         }
 
     # ---------------------------
-    # SHEETS I/O (FIXED)
+    # SHEETS I/O (robust auth)
     # ---------------------------
     async def _send_to_sheets(self, data: dict, action: str) -> bool:
-        """Send data to Google Sheets using the shared session, with optional token header."""
+        """Send data to Google Sheets using shared session; token via header + x-app-secret + ?key= + body."""
         if not self.sheets_webhook:
             logger.warning("Sheets disabled: no GOOGLE_SHEETS_WEBHOOK")
             return False
@@ -1131,68 +1132,79 @@ class IntegratedTradeTracker:
         # ---- build payload ---------------------------------------------------
         if action == "entry":
             base = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "trade_id":    data["id"],
-                "direction":   data["direction"],
-                "level_name":  data["level_name"],
+                "timestamp":  datetime.now(timezone.utc).isoformat(),
+                "trade_id":   data["id"],                      # Apps Script maps id || trade_id
+                "direction":  data["direction"],               # side || direction
+                "level_name": data["level_name"],
                 "entry_price": data["entry_price"],
-                "target1":     data["tp1"],
+                "target1":     data["tp1"],                    # Script supports target1/2 OR take_profit_1/2
                 "target2":     data["tp2"],
                 "stop_loss":   data["sl"],
                 "score":       data["score"],
                 "knight":      data["knight"],
                 "status":      "OPEN",
-                "asset":       data.get("asset", "ETH"),
+                "asset":       data.get("asset", "ETH"),       # pair || asset
                 "trade_type":  data.get("trade_type", "Breakout"),
-                # human-friendly confidence label; keep numeric score too
                 "confidence":  data.get("rating") or get_tier_label(int(data["score"])),
             }
             payload = {**base, "enhanced_data": data["enhanced_data"]} if data.get("enhanced_data") else base
         else:  # exit/update
             payload = {
-                "action":     "update",
-                "trade_id":   data["trade_id"],
-                "exit_price": data["exit_price"],
+                "action":      "update",
+                "trade_id":    data["trade_id"],
+                "exit_price":  data["exit_price"],
                 "exit_reason": data["exit_reason"],
                 "pnl_pct":     data["pnl_pct"],
                 "exit_time":   datetime.now(timezone.utc).isoformat(),
                 "status":      "CLOSED",
             }
 
+        # ---- auth: send in header + query + body -----------------------------
+        token = (self.sheets_token or "").strip()
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"   # primary
+            headers["x-app-secret"] = token                # secondary
+            payload = {**payload, "token": token}          # body fallback
+
+        # add ?key= to URL so Apps Script can read token from query if headers aren’t exposed
+        url = self.sheets_webhook
+        if token:
+            try:
+                from urllib.parse import quote as _quote
+            except Exception:
+                _quote = lambda s: s
+            url += ('&' if '?' in url else '?') + f"key={_quote(token)}"
+
         # ---- debug logging ---------------------------------------------------
         if action == "entry":
             enh = payload.get("enhanced_data")
             enh_keys = list(enh.keys()) if isinstance(enh, dict) else []
-            logger.warning(
-                "Sheets[entry]: has_enhanced=%s enh_keys=%s keys=%s",
-                bool(enh_keys), enh_keys, list(payload.keys())
-            )
+            logger.warning("Sheets[entry]: has_enhanced=%s enh_keys=%s keys=%s",
+                           bool(enh_keys), enh_keys, list(payload.keys()))
         else:
-            logger.warning("Sheets[exit]: payload=%s", json.dumps(payload, default=str)[:300] + "...")
-
-        # ---- headers ---------------------------------------------------------
-        headers = {"Content-Type": "application/json"}
-        # If your Apps Script secures with x-app-secret, send the token here:
-        if self.sheets_token:
-            headers["Authorization"] = f"Bearer {self.sheets_token}"
-        # If your script expects Bearer auth instead, swap to:
-        # if self.sheets_token: headers["Authorization"] = f"Bearer {self.sheets_token}"
+            logger.warning("Sheets[exit]: payload keys=%s", list(payload.keys()))
 
         # ---- POST with retries using SHARED session --------------------------
         session = await get_http_session()
         for attempt in range(1, 4):
             try:
-                async with session.post(self.sheets_webhook, json=payload, headers=headers) as resp:
+                async with session.post(url, json=payload, headers=headers) as resp:
                     text = await resp.text()
                     if resp.status < 300:
-                        logger.warning("Sheets ok: %s %s", resp.status, text[:200])
+                        # Apps Script returns {"ok": true/false, ...}
                         try:
                             j = json.loads(text)
-                            if isinstance(j, dict) and j.get("status") == "success":
-                                return True
+                            if isinstance(j, dict):
+                                if j.get("ok") is True:
+                                    logger.warning("Sheets ok: %s", text[:300])
+                                    return True
+                                else:
+                                    logger.error("Sheets 2xx but not ok: %s", text[:300])
+                                    return False
                         except Exception:
-                            pass
-                        return True
+                            logger.warning("Sheets 2xx non-JSON: %s", text[:200])
+                            return True
                     else:
                         logger.error("Sheets POST failed (try %d/3) %s: %s", attempt, resp.status, text[:500])
             except Exception as e:
@@ -1205,7 +1217,7 @@ class IntegratedTradeTracker:
     # ---------------------------
     # DAILY STATS
     # ---------------------------
-    def _update_daily_stats(self, action: str, pnl: Optional[float] = None) -> None:
+    def _update_daily_stats(self, action: str, pnl: float | None = None) -> None:
         """Update daily statistics."""
         today = datetime.now(timezone.utc).date()
         if today > self.daily_stats['date']:
@@ -1225,7 +1237,7 @@ class IntegratedTradeTracker:
     # ---------------------------
     # CSV EXPORT
     # ---------------------------
-    async def export_trades_csv(self, days: int = 30) -> Optional[discord.File]:
+    async def export_trades_csv(self, days: int = 30) -> discord.File | None:
         """Export trades as CSV file - FIXED BytesIO issue."""
         try:
             channel = self.bot.get_channel(SCROLLS_ORDER_ID)
@@ -1266,7 +1278,7 @@ class IntegratedTradeTracker:
     # ---------------------------
     # EMBED PARSING HELPERS
     # ---------------------------
-    def _parse_trade_from_message(self, message) -> Optional[dict]:
+    def _parse_trade_from_message(self, message) -> dict | None:
         """Extract trade data from Discord message."""
         try:
             embed = message.embeds[0]
@@ -1302,6 +1314,7 @@ class IntegratedTradeTracker:
         except Exception:
             pass
         return "Unknown"
+
 
 # Enhanced IntegratedTradeTracker with automated capture
 class EnhancedIntegratedTradeTracker(IntegratedTradeTracker):
