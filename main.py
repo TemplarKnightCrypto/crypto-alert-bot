@@ -1,6 +1,6 @@
 from __future__ import annotations
 # ============================================
-# Production_ControlTower_v12.2
+# Production_ControlTower_v12.2.1
 # ============================================
 
 import os
@@ -846,6 +846,7 @@ class DatabaseManager:
 # ===== Sheets Integration (Hardened) =====
 
 
+
 class GoogleSheetsIntegration:
     """Secure Google Sheets webhook integration via Apps Script.
     Enabled only when both webhook URL and SHEETS_TOKEN are set.
@@ -929,11 +930,11 @@ class GoogleSheetsIntegration:
             if close_me:
                 await sess.close()
 
-    async def rehydrate_open_trades(self, session: Optional[aiohttp.ClientSession] = None) -> List["TradeData"]:
-        """GET ?action=open and rebuild TradeData objects from rows marked OPEN."""
-        out: List["TradeData"] = []
+    async def fetch_open_trades(self, session: Optional[aiohttp.ClientSession] = None) -> List[dict]:
+        """GET ?action=open and return a list[dict] of open trades (shape expected by the bot)."""
+        rows_out: List[dict] = []
         if not self.enabled:
-            return out
+            return rows_out
 
         sess = session or self.session
         close_me = False
@@ -952,41 +953,49 @@ class GoogleSheetsIntegration:
                                 log.warning(f"Sheets GET status={resp.status} body={txt[:200]}")
                             except Exception:
                                 pass
-                            return out
+                            return rows_out
                         data = await resp.json(content_type=None)
                         rows = data.get("rows") if isinstance(data, dict) else None
                         if not rows:
-                            return out
+                            return rows_out
+                        # Ensure dict shape and types are sane
                         for r in rows:
                             try:
-                                td = TradeData(
-                                    id=str(r.get("id")),
-                                    pair=str(r.get("pair", "ETHUSD")),
-                                    side=str(r.get("side", "long")).lower(),
-                                    entry=float(r.get("entry_price")) if r.get("entry_price") is not None else None,
-                                    stop=float(r.get("stop_loss")) if r.get("stop_loss") is not None else None,
-                                    tp1=float(r.get("take_profit_1")) if r.get("take_profit_1") is not None else None,
-                                    tp2=float(r.get("take_profit_2")) if r.get("take_profit_2") is not None else None,
-                                    level_name=str(r.get("level_name", "")),
-                                    level_price=float(r.get("level_price")) if r.get("level_price") is not None else None,
-                                    signal_type=str(r.get("signal_type", "")),
-                                    confidence=int(r.get("confidence", 0)),
-                                )
-                                out.append(td)
+                                d = {
+                                    "id": str(r.get("id")),
+                                    "pair": str(r.get("pair", "ETHUSD")),
+                                    "side": str(r.get("side", "long")).lower(),
+                                    "entry_price": float(r.get("entry_price")) if r.get("entry_price") is not None else None,
+                                    "stop_loss": float(r.get("stop_loss")) if r.get("stop_loss") is not None else None,
+                                    "take_profit_1": float(r.get("take_profit_1")) if r.get("take_profit_1") is not None else None,
+                                    "take_profit_2": float(r.get("take_profit_2")) if r.get("take_profit_2") is not None else None,
+                                    "level_name": str(r.get("level_name", "")),
+                                    "level_price": float(r.get("level_price")) if r.get("level_price") is not None else None,
+                                    "signal_type": str(r.get("signal_type", "")),
+                                    "confidence": int(r.get("confidence", 0)),
+                                    # optional fields
+                                    "reason": r.get("reason"),
+                                    "risk_reward_ratio": float(r.get("risk_reward_ratio")) if r.get("risk_reward_ratio") is not None else None,
+                                }
+                                rows_out.append(d)
                             except Exception:
                                 continue
-                        return out
+                        return rows_out
                 except Exception as e:
                     if attempt == 2:
                         try:
                             log.error(f"Sheets GET failed: {e}")
                         except Exception:
                             pass
-                        return out
+                        return rows_out
         finally:
             if close_me:
                 await sess.close()
-        return out
+        return rows_out
+
+    # Back-compat alias used by older code paths
+    async def rehydrate_open_trades(self, session: Optional[aiohttp.ClientSession] = None) -> List[dict]:
+        return await self.fetch_open_trades(session)
 class TradeManager:
     def __init__(self, cfg: BotConfig, db: DatabaseManager):
         self.cfg = cfg
