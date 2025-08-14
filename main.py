@@ -1,5 +1,5 @@
 # ============================================
-# The Control Tower - Templar Knight Crypto - v10.3
+# The Control Tower - Templar Knight Crypto - v13
 # ============================================
 
 import os
@@ -780,11 +780,16 @@ class AutomatedTradingTracker:
 # ============================================
 # ENHANCED INTEGRATED TRADE TRACKER CLASS
 # ============================================
-
 class IntegratedTradeTracker:
+    """
+    Tracks trade lifecycle messages (entry, partial, exit), updates daily stats,
+    and mirrors entries/exits to Google Sheets (if GOOGLE_SHEETS_WEBHOOK is set).
+    Requires: discord.py context, global SCROLLS_ORDER_ID, get_tier_label(), get_http_session(),
+    and a global `logger`.
+    """
     def __init__(self, bot):
         self.bot = bot
-        self.trade_messages = {}
+        self.trade_messages: Dict[str, int] = {}
         self.daily_stats = {
             'date': datetime.now(timezone.utc).date(),
             'trades': 0,
@@ -792,16 +797,22 @@ class IntegratedTradeTracker:
             'total_pnl': 0.0
         }
         # Google Sheets integration (if webhook provided)
-        self.sheets_webhook = os.environ.get('GOOGLE_SHEETS_WEBHOOK')
-        # NEW: entry times & partial exits
-        self.entry_times = {}      # trade_id -> datetime
-        self.partial_exits = {}    # trade_id -> list of {exit_price, exit_reason, pnl_pct, fraction, timestamp}
+        self.sheets_webhook = (os.environ.get('GOOGLE_SHEETS_WEBHOOK') or '').strip()
+        self.sheets_token   = (os.environ.get('SHEETS_TOKEN') or '').strip()  # optional, for secured Apps Script
 
-    async def log_trade_entry(self, trade_data):
+        # Entry times & partial exits (for blended analytics)
+        self.entry_times: Dict[str, datetime] = {}      # trade_id -> datetime
+        self.partial_exits: Dict[str, List[dict]] = {}  # trade_id -> list of partial dicts
+
+    # ---------------------------
+    # ENTRY
+    # ---------------------------
+    async def log_trade_entry(self, trade_data: dict) -> bool:
         """Log new trade entry to Discord and (optionally) Google Sheets."""
         try:
             channel = self.bot.get_channel(SCROLLS_ORDER_ID)
             if not channel:
+                logger.error("SCROLLS_ORDER_ID channel not found.")
                 return False
 
             embed = discord.Embed(
@@ -810,15 +821,20 @@ class IntegratedTradeTracker:
                 color=discord.Color.blue(),
                 timestamp=datetime.now(timezone.utc)
             )
-            embed.add_field(name="🎯 Entry", value=f"${float(trade_data['entry_price']):.2f}", inline=True)
-            embed.add_field(name="🛑 Stop Loss", value=f"${float(trade_data['sl']):.2f}", inline=True)
-            embed.add_field(name="🎪 Targets", value=f"${float(trade_data['tp1']):.2f} / ${float(trade_data['tp2']):.2f}", inline=True)
+            entry = float(trade_data['entry_price'])
+            sl    = float(trade_data['sl'])
+            tp1   = float(trade_data['tp1'])
+            tp2   = float(trade_data['tp2'])
+
+            embed.add_field(name="🎯 Entry", value=f"${entry:.2f}", inline=True)
+            embed.add_field(name="🛑 Stop Loss", value=f"${sl:.2f}", inline=True)
+            embed.add_field(name="🎪 Targets", value=f"${tp1:.2f} / ${tp2:.2f}", inline=True)
             embed.add_field(name="⚔️ Knight", value=str(trade_data['knight']), inline=True)
             embed.add_field(name="📊 Score", value=f"{int(trade_data['score'])}/6", inline=True)
             embed.add_field(name="🏆 Tier", value=get_tier_label(int(trade_data['score'])), inline=True)
 
-            risk_pct = abs((float(trade_data['entry_price']) - float(trade_data['sl'])) / float(trade_data['entry_price'])) * 100
-            reward1_pct = abs((float(trade_data['tp1']) - float(trade_data['entry_price'])) / float(trade_data['entry_price'])) * 100
+            risk_pct = abs((entry - sl) / entry) * 100 if entry else 0.0
+            reward1_pct = abs((tp1 - entry) / entry) * 100 if entry else 0.0
             rr = (reward1_pct / risk_pct) if risk_pct else 0.0
             embed.add_field(
                 name="⚖️ Risk/Reward",
@@ -829,30 +845,33 @@ class IntegratedTradeTracker:
 
             message = await channel.send(embed=embed)
             self.trade_messages[trade_data['id']] = message.id
-            # NEW: remember when the trade started
             self.entry_times[trade_data['id']] = datetime.now(timezone.utc)
 
             self._update_daily_stats('entry')
 
             # Send to Google Sheets if configured
             if self.sheets_webhook:
-                await self._send_to_sheets(trade_data, 'entry')
+                ok = await self._send_to_sheets(trade_data, 'entry')
+                if not ok:
+                    logger.error("Sheets entry write failed for trade_id=%s", trade_data['id'])
 
-            logger.warning(f"✅ Trade {trade_data['id']} logged")
+            logger.warning("✅ Trade %s logged", trade_data['id'])
             return True
 
         except Exception as e:
-            logger.error(f"Error logging trade entry: {e}")
+            logger.error("Error logging trade entry: %s", e)
             return False
 
-    async def log_partial_exit(self, trade_id, exit_price, exit_reason, pnl_pct, *, fraction: float = 0.5, silent: bool = True):
+    # ---------------------------
+    # PARTIAL EXIT
+    # ---------------------------
+    async def log_partial_exit(self, trade_id: str, exit_price: float, exit_reason: str, pnl_pct: float, *, fraction: float = 0.5, silent: bool = True) -> bool:
         """Log partial exits (e.g., TP1) while keeping trade active for TP2.
 
         fraction: portion of position closed on this partial (0..1)
         silent:   if True, do not post a Discord embed (still store for analytics)
         """
         try:
-            # Store partial (used for analytics / blended math)
             self._store_partial_exit(trade_id, exit_price, exit_reason, pnl_pct, fraction)
 
             if silent:
@@ -861,6 +880,7 @@ class IntegratedTradeTracker:
 
             channel = self.bot.get_channel(SCROLLS_ORDER_ID)
             if not channel:
+                logger.error("SCROLLS_ORDER_ID channel not found.")
                 return False
 
             embed = discord.Embed(
@@ -878,14 +898,14 @@ class IntegratedTradeTracker:
                 embed.add_field(name="Status", value="🔄 Monitoring for TP2", inline=False)
 
             await channel.send(embed=embed)
-            logger.warning(f"✅ Partial exit logged: {trade_id} - {exit_reason}")
+            logger.warning("✅ Partial exit logged: %s - %s", trade_id, exit_reason)
             return True
 
         except Exception as e:
-            logger.error(f"Error logging partial exit: {e}")
+            logger.error("Error logging partial exit: %s", e)
             return False
 
-    def _store_partial_exit(self, trade_id, exit_price, exit_reason, pnl_pct, fraction: float = 0.5):
+    def _store_partial_exit(self, trade_id: str, exit_price: float, exit_reason: str, pnl_pct: float, fraction: float = 0.5) -> None:
         """Store partial exit data for enhanced analytics."""
         self.partial_exits.setdefault(trade_id, [])
         self.partial_exits[trade_id].append({
@@ -896,11 +916,15 @@ class IntegratedTradeTracker:
             'timestamp': datetime.now(timezone.utc).isoformat()
         })
 
-    async def log_trade_exit(self, trade_id, exit_price, exit_reason, pnl_pct):
+    # ---------------------------
+    # FINAL EXIT
+    # ---------------------------
+    async def log_trade_exit(self, trade_id: str, exit_price: float, exit_reason: str, pnl_pct: float) -> bool:
         """Update trade with exit information (blended breakdown + duration)."""
         try:
             channel = self.bot.get_channel(SCROLLS_ORDER_ID)
             if not channel:
+                logger.error("SCROLLS_ORDER_ID channel not found.")
                 return False
 
             # Gather partials & duration
@@ -908,7 +932,7 @@ class IntegratedTradeTracker:
             size_closed = sum(p.get("fraction", 0.0) for p in parts)
             tp1_part = next((p for p in parts if "TP1" in (p.get("exit_reason", "")).upper()), None)
 
-            # Duration in trade
+            # Duration
             started = self.entry_times.get(trade_id)
             dur_str = "—"
             if started:
@@ -926,13 +950,13 @@ class IntegratedTradeTracker:
             color = discord.Color.green() if win else discord.Color.red()
             tag = "🟢" if win else "🔴"
 
-            # Build breakdown text for final embed
+            # Breakdown text
             breakdown_lines = []
             if tp1_part:
                 breakdown_lines.append(
                     f"TP1: {tp1_part['fraction']*100:.0f}% at ${tp1_part['exit_price']:.2f} ({tp1_part['pnl_pct']:+.2f}%)"
                 )
-            if size_closed > 0 and size_closed < 1.0:
+            if 0 < size_closed < 1.0:
                 remaining = 1.0 - size_closed
                 breakdown_lines.append(f"Remainder {remaining*100:.0f}% closed at ${float(exit_price):.2f}")
             breakdown = "\n".join(breakdown_lines) if breakdown_lines else "Full size closed"
@@ -976,21 +1000,26 @@ class IntegratedTradeTracker:
 
             # Update Google Sheets
             if self.sheets_webhook:
-                await self._send_to_sheets({
+                ok = await self._send_to_sheets({
                     'trade_id': trade_id,
                     'exit_price': float(exit_price),
                     'exit_reason': str(exit_reason),
                     'pnl_pct': float(pnl_pct)
                 }, 'exit')
+                if not ok:
+                    logger.error("Sheets exit update failed for trade_id=%s", trade_id)
 
-            logger.warning(f"✅ Trade exit {trade_id}: {float(pnl_pct):+.2f}%")
+            logger.warning("✅ Trade exit %s: %+0.2f%%", trade_id, float(pnl_pct))
             return True
 
         except Exception as e:
-            logger.error(f"Error logging trade exit: {e}")
+            logger.error("Error logging trade exit: %s", e)
             return False
 
-    async def generate_performance_report(self, days=7):
+    # ---------------------------
+    # REPORTING
+    # ---------------------------
+    async def generate_performance_report(self, days: int = 7) -> dict:
         """Generate performance report from Discord messages."""
         try:
             channel = self.bot.get_channel(SCROLLS_ORDER_ID)
@@ -1008,10 +1037,10 @@ class IntegratedTradeTracker:
             return self._calculate_performance_stats_enhanced(trades, days)
 
         except Exception as e:
-            logger.error(f"Error generating performance report: {e}")
+            logger.error("Error generating performance report: %s", e)
             return {'error': str(e)}
 
-    def _calculate_performance_stats_enhanced(self, trades, days):
+    def _calculate_performance_stats_enhanced(self, trades: List[dict], days: int) -> dict:
         """Enhanced performance statistics with TP1/TP2 breakdown."""
         if not trades:
             return {
@@ -1045,26 +1074,27 @@ class IntegratedTradeTracker:
             }
 
         winning_trades = [t for t in closed_trades if t.get('pnl', 0) > 0]
-        losing_trades = [t for t in closed_trades if t.get('pnl', 0) <= 0]
+        losing_trades  = [t for t in closed_trades if t.get('pnl', 0) <= 0]
         total_pnl = sum(t.get('pnl', 0) for t in closed_trades)
         win_rate = (len(winning_trades) / len(closed_trades)) * 100 if closed_trades else 0
-        avg_pnl = total_pnl / len(closed_trades) if closed_trades else 0
+        avg_pnl  = total_pnl / len(closed_trades) if closed_trades else 0
         pnl_values = [t.get('pnl', 0) for t in closed_trades]
         best_trade = max(pnl_values) if pnl_values else 0
         worst_trade = min(pnl_values) if pnl_values else 0
-        scores = [t.get('score', 0) for t in trades if t.get('score')]
-        avg_score = sum(scores) / len(scores) if scores else 0
+        scores = [t.get('score', 0) for t in trades if t.get('score') is not None]
+        avg_score = (sum(scores) / len(scores)) if scores else 0
 
-        exit_reasons = {}
+        exit_reasons: Dict[str, int] = {}
         tp_breakdown = {'TP1_ONLY': 0, 'TP2': 0, 'SL': 0}
         for trade in closed_trades:
-            reason = trade.get('exit_reason', 'Unknown')
+            reason = str(trade.get('exit_reason', 'Unknown'))
             exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
-            if 'TP2' in reason:
+            U = reason.upper()
+            if 'TP2' in U:
                 tp_breakdown['TP2'] += 1
-            elif 'TP1' in reason:
+            elif 'TP1' in U:
                 tp_breakdown['TP1_ONLY'] += 1
-            elif 'SL' in reason:
+            elif 'SL' in U or 'STOP' in U:
                 tp_breakdown['SL'] += 1
 
         total_exits = sum(tp_breakdown.values())
@@ -1088,9 +1118,12 @@ class IntegratedTradeTracker:
             'tp_success_rate': tp_success_rate
         }
 
+    # ---------------------------
+    # SHEETS I/O (FIXED)
+    # ---------------------------
     async def _send_to_sheets(self, data: dict, action: str) -> bool:
-        """Send data to Google Sheets using aiohttp with retries + rich logging."""
-        if not getattr(self, "sheets_webhook", None):
+        """Send data to Google Sheets using the shared session, with optional token header."""
+        if not self.sheets_webhook:
             logger.warning("Sheets disabled: no GOOGLE_SHEETS_WEBHOOK")
             return False
 
@@ -1098,31 +1131,31 @@ class IntegratedTradeTracker:
         if action == "entry":
             base = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "trade_id": data["id"],
-                "direction": data["direction"],
-                "level_name": data["level_name"],
+                "trade_id":    data["id"],
+                "direction":   data["direction"],
+                "level_name":  data["level_name"],
                 "entry_price": data["entry_price"],
-                "target1": data["tp1"],
-                "target2": data["tp2"],
-                "stop_loss": data["sl"],
-                "score": data["score"],
-                "knight": data["knight"],
-                "status": "OPEN",
-                "asset": data.get("asset", "ETH"),
-                "trade_type": data.get("trade_type", "Breakout"),
-                "confidence": data.get("rating") or get_tier_label(data["score"]),
+                "target1":     data["tp1"],
+                "target2":     data["tp2"],
+                "stop_loss":   data["sl"],
+                "score":       data["score"],
+                "knight":      data["knight"],
+                "status":      "OPEN",
+                "asset":       data.get("asset", "ETH"),
+                "trade_type":  data.get("trade_type", "Breakout"),
+                # human-friendly confidence label; keep numeric score too
+                "confidence":  data.get("rating") or get_tier_label(int(data["score"])),
             }
-            # forward enhanced metrics if present
             payload = {**base, "enhanced_data": data["enhanced_data"]} if data.get("enhanced_data") else base
         else:  # exit/update
             payload = {
-                "action": "update",
-                "trade_id": data["trade_id"],
+                "action":     "update",
+                "trade_id":   data["trade_id"],
                 "exit_price": data["exit_price"],
                 "exit_reason": data["exit_reason"],
-                "pnl_pct": data["pnl_pct"],
-                "exit_time": datetime.now(timezone.utc).isoformat(),
-                "status": "CLOSED",
+                "pnl_pct":     data["pnl_pct"],
+                "exit_time":   datetime.now(timezone.utc).isoformat(),
+                "status":      "CLOSED",
             }
 
         # ---- debug logging ---------------------------------------------------
@@ -1131,31 +1164,36 @@ class IntegratedTradeTracker:
             enh_keys = list(enh.keys()) if isinstance(enh, dict) else []
             logger.warning(
                 "Sheets[entry]: has_enhanced=%s enh_keys=%s keys=%s",
-                bool(enh_keys),
-                enh_keys,
-                list(payload.keys()),
+                bool(enh_keys), enh_keys, list(payload.keys())
             )
         else:
             logger.warning("Sheets[exit]: payload=%s", json.dumps(payload, default=str)[:300] + "...")
 
-        # ---- POST with retries ----------------------------------------------
+        # ---- headers ---------------------------------------------------------
+        headers = {"Content-Type": "application/json"}
+        # If your Apps Script secures with x-app-secret, send the token here:
+        if self.sheets_token:
+            headers["x-app-secret"] = self.sheets_token
+        # If your script expects Bearer auth instead, swap to:
+        # if self.sheets_token: headers["Authorization"] = f"Bearer {self.sheets_token}"
+
+        # ---- POST with retries using SHARED session --------------------------
+        session = await get_http_session()
         for attempt in range(1, 4):
             try:
-                session = await get_http_session()
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.post(self.sheets_webhook, json=payload) as resp:
-                        text = await resp.text()
-                        if resp.status < 300:
-                            logger.warning("Sheets ok: %s %s", resp.status, text[:200])
-                            # Accept success JSON or any 2xx
-                            try:
-                                j = json.loads(text)
-                                if isinstance(j, dict) and j.get("status") == "success":
-                                    return True
-                            except Exception:
+                async with session.post(self.sheets_webhook, json=payload, headers=headers) as resp:
+                    text = await resp.text()
+                    if resp.status < 300:
+                        logger.warning("Sheets ok: %s %s", resp.status, text[:200])
+                        try:
+                            j = json.loads(text)
+                            if isinstance(j, dict) and j.get("status") == "success":
                                 return True
-                        else:
-                            logger.error("Sheets POST failed (try %d/3) %s: %s", attempt, resp.status, text[:500])
+                        except Exception:
+                            pass
+                        return True
+                    else:
+                        logger.error("Sheets POST failed (try %d/3) %s: %s", attempt, resp.status, text[:500])
             except Exception as e:
                 logger.error("Sheets POST exception (try %d/3): %s", attempt, e)
             await asyncio.sleep(0.8 * attempt)
@@ -1163,7 +1201,10 @@ class IntegratedTradeTracker:
         logger.error("Sheets integration error: exhausted retries")
         return False
 
-    def _update_daily_stats(self, action, pnl=None):
+    # ---------------------------
+    # DAILY STATS
+    # ---------------------------
+    def _update_daily_stats(self, action: str, pnl: Optional[float] = None) -> None:
         """Update daily statistics."""
         today = datetime.now(timezone.utc).date()
         if today > self.daily_stats['date']:
@@ -1178,9 +1219,12 @@ class IntegratedTradeTracker:
         elif action == 'exit' and pnl is not None:
             if pnl > 0:
                 self.daily_stats['wins'] += 1
-            self.daily_stats['total_pnl'] += pnl
+            self.daily_stats['total_pnl'] += float(pnl)
 
-    async def export_trades_csv(self, days=30):
+    # ---------------------------
+    # CSV EXPORT
+    # ---------------------------
+    async def export_trades_csv(self, days: int = 30) -> Optional[discord.File]:
         """Export trades as CSV file - FIXED BytesIO issue."""
         try:
             channel = self.bot.get_channel(SCROLLS_ORDER_ID)
@@ -1194,12 +1238,12 @@ class IntegratedTradeTracker:
                     trade_data = self._parse_trade_from_message(message)
                     if trade_data:
                         trades.append({
-                            'Timestamp': trade_data['timestamp'].isoformat(),
-                            'Trade_ID': self._extract_trade_id(message),
-                            'Status': 'CLOSED' if trade_data.get('closed') else 'OPEN',
+                            'Timestamp':   trade_data['timestamp'].isoformat(),
+                            'Trade_ID':    self._extract_trade_id(message),
+                            'Status':      'CLOSED' if trade_data.get('closed') else 'OPEN',
                             'PnL_Percent': trade_data.get('pnl', ''),
                             'Exit_Reason': trade_data.get('exit_reason', ''),
-                            'Score': trade_data.get('score', '')
+                            'Score':       trade_data.get('score', '')
                         })
 
             if not trades:
@@ -1215,10 +1259,13 @@ class IntegratedTradeTracker:
             return discord.File(BytesIO(csv_content.encode()), filename=filename)
 
         except Exception as e:
-            logger.error(f"Error exporting trades: {e}")
+            logger.error("Error exporting trades: %s", e)
             return None
 
-    def _parse_trade_from_message(self, message):
+    # ---------------------------
+    # EMBED PARSING HELPERS
+    # ---------------------------
+    def _parse_trade_from_message(self, message) -> Optional[dict]:
         """Extract trade data from Discord message."""
         try:
             embed = message.embeds[0]
@@ -1232,16 +1279,19 @@ class IntegratedTradeTracker:
                     trade_data['exit_reason'] = field.value
                 elif "Score" in field.name:
                     score_str = field.value.split('/')[0]
-                    trade_data['score'] = int(score_str)
-            if "Trade Complete" in embed.title or embed.color == discord.Color.green() or embed.color == discord.Color.red():
+                    try:
+                        trade_data['score'] = int(score_str)
+                    except Exception:
+                        pass
+            if "Trade Complete" in embed.title or embed.color in (discord.Color.green(), discord.Color.red()):
                 trade_data['closed'] = True
             else:
-                trade_data['closed'] = False
+                trade_data['closed'] = trade_data.get('closed', False)
             return trade_data
         except Exception:
             return None
 
-    def _extract_trade_id(self, message):
+    def _extract_trade_id(self, message) -> str:
         """Extract trade ID from message footer."""
         try:
             if message.embeds:
@@ -3605,6 +3655,26 @@ async def cmd_rehydrate(ctx):
     except Exception as e:
         logger.error("rehydrate cmd error: %s", e)
         await ctx.send("❌ Rehydrate failed. Check logs.")
+
+@bot.command(name="sheets_test")
+async def sheets_test(ctx):
+    fake = {
+        "id": f"T-{int(time.time())}",
+        "direction": "Long",
+        "level_name": "H3",
+        "entry_price": 2700.00,
+        "tp1": 2740.50,
+        "tp2": 2781.00,
+        "sl": 2673.00,
+        "score": 5,
+        "knight": "Sir Leonis",
+        "asset": "ETH",
+        "trade_type": "Breakout",
+        "enhanced_data": {"enhanced_score": 5, "market_bias": "Bull", "volume_ratio": 1.3}
+    }
+    ok = await trade_tracker._send_to_sheets(fake, "entry")
+    await ctx.send(f"Sheets test: {'✅ success' if ok else '❌ failed'}")
+
 
 # ============================================
 # NEW AUTOMATED TRACKING COMMANDS
