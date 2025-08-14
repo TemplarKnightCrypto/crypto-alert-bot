@@ -1,5 +1,5 @@
 # ============================================
-# Production_ControlTower_v12.1.4
+# Production_ControlTower_v12.1.5
 # ============================================
 
 import os
@@ -434,6 +434,7 @@ class RateLimiter:
             return True
         return False
 
+
 class TradeSignalEngine:
     def __init__(self, config: TradingConfig):
         self.cfg = config
@@ -485,19 +486,17 @@ class TradeSignalEngine:
     def _pullback_ok(self, recent: pd.DataFrame, level: float, side: str) -> bool:
         if recent is None or len(recent) < 5:
             return False
-        tol = getattr(self.cfg, "wick_tolerance", 0.0015)  # 0.15% default
+        tol = getattr(self.cfg, "wick_tolerance", 0.0015)  # 0.15% default wick allowance
         pulls = 0
         for _, r in recent.iloc[:-1].iterrows():
             lo = float(r["low"]); hi = float(r["high"])
             o = float(r["open"]); c = float(r["close"])
             if side == "long":
-                # All lows must hold above (level - tol)
                 if lo < level * (1 - tol):
                     return False
                 if c < o:
                     pulls += 1
             else:
-                # All highs must hold below (level + tol)
                 if hi > level * (1 + tol):
                     return False
                 if c > o:
@@ -516,7 +515,7 @@ class TradeSignalEngine:
         if signal_type == "breakout":
             base += 1
         if signal_type == "continuation":
-            base += 1  # small nudge so quality continuations can pass min_conf
+            base += 1  # nudge continuations so good ones pass min_conf
         return int(min(base, 6))
 
     def _create_long(
@@ -592,17 +591,14 @@ class TradeSignalEngine:
             return False
         if not self.rate_limiter.acquire():
             return False
-        # per-side cooldown
         key = f"{sig.pair}_{sig.side}"
-        if time.time() < self.cooldown_until[key]:
-            return False
-        # optional global cooldown (pair-wide)
-        if self.cfg.use_global_cooldown and time.time() < self.global_cooldown_until[sig.pair]:
-            return False
-        # dedupe
-        sign = self._signature(sig)
         now = time.time()
-        # purge expired
+        if now < self.cooldown_until[key]:
+            return False
+        if self.cfg.use_global_cooldown and now < self.global_cooldown_until[sig.pair]:
+            return False
+        sign = self._signature(sig)
+        # purge expired signatures
         for k, ts in list(self.recent_signatures.items()):
             if now > ts:
                 self.recent_signatures.pop(k, None)
@@ -619,7 +615,6 @@ class TradeSignalEngine:
         try:
             if df is None or len(df) < 25 or not levels:
                 return None
-
             row = df.iloc[-1]
             prev = df.iloc[-2]
             close = float(row["close"])
@@ -627,20 +622,18 @@ class TradeSignalEngine:
             atr = self._atr(df)
             vol_ratio = self._volume_ratio(df)
 
-            # Scan all common levels in both directions (high -> low, then pivot, then low -> high)
+            # Scan common Camarilla levels both ways (high->low, pivot, low->high)
             ordered_levels = [lvl for lvl in ["H5", "H4", "H3", "PIVOT", "L3", "L4", "L5"] if lvl in levels]
 
-            # ---- Breakouts both ways ----
+            # Breakouts (both directions)
             for lvl in ordered_levels:
                 lv = float(levels[lvl])
-
                 # Upward cross -> long breakout
                 if prev_close <= lv < close and self._confirm_breakout(row, lv, "long", vol_ratio):
                     sig = self._create_long(close, lv, lvl, atr, "breakout", f"{lvl} upward breakout")
                     sig.pair = pair
                     if self._quality_ok(sig):
                         return sig
-
                 # Downward cross -> short breakout
                 if prev_close >= lv > close and self._confirm_breakout(row, lv, "short", vol_ratio):
                     sig = self._create_short(close, lv, lvl, atr, "breakout", f"{lvl} downward breakout")
@@ -648,17 +641,15 @@ class TradeSignalEngine:
                     if self._quality_ok(sig):
                         return sig
 
-            # ---- Continuations both ways (hold beyond level with a pullback) ----
+            # Continuations (hold beyond level with at least one pullback candle)
             recent = df.tail(6)
             for lvl in ordered_levels:
                 lv = float(levels[lvl])
-                # Long continuation (price holding above level with at least one pullback candle)
                 if close > lv and self._pullback_ok(recent, lv, "long"):
                     sig = self._create_long(close, lv, lvl, atr, "continuation", f"{lvl} continuation after pullback")
                     sig.pair = pair
                     if self._quality_ok(sig):
                         return sig
-                # Short continuation (price holding below level with at least one pullback candle)
                 if close < lv and self._pullback_ok(recent, lv, "short"):
                     sig = self._create_short(close, lv, lvl, atr, "continuation", f"{lvl} continuation after pullback")
                     sig.pair = pair
@@ -669,10 +660,6 @@ class TradeSignalEngine:
         except Exception as e:
             log.error("Signal generation error: %s", e)
             return None
-
-
-
-# ===== Database =====
 class DatabaseManager:
     def __init__(self, path: str = "pct_trades.db"):
         self.path = path
