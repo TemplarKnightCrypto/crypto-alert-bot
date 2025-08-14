@@ -1,5 +1,6 @@
+from __future__ import annotations
 # ============================================
-# Production_ControlTower_v12.1.8
+# Production_ControlTower_v12.1.9
 # ============================================
 
 import os
@@ -853,6 +854,7 @@ class GoogleSheetsIntegration:
         self.token = (token or "").strip()
         self.enabled = bool(self.url and self.token)
         self.field_map = {}
+        self.session: Optional[aiohttp.ClientSession] = None
         try:
             raw = os.getenv("SHEETS_FIELD_MAP", "").strip()
             if raw:
@@ -875,40 +877,90 @@ class GoogleSheetsIntegration:
             out[self.field_map.get(k, k)] = v
         return out
 
-    async def send_trade(self, payload: dict, action: str = "CREATE", session: Optional[aiohttp.ClientSession] = None) -> bool:
-        if not self.enabled:
-            return False
-        body = dict(payload)
-        body["action"] = action.upper()
-        body = self._apply_field_map(body)
-        close_me = False
-        try:
-            sess = session
-            if sess is None:
-                timeout = aiohttp.ClientTimeout(total=30)
-                sess = aiohttp.ClientSession(timeout=timeout)
-                close_me = True
-            for attempt in range(3):
-                try:
-                    async with sess.post(self.url, headers=self._headers(), json=body) as resp:
-                        ok = (200 <= resp.status < 300)
-                        if not ok:
-                            text = await resp.text()
-                            log.warning(f"Sheets POST status={resp.status} body={text[:200]}")
-                        return ok
-                except Exception as e:
-                    if attempt == 2:
-                        log.error(f"Sheets POST failed: {e}")
-                        return False
-        finally:
-            if close_me:
-                await sess.close()
+    
+async def send_trade(self, payload: dict, action: str = "CREATE", session: Optional[aiohttp.ClientSession] = None) -> bool:
+    if not self.enabled:
+        return False
+    body = dict(payload)
+    body["action"] = action.upper()
+    body = self._apply_field_map(body)
 
-    async def rehydrate_open_trades(self, session: Optional[aiohttp.ClientSession]) -> List["TradeData"]:
-        """GET ?action=open and build TradeData objects. Returns [] on error/disabled."""
-        out: List[TradeData] = []
-        if not self.enabled:
-            return out
+    sess = session or self.session
+    close_me = False
+    if sess is None:
+        timeout = aiohttp.ClientTimeout(total=30)
+        sess = aiohttp.ClientSession(timeout=timeout)
+        close_me = True
+    try:
+        for attempt in range(3):
+            try:
+                async with sess.post(self.url, headers=self._headers(), json=body) as resp:
+                    ok = (200 <= resp.status < 300)
+                    if not ok:
+                        text = await resp.text()
+                        log.warning(f"Sheets POST status={resp.status} body={text[:200]}")
+                    return ok
+            except Exception as e:
+                if attempt == 2:
+                    log.error(f"Sheets POST failed: {e}")
+                    return False
+    finally:
+        if close_me:
+            await sess.close()
+
+    
+async def rehydrate_open_trades(self, session: Optional[aiohttp.ClientSession]) -> List["TradeData"]:
+    """GET ?action=open and build TradeData objects. Returns [] on error/disabled."""
+    out: List["TradeData"] = []
+    if not self.enabled:
+        return out
+
+    sess = session or self.session
+    close_me = False
+    if sess is None:
+        timeout = aiohttp.ClientTimeout(total=30)
+        sess = aiohttp.ClientSession(timeout=timeout)
+        close_me = True
+    try:
+        params = {"action": "open"}
+        for attempt in range(3):
+            try:
+                async with sess.get(self.url, headers=self._headers(), params=params) as resp:
+                    if not (200 <= resp.status < 300):
+                        txt = await resp.text()
+                        log.warning(f"Sheets GET status={resp.status} body={txt[:200]}")
+                        return out
+                    data = await resp.json(content_type=None)
+                    rows = data.get("rows") if isinstance(data, dict) else None
+                    if not rows:
+                        return out
+                    for r in rows:
+                        try:
+                            td = TradeData(
+                                id=str(r.get("id")),
+                                pair=str(r.get("pair", "ETHUSD")),
+                                side=str(r.get("side", "long")).lower(),
+                                entry=float(r.get("entry_price")) if r.get("entry_price") is not None else None,
+                                stop=float(r.get("stop_loss")) if r.get("stop_loss") is not None else None,
+                                tp1=float(r.get("take_profit_1")) if r.get("take_profit_1") is not None else None,
+                                tp2=float(r.get("take_profit_2")) if r.get("take_profit_2") is not None else None,
+                                level_name=str(r.get("level_name", "")),
+                                level_price=float(r.get("level_price")) if r.get("level_price") is not None else None,
+                                signal_type=str(r.get("signal_type", "")),
+                                confidence=int(r.get("confidence", 0)),
+                            )
+                            out.append(td)
+                        except Exception:
+                            continue
+                    return out
+            except Exception as e:
+                if attempt == 2:
+                    log.error(f"Sheets GET failed: {e}")
+                    return out
+    finally:
+        if close_me:
+            await sess.close()
+    return out
         if session is None:
             timeout = aiohttp.ClientTimeout(total=30)
             session = aiohttp.ClientSession(timeout=timeout)
@@ -955,6 +1007,19 @@ class GoogleSheetsIntegration:
             if close_me:
                 await session.close()
         return out
+
+
+async def start(self):
+    """Create a persistent aiohttp session (optional, used by bot.on_ready)."""
+    if self.session is None:
+        timeout = aiohttp.ClientTimeout(total=30)
+        self.session = aiohttp.ClientSession(timeout=timeout)
+
+async def stop(self):
+    """Close the persistent session if opened."""
+    if self.session is not None:
+        await self.session.close()
+        self.session = None
 class TradeManager:
     def __init__(self, cfg: BotConfig, db: DatabaseManager):
         self.cfg = cfg
