@@ -1,5 +1,5 @@
 # ============================================
-# Production_ControlTower_v12.1.3
+# Production_ControlTower_v12.1.4
 # ============================================
 
 import os
@@ -445,13 +445,13 @@ class TradeSignalEngine:
 
     def _signature(self, sig: Signal) -> str:
         bucket = int(sig.timestamp / (self.cfg.cooldown_seconds or 60))  # coarse time bucket
-        return f"{sig.pair}|{sig.side}|{sig.level_name}|{sig.signal_type}|{round(sig.entry,2)}|{bucket}"
+        return f"{sig.pair}|{sig.side}|{sig.level_name}|{sig.signal_type}|{round(sig.entry, 2)}|{bucket}"
 
     def _volume_ratio(self, df: pd.DataFrame, lookback: int = 20) -> float:
         if df is None or len(df) < lookback + 1:
             return 1.0
         cur = float(df.iloc[-1]["volume"] or 0.0)
-        avg = float(df["volume"].iloc[-(lookback+1):-1].mean() or 0.0)
+        avg = float(df["volume"].iloc[-(lookback + 1):-1].mean() or 0.0)
         return (cur / avg) if avg > 0 else 1.0
 
     def _atr(self, df: pd.DataFrame, period: int = 14) -> Optional[float]:
@@ -469,28 +469,39 @@ class TradeSignalEngine:
             return None
 
     def _confirm_breakout(self, row: pd.Series, level: float, side: str, vol_ratio: float) -> bool:
-        o = float(row["open"]); h=float(row["high"]); l=float(row["low"]); c=float(row["close"])
+        o = float(row["open"]); h = float(row["high"]); l = float(row["low"]); c = float(row["close"])
         rng = max(h - l, 1e-9)
         body = abs(c - o) / rng
         if body < self.cfg.body_ratio_threshold:
             return False
         if vol_ratio < self.cfg.volume_multiplier:
             return False
-        if side == "long" and c <= level: return False
-        if side == "short" and c >= level: return False
+        if side == "long" and c <= level:
+            return False
+        if side == "short" and c >= level:
+            return False
         return True
 
     def _pullback_ok(self, recent: pd.DataFrame, level: float, side: str) -> bool:
         if recent is None or len(recent) < 5:
             return False
+        tol = getattr(self.cfg, "wick_tolerance", 0.0015)  # 0.15% default
         pulls = 0
         for _, r in recent.iloc[:-1].iterrows():
+            lo = float(r["low"]); hi = float(r["high"])
+            o = float(r["open"]); c = float(r["close"])
             if side == "long":
-                if float(r["low"]) < level: return False
-                if float(r["close"]) < float(r["open"]): pulls += 1
+                # All lows must hold above (level - tol)
+                if lo < level * (1 - tol):
+                    return False
+                if c < o:
+                    pulls += 1
             else:
-                if float(r["high"]) > level: return False
-                if float(r["close"]) > float(r["open"]): pulls += 1
+                # All highs must hold below (level + tol)
+                if hi > level * (1 + tol):
+                    return False
+                if c > o:
+                    pulls += 1
         return pulls >= 1
 
     def _confidence(self, entry: float, sl: float, tp1: float, signal_type: str) -> int:
@@ -498,36 +509,81 @@ class TradeSignalEngine:
         risk = abs(entry - sl)
         reward = abs(tp1 - entry)
         rr = reward / risk if risk > 0 else 0.0
-        if rr >= 2.0: base += 1
-        if rr >= 3.0: base += 1
-        if signal_type == "breakout": base += 1
+        if rr >= 2.0:
+            base += 1
+        if rr >= 3.0:
+            base += 1
+        if signal_type == "breakout":
+            base += 1
+        if signal_type == "continuation":
+            base += 1  # small nudge so quality continuations can pass min_conf
         return int(min(base, 6))
 
-    def _create_long(self, entry: float, level: float, level_name: str = "H5", atr: Optional[float] = None, signal_type: str = "breakout", reason: str = "") -> Signal:
+    def _create_long(
+        self,
+        entry: float,
+        level: float,
+        level_name: str = "H5",
+        atr: Optional[float] = None,
+        signal_type: str = "breakout",
+        reason: str = ""
+    ) -> Signal:
+        # SL: tighter of 1% or half ATR below level (if ATR available)
+        sl = max(entry * 0.99, level - (0.5 * (atr or 0.0))) if atr else entry * 0.99
+        risk = entry - sl
+        tp1 = entry + (risk * 1.5)
+        tp2 = entry + (risk * 3.0)
+        conf = self._confidence(entry, sl, tp1, signal_type)
+        rr = (tp1 - entry) / (entry - sl) if entry != sl else 0.0
+        return Signal(
+            pair="ETHUSD",
+            side="long",
+            level_name=level_name,
+            level_price=level,
+            entry=entry,
+            sl=sl,
+            tp1=tp1,
+            tp2=tp2,
+            timestamp=int(time.time()),
+            signal_type=signal_type,
+            reason=reason,
+            confidence=conf,
+            risk_reward_ratio=rr,
+            atr=atr,
+        )
 
-sl = max(entry * 0.99, level - (0.5 * (atr or 0.0))) if atr else entry * 0.99
-risk = entry - sl
-tp1 = entry + (risk * 1.5)
-tp2 = entry + (risk * 3.0)
-conf = self._confidence(entry, sl, tp1, signal_type)
-rr = (tp1 - entry) / (entry - sl) if entry != sl else 0.0
-return Signal(pair="ETHUSD", side="long", level_name=level_name, level_price=level, entry=entry,
-              sl=sl, tp1=tp1, tp2=tp2, timestamp=int(time.time()), signal_type=signal_type,
-              reason=reason, confidence=conf, risk_reward_ratio=rr, atr=atr)
-
-
-    def _create_short(self, entry: float, level: float, level_name: str = "L5", atr: Optional[float] = None, signal_type: str = "breakout", reason: str = "") -> Signal:
-
-sl = min(entry * 1.01, level + (0.5 * (atr or 0.0))) if atr else entry * 1.01
-risk = sl - entry
-tp1 = entry - (risk * 1.5)
-tp2 = entry - (risk * 3.0)
-conf = self._confidence(entry, sl, tp1, signal_type)
-rr = (entry - tp1) / (sl - entry) if sl != entry else 0.0
-return Signal(pair="ETHUSD", side="short", level_name=level_name, level_price=level, entry=entry,
-              sl=sl, tp1=tp1, tp2=tp2, timestamp=int(time.time()), signal_type=signal_type,
-              reason=reason, confidence=conf, risk_reward_ratio=rr, atr=atr)
-
+    def _create_short(
+        self,
+        entry: float,
+        level: float,
+        level_name: str = "L5",
+        atr: Optional[float] = None,
+        signal_type: str = "breakout",
+        reason: str = ""
+    ) -> Signal:
+        # SL: tighter of 1% or half ATR above level (if ATR available)
+        sl = min(entry * 1.01, level + (0.5 * (atr or 0.0))) if atr else entry * 1.01
+        risk = sl - entry
+        tp1 = entry - (risk * 1.5)
+        tp2 = entry - (risk * 3.0)
+        conf = self._confidence(entry, sl, tp1, signal_type)
+        rr = (entry - tp1) / (sl - entry) if sl != entry else 0.0
+        return Signal(
+            pair="ETHUSD",
+            side="short",
+            level_name=level_name,
+            level_price=level,
+            entry=entry,
+            sl=sl,
+            tp1=tp1,
+            tp2=tp2,
+            timestamp=int(time.time()),
+            signal_type=signal_type,
+            reason=reason,
+            confidence=conf,
+            risk_reward_ratio=rr,
+            atr=atr,
+        )
 
     def _quality_ok(self, sig: Signal) -> bool:
         if sig.confidence < self.cfg.signal_confidence_min:
@@ -545,8 +601,8 @@ return Signal(pair="ETHUSD", side="short", level_name=level_name, level_price=le
             return False
         # dedupe
         sign = self._signature(sig)
-        # purge expired
         now = time.time()
+        # purge expired
         for k, ts in list(self.recent_signatures.items()):
             if now > ts:
                 self.recent_signatures.pop(k, None)
@@ -559,17 +615,20 @@ return Signal(pair="ETHUSD", side="short", level_name=level_name, level_price=le
         self.recent_signatures[sign] = now + self.recent_ttl
         return True
 
-    
-def generate(self, df: pd.DataFrame, levels: Dict[str, float], pair: str) -> Optional[Signal]:
+    def generate(self, df: pd.DataFrame, levels: Dict[str, float], pair: str) -> Optional[Signal]:
         try:
             if df is None or len(df) < 25 or not levels:
                 return None
-            row = df.iloc[-1]; prev = df.iloc[-2]
-            close = float(row["close"]); prev_close = float(prev["close"])
-            atr = self._atr(df); vol_ratio = self._volume_ratio(df)
 
-            # Consider all standard levels bi-directionally
-            ordered_levels = [lvl for lvl in ["H5","H4","H3","PIVOT","L3","L4","L5"] if lvl in levels]
+            row = df.iloc[-1]
+            prev = df.iloc[-2]
+            close = float(row["close"])
+            prev_close = float(prev["close"])
+            atr = self._atr(df)
+            vol_ratio = self._volume_ratio(df)
+
+            # Scan all common levels in both directions (high -> low, then pivot, then low -> high)
+            ordered_levels = [lvl for lvl in ["H5", "H4", "H3", "PIVOT", "L3", "L4", "L5"] if lvl in levels]
 
             # ---- Breakouts both ways ----
             for lvl in ordered_levels:
@@ -589,15 +648,17 @@ def generate(self, df: pd.DataFrame, levels: Dict[str, float], pair: str) -> Opt
                     if self._quality_ok(sig):
                         return sig
 
-            # ---- Continuations both ways (hold with pullback) ----
+            # ---- Continuations both ways (hold beyond level with a pullback) ----
             recent = df.tail(6)
             for lvl in ordered_levels:
                 lv = float(levels[lvl])
+                # Long continuation (price holding above level with at least one pullback candle)
                 if close > lv and self._pullback_ok(recent, lv, "long"):
                     sig = self._create_long(close, lv, lvl, atr, "continuation", f"{lvl} continuation after pullback")
                     sig.pair = pair
                     if self._quality_ok(sig):
                         return sig
+                # Short continuation (price holding below level with at least one pullback candle)
                 if close < lv and self._pullback_ok(recent, lv, "short"):
                     sig = self._create_short(close, lv, lvl, atr, "continuation", f"{lvl} continuation after pullback")
                     sig.pair = pair
@@ -608,6 +669,7 @@ def generate(self, df: pd.DataFrame, levels: Dict[str, float], pair: str) -> Opt
         except Exception as e:
             log.error("Signal generation error: %s", e)
             return None
+
 
 
 # ===== Database =====
