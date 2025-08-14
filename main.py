@@ -1,5 +1,5 @@
 # ============================================
-# Production_ControlTower_v12.1
+# Production_ControlTower_v12.1.3
 # ============================================
 
 import os
@@ -503,27 +503,31 @@ class TradeSignalEngine:
         if signal_type == "breakout": base += 1
         return int(min(base, 6))
 
-    def _create_long(self, entry: float, level: float, atr: Optional[float], signal_type: str, reason: str) -> Signal:
-        sl = max(entry * 0.99, level - (0.5 * (atr or 0.0))) if atr else entry * 0.99
-        risk = entry - sl
-        tp1 = entry + (risk * 1.5)
-        tp2 = entry + (risk * 3.0)
-        conf = self._confidence(entry, sl, tp1, signal_type)
-        rr = (tp1 - entry) / (entry - sl) if entry != sl else 0.0
-        return Signal(pair="ETHUSD", side="long", level_name="H5", level_price=level, entry=entry,
-                      sl=sl, tp1=tp1, tp2=tp2, timestamp=int(time.time()), signal_type=signal_type,
-                      reason=reason, confidence=conf, risk_reward_ratio=rr, atr=atr)
+    def _create_long(self, entry: float, level: float, level_name: str = "H5", atr: Optional[float] = None, signal_type: str = "breakout", reason: str = "") -> Signal:
 
-    def _create_short(self, entry: float, level: float, atr: Optional[float], signal_type: str, reason: str) -> Signal:
-        sl = min(entry * 1.01, level + (0.5 * (atr or 0.0))) if atr else entry * 1.01
-        risk = sl - entry
-        tp1 = entry - (risk * 1.5)
-        tp2 = entry - (risk * 3.0)
-        conf = self._confidence(entry, sl, tp1, signal_type)
-        rr = (entry - tp1) / (sl - entry) if sl != entry else 0.0
-        return Signal(pair="ETHUSD", side="short", level_name="L5", level_price=level, entry=entry,
-                      sl=sl, tp1=tp1, tp2=tp2, timestamp=int(time.time()), signal_type=signal_type,
-                      reason=reason, confidence=conf, risk_reward_ratio=rr, atr=atr)
+sl = max(entry * 0.99, level - (0.5 * (atr or 0.0))) if atr else entry * 0.99
+risk = entry - sl
+tp1 = entry + (risk * 1.5)
+tp2 = entry + (risk * 3.0)
+conf = self._confidence(entry, sl, tp1, signal_type)
+rr = (tp1 - entry) / (entry - sl) if entry != sl else 0.0
+return Signal(pair="ETHUSD", side="long", level_name=level_name, level_price=level, entry=entry,
+              sl=sl, tp1=tp1, tp2=tp2, timestamp=int(time.time()), signal_type=signal_type,
+              reason=reason, confidence=conf, risk_reward_ratio=rr, atr=atr)
+
+
+    def _create_short(self, entry: float, level: float, level_name: str = "L5", atr: Optional[float] = None, signal_type: str = "breakout", reason: str = "") -> Signal:
+
+sl = min(entry * 1.01, level + (0.5 * (atr or 0.0))) if atr else entry * 1.01
+risk = sl - entry
+tp1 = entry - (risk * 1.5)
+tp2 = entry - (risk * 3.0)
+conf = self._confidence(entry, sl, tp1, signal_type)
+rr = (entry - tp1) / (sl - entry) if sl != entry else 0.0
+return Signal(pair="ETHUSD", side="short", level_name=level_name, level_price=level, entry=entry,
+              sl=sl, tp1=tp1, tp2=tp2, timestamp=int(time.time()), signal_type=signal_type,
+              reason=reason, confidence=conf, risk_reward_ratio=rr, atr=atr)
+
 
     def _quality_ok(self, sig: Signal) -> bool:
         if sig.confidence < self.cfg.signal_confidence_min:
@@ -555,7 +559,8 @@ class TradeSignalEngine:
         self.recent_signatures[sign] = now + self.recent_ttl
         return True
 
-    def generate(self, df: pd.DataFrame, levels: Dict[str, float], pair: str) -> Optional[Signal]:
+    
+def generate(self, df: pd.DataFrame, levels: Dict[str, float], pair: str) -> Optional[Signal]:
         try:
             if df is None or len(df) < 25 or not levels:
                 return None
@@ -563,37 +568,47 @@ class TradeSignalEngine:
             close = float(row["close"]); prev_close = float(prev["close"])
             atr = self._atr(df); vol_ratio = self._volume_ratio(df)
 
-            # Breakout
-            # H5 long
-            if "H5" in levels:
-                h5 = float(levels["H5"])
-                if prev_close <= h5 < close and self._confirm_breakout(row, h5, "long", vol_ratio):
-                    sig = self._create_long(close, h5, atr, "breakout", "H5 breakout with confirmation")
-                    sig.pair = pair
-                    if self._quality_ok(sig): return sig
-            # L5 short
-            if "L5" in levels:
-                l5 = float(levels["L5"])
-                if prev_close >= l5 > close and self._confirm_breakout(row, l5, "short", vol_ratio):
-                    sig = self._create_short(close, l5, atr, "breakout", "L5 breakout with confirmation")
-                    sig.pair = pair
-                    if self._quality_ok(sig): return sig
+            # Consider all standard levels bi-directionally
+            ordered_levels = [lvl for lvl in ["H5","H4","H3","PIVOT","L3","L4","L5"] if lvl in levels]
 
-            # Continuation (pullback hold)
+            # ---- Breakouts both ways ----
+            for lvl in ordered_levels:
+                lv = float(levels[lvl])
+
+                # Upward cross -> long breakout
+                if prev_close <= lv < close and self._confirm_breakout(row, lv, "long", vol_ratio):
+                    sig = self._create_long(close, lv, lvl, atr, "breakout", f"{lvl} upward breakout")
+                    sig.pair = pair
+                    if self._quality_ok(sig):
+                        return sig
+
+                # Downward cross -> short breakout
+                if prev_close >= lv > close and self._confirm_breakout(row, lv, "short", vol_ratio):
+                    sig = self._create_short(close, lv, lvl, atr, "breakout", f"{lvl} downward breakout")
+                    sig.pair = pair
+                    if self._quality_ok(sig):
+                        return sig
+
+            # ---- Continuations both ways (hold with pullback) ----
             recent = df.tail(6)
-            if "H5" in levels and close > float(levels["H5"]) and self._pullback_ok(recent, float(levels["H5"]), "long"):
-                sig = self._create_long(close, float(levels["H5"]), atr, "continuation", "H5 continuation after pullback")
-                sig.pair = pair
-                if self._quality_ok(sig): return sig
-            if "L5" in levels and close < float(levels["L5"]) and self._pullback_ok(recent, float(levels["L5"]), "short"):
-                sig = self._create_short(close, float(levels["L5"]), atr, "continuation", "L5 continuation after pullback")
-                sig.pair = pair
-                if self._quality_ok(sig): return sig
+            for lvl in ordered_levels:
+                lv = float(levels[lvl])
+                if close > lv and self._pullback_ok(recent, lv, "long"):
+                    sig = self._create_long(close, lv, lvl, atr, "continuation", f"{lvl} continuation after pullback")
+                    sig.pair = pair
+                    if self._quality_ok(sig):
+                        return sig
+                if close < lv and self._pullback_ok(recent, lv, "short"):
+                    sig = self._create_short(close, lv, lvl, atr, "continuation", f"{lvl} continuation after pullback")
+                    sig.pair = pair
+                    if self._quality_ok(sig):
+                        return sig
 
             return None
         except Exception as e:
             log.error("Signal generation error: %s", e)
             return None
+
 
 # ===== Database =====
 class DatabaseManager:
