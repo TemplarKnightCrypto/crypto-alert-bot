@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: crypto-alert-bot
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python main.py"
+    runtime: python
+    envVars:
+      - key: TOKEN
+        sync: false
